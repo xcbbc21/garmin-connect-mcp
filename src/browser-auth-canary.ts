@@ -6,11 +6,11 @@ import {
   type GarminDiSessionTokens,
 } from './session-store'
 import { PublicToolError } from './utils/errors'
+import { isUsableGarminServiceTicket } from './service-ticket'
 
 const DI_GRANT_TYPE =
   'https://connectapi.garmin.com/di-oauth2-service/oauth/grant/service_ticket'
 const PROFILE_PATH = '/userprofile-service/socialProfile'
-const SERVICE_TICKET_PATTERN = /^ST-[A-Za-z0-9._~-]+$/
 const REQUEST_TIMEOUT_MS = 30_000
 const MAX_OBSERVED_RESPONSE_BYTES = 64 * 1024
 const MAX_TOKEN_RESPONSE_BYTES = 64 * 1024
@@ -99,6 +99,8 @@ export interface BrowserCaptureOptions {
   signal?: AbortSignal
   /** Report only fixed, data-free lifecycle stages. */
   onStage?: (stage: BrowserDiAuthCanaryStage) => void
+  /** Consume one service ticket intercepted from the blocked app redirect. */
+  onServiceTicket(serviceTicket: string): Promise<boolean>
   /** Return true once the adapter can close its temporary browser context. */
   onResponse(response: BrowserObservedResponse): Promise<boolean>
 }
@@ -155,6 +157,22 @@ export interface CapturedServiceTicketDiCanaryOptions {
 
 export interface CapturedServiceTicketDiCanaryDependencies {
   http: BrowserDiAuthCanaryHttp
+}
+
+export type GarminTicketServiceTarget = 'connect-app' | 'sso-embed'
+
+export interface CapturedServiceTicketDiAuthSetupOptions
+  extends CapturedServiceTicketDiCanaryOptions {
+  serviceTarget: 'sso-embed'
+  username: string
+  sessionTokenFile: string
+  confirmIdentity(identity: BrowserDiProfileIdentity): Promise<boolean>
+}
+
+export interface CapturedServiceTicketDiAuthSetupDependencies
+  extends CapturedServiceTicketDiCanaryDependencies {
+  now?(): number
+  writeSession(path: string, session: GarminDiSessionFile): Promise<void>
 }
 
 export interface BrowserDiAuthCanaryResult {
@@ -245,53 +263,114 @@ export async function runBrowserDiAuthSetup(
       options.signal,
       reportStage,
       dependencies.now ?? Date.now,
-      async (exchanged, profile, observedAtMs) => {
-        let verifiedProfile: VerifiedProfileIdentity
-        let session: GarminDiSessionFile
-        try {
-          verifiedProfile = verifiedProfileIdentity(profile)
-        } catch {
-          throw new PublicToolError(SESSION_FAILED_MESSAGE)
-        }
-
-        throwIfAborted(options.signal)
-        let confirmed: boolean
-        try {
-          confirmed = await options.confirmIdentity(verifiedProfile.publicIdentity)
-        } catch {
-          throwIfAborted(options.signal)
-          throw new PublicToolError(IDENTITY_CONFIRMATION_FAILED_MESSAGE)
-        }
-        throwIfAborted(options.signal)
-        if (confirmed !== true) {
-          throw new PublicToolError(IDENTITY_CONFIRMATION_DECLINED_MESSAGE)
-        }
-
-        try {
-          session = bindDiSessionTokensToAccount(
-            sessionTokensFromExchange(exchanged, observedAtMs),
-            options.username,
-            options.region,
-            verifiedProfile.profileId,
-          )
-        } catch {
-          throw new PublicToolError(SESSION_FAILED_MESSAGE)
-        }
-
-        // The atomic writer is the commit point. Honour cancellation before it
-        // starts, then await it fully so the CLI cannot report cancellation
-        // while a complete session has actually been installed.
-        throwIfAborted(options.signal)
-        try {
-          await dependencies.writeSession(options.sessionTokenFile, session)
-        } catch {
-          throw new PublicToolError(SESSION_WRITE_FAILED_MESSAGE)
-        }
-      },
+      createPersistSessionConsumer(options, dependencies),
     )
     return { ok: true, region: options.region, persisted: true }
   } finally {
     serviceTicket = undefined
+  }
+}
+
+/** Exchange an iframe-captured ticket and atomically install the bound DI session. */
+export async function runCapturedServiceTicketDiAuthSetup(
+  options: CapturedServiceTicketDiAuthSetupOptions,
+  dependencies: CapturedServiceTicketDiAuthSetupDependencies,
+): Promise<BrowserDiAuthSetupResult> {
+  assertCanaryRegion(options.region)
+  if (options.serviceTarget !== 'sso-embed') {
+    throw new PublicToolError('Garmin embedded authentication service is invalid')
+  }
+  if (!isUsableGarminServiceTicket(options.serviceTicket)) {
+    throw new PublicToolError(TICKET_MISSING_MESSAGE)
+  }
+  if (
+    !isNonEmptyText(options.username)
+    || !isNonEmptyText(options.sessionTokenFile)
+    || typeof options.confirmIdentity !== 'function'
+  ) {
+    throw new PublicToolError(SESSION_FAILED_MESSAGE)
+  }
+  throwIfAborted(options.signal)
+
+  let serviceTicket: string | undefined = options.serviceTicket
+  try {
+    await authenticateCapturedServiceTicket(
+      serviceTicket,
+      endpointsFor(options.region, options.serviceTarget),
+      dependencies.http,
+      options.signal,
+      createStageReporter(options.onStage),
+      dependencies.now ?? Date.now,
+      createPersistSessionConsumer(options, dependencies),
+    )
+    return { ok: true, region: options.region, persisted: true }
+  } finally {
+    serviceTicket = undefined
+  }
+}
+
+interface PersistSessionOptions {
+  region: GarminRegion
+  username: string
+  sessionTokenFile: string
+  signal?: AbortSignal
+  confirmIdentity(identity: BrowserDiProfileIdentity): Promise<boolean>
+}
+
+interface PersistSessionDependencies {
+  writeSession(path: string, session: GarminDiSessionFile): Promise<void>
+}
+
+function createPersistSessionConsumer(
+  options: PersistSessionOptions,
+  dependencies: PersistSessionDependencies,
+): (
+  exchanged: ExchangedDiTokens,
+  profile: Record<string, unknown>,
+  observedAtMs: number | undefined,
+) => Promise<void> {
+  return async (exchanged, profile, observedAtMs) => {
+    let verifiedProfile: VerifiedProfileIdentity
+    let session: GarminDiSessionFile
+    try {
+      verifiedProfile = verifiedProfileIdentity(profile)
+    } catch {
+      throw new PublicToolError(SESSION_FAILED_MESSAGE)
+    }
+
+    throwIfAborted(options.signal)
+    let confirmed: boolean
+    try {
+      confirmed = await options.confirmIdentity(verifiedProfile.publicIdentity)
+    } catch {
+      throwIfAborted(options.signal)
+      throw new PublicToolError(IDENTITY_CONFIRMATION_FAILED_MESSAGE)
+    }
+    throwIfAborted(options.signal)
+    if (confirmed !== true) {
+      throw new PublicToolError(IDENTITY_CONFIRMATION_DECLINED_MESSAGE)
+    }
+
+    try {
+      session = bindDiSessionTokensToAccount(
+        sessionTokensFromExchange(exchanged, observedAtMs),
+        options.username,
+        options.region,
+        verifiedProfile.profileId,
+      )
+    } catch {
+      throw new PublicToolError(SESSION_FAILED_MESSAGE)
+    }
+
+    // The atomic writer is the commit point. Honour cancellation before it
+    // starts, then await it fully so callers cannot report cancellation while
+    // a complete session has actually been installed.
+    throwIfAborted(options.signal)
+    try {
+      await dependencies.writeSession(options.sessionTokenFile, session)
+    } catch {
+      throw new PublicToolError(SESSION_WRITE_FAILED_MESSAGE)
+    }
   }
 }
 
@@ -302,6 +381,13 @@ async function captureBrowserServiceTicket(
   reportStage: (stage: BrowserDiAuthCanaryStage) => void,
 ): Promise<string> {
   let serviceTicket: string | undefined
+  const acceptServiceTicket = (candidate: unknown): boolean => {
+    if (serviceTicket) return true
+    if (!isUsableGarminServiceTicket(candidate)) return false
+    serviceTicket = candidate
+    reportStage('ticket_captured')
+    return true
+  }
   try {
     await browser.openAndCapture({
       portalUrl: endpoints.portalUrl,
@@ -311,6 +397,7 @@ async function captureBrowserServiceTicket(
       maxObservedResponseBytes: MAX_OBSERVED_RESPONSE_BYTES,
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onStage ? { onStage: reportStage } : {}),
+      onServiceTicket: async candidate => acceptServiceTicket(candidate),
       onResponse: async (response) => {
         if (serviceTicket) return true
         if (!isAllowedPortalResponseUrl(
@@ -329,9 +416,7 @@ async function captureBrowserServiceTicket(
           return false
         }
         if (!isSuccessfulTicketResponse(body)) return false
-        serviceTicket = body.serviceTicketId
-        reportStage('ticket_captured')
-        return true
+        return acceptServiceTicket(body.serviceTicketId)
       },
     })
   } catch (error) {
@@ -351,7 +436,7 @@ export async function runCapturedServiceTicketDiCanary(
   dependencies: CapturedServiceTicketDiCanaryDependencies,
 ): Promise<BrowserDiAuthCanaryResult> {
   assertCanaryRegion(options.region)
-  if (!isUsableServiceTicket(options.serviceTicket)) {
+  if (!isUsableGarminServiceTicket(options.serviceTicket)) {
     throw new PublicToolError(TICKET_MISSING_MESSAGE)
   }
   throwIfAborted(options.signal)
@@ -531,11 +616,16 @@ interface RegionEndpoints {
   profileUrl: string
 }
 
-function endpointsFor(region: GarminRegion): RegionEndpoints {
+function endpointsFor(
+  region: GarminRegion,
+  serviceTarget: GarminTicketServiceTarget = 'connect-app',
+): RegionEndpoints {
   const domain = region === 'cn' ? 'garmin.cn' : 'garmin.com'
   const ssoOrigin = `https://sso.${domain}`
   const connectOrigin = `https://connect.${domain}`
-  const serviceUrl = `${connectOrigin}/app`
+  const serviceUrl = serviceTarget === 'sso-embed'
+    ? `${ssoOrigin}/sso/embed`
+    : `${connectOrigin}/app`
   const signin = new URL(`${ssoOrigin}/portal/sso/en-US/sign-in`)
   signin.searchParams.set('clientId', 'GarminConnect')
   signin.searchParams.set('service', serviceUrl)
@@ -791,13 +881,7 @@ function isSuccessfulTicketResponse(
   const ticket = value.serviceTicketId
   return value.responseStatus.type === 'SUCCESSFUL'
     && typeof ticket === 'string'
-    && isUsableServiceTicket(ticket)
-}
-
-function isUsableServiceTicket(ticket: unknown): ticket is string {
-  return typeof ticket === 'string'
-    && ticket.length <= 2048
-    && SERVICE_TICKET_PATTERN.test(ticket)
+    && isUsableGarminServiceTicket(ticket)
 }
 
 function assertCanaryRegion(region: unknown): asserts region is GarminRegion {

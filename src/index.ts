@@ -1,6 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Config, resolveConfig } from './config'
 import { GarminClient } from './client'
+import { registerEmbeddedAuthRpc } from './embedded-auth-rpc'
 import { registerTools } from './tools'
 
 export const name = 'garmin-connect'
@@ -18,4 +19,8 @@ export function apply(ctx: Context, config: Config) {
 
   // Register all AI-callable tools
   registerTools(ctx, client, resolvedConfig)
+
+  // Compatible DSH hosts gain an optional loopback-only browser sign-in UI.
+  // The Garmin ticket and resulting session never cross into the web client.
+  registerEmbeddedAuthRpc(ctx, resolvedConfig)
 }

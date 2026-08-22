@@ -1,5 +1,6 @@
 import {
   runCapturedServiceTicketDiCanary,
+  runCapturedServiceTicketDiAuthSetup,
   runBrowserDiAuthSetup,
   runBrowserDiAuthCanary,
   type BrowserDiAuthCanaryDependencies,
@@ -64,6 +65,62 @@ function successfulFixture(region: 'global' | 'cn' = 'global') {
 }
 
 describe('experimental browser DI authentication canary', () => {
+  it.each([
+    ['global' as const, 'https://sso.garmin.com/sso/embed'],
+    ['cn' as const, 'https://sso.garmin.cn/sso/embed'],
+  ])('persists a captured $region embedded-widget ticket using its exact service', async (
+    region,
+    expectedServiceUrl,
+  ) => {
+    const { http } = successfulFixture(region)
+    const writeSession = jest.fn().mockResolvedValue(undefined)
+    const confirmIdentity = jest.fn().mockResolvedValue(true)
+
+    const result = await runCapturedServiceTicketDiAuthSetup(
+      {
+        region,
+        serviceTarget: 'sso-embed',
+        serviceTicket: 'ST-embedded-widget-ticket',
+        username: 'runner@example.test',
+        sessionTokenFile: '/private/account/session.json',
+        confirmIdentity,
+      },
+      {
+        http,
+        now: () => 1_800_000_000_000,
+        writeSession,
+      },
+    )
+
+    expect(result).toEqual({ ok: true, region, persisted: true })
+    expect(JSON.stringify(result)).not.toMatch(/runner|ticket|access|refresh|profile/i)
+    const exchangeBody = new URLSearchParams(http.request.mock.calls[0][0].body)
+    expect(exchangeBody.get('service_ticket')).toBe('ST-embedded-widget-ticket')
+    expect(exchangeBody.get('service_url')).toBe(expectedServiceUrl)
+    expect(confirmIdentity).toHaveBeenCalledWith({ displayName: 'Private Runner' })
+    expect(writeSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects an arbitrary captured-ticket service before HTTP or persistence', async () => {
+    const { http } = successfulFixture('cn')
+    const writeSession = jest.fn()
+
+    await expect(runCapturedServiceTicketDiAuthSetup(
+      {
+        region: 'cn',
+        serviceTarget: 'https://attacker.test/callback' as 'sso-embed',
+        serviceTicket: 'ST-valid-shape',
+        username: 'runner@example.test',
+        sessionTokenFile: '/private/account/session.json',
+        confirmIdentity: jest.fn().mockResolvedValue(true),
+      },
+      { http, writeSession },
+    )).rejects.toThrow('Garmin embedded authentication service is invalid')
+
+    expect(http.request).not.toHaveBeenCalled()
+    expect(writeSession).not.toHaveBeenCalled()
+  })
+
   it('persists a bounded account-bound DI session without returning secrets', async () => {
     const { dependencies } = successfulFixture('cn')
     const nowMs = 1_800_000_000_000
@@ -595,6 +652,7 @@ describe('experimental browser DI authentication canary', () => {
         searchParameter: 'ticket',
       },
       maxObservedResponseBytes: 64 * 1024,
+      onServiceTicket: expect.any(Function),
       onResponse: expect.any(Function),
     })
     expect(http.request).toHaveBeenCalledTimes(2)

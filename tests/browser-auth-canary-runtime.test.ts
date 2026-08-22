@@ -87,6 +87,7 @@ function captureOptions(
       searchParameter: 'ticket',
     },
     maxObservedResponseBytes: 64 * 1024,
+    onServiceTicket: async () => true,
     onResponse,
   }
 }
@@ -144,6 +145,85 @@ describe('browser DI canary runtime adapters', () => {
     expect(fixture.page.close).toHaveBeenCalledTimes(1)
     expect(fixture.context.close).toHaveBeenCalledTimes(1)
     expect(fixture.browser.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('captures an exact main-frame ticket redirect when portal JSON has no ticket', async () => {
+    const fixture = browserFixture()
+    const abort = jest.fn().mockResolvedValue(undefined)
+    const continueRequest = jest.fn().mockResolvedValue(undefined)
+    const onResponse = jest.fn().mockResolvedValue(false)
+    const onServiceTicket = jest.fn().mockResolvedValue(true)
+    fixture.page.goto.mockImplementationOnce(async () => {
+      fixture.handlers.get('response')?.(fixture.response)
+      await fixture.getRouteHandler()?.({
+        request: () => ({
+          url: () => 'https://connect.garmin.cn/app?ticket=ST-FAKE-route-capture',
+          method: () => 'GET',
+          isNavigationRequest: () => true,
+          frame: () => fixture.mainFrame,
+        }),
+        abort,
+        continue: continueRequest,
+      })
+    })
+    const adapter = createPlaywrightBrowserAdapter({
+      loadPlaywright: fixture.loadPlaywright,
+      env: {},
+      timeoutMs: 20,
+    })
+
+    await expect(adapter.openAndCapture({
+      ...captureOptions(onResponse),
+      onServiceTicket,
+    })).resolves.toBeUndefined()
+
+    expect(onResponse).toHaveBeenCalledTimes(1)
+    expect(onServiceTicket).toHaveBeenCalledWith('ST-FAKE-route-capture')
+    expect(abort).toHaveBeenCalledWith('blockedbyclient')
+    expect(continueRequest).not.toHaveBeenCalled()
+    expect(fixture.page.close).toHaveBeenCalledTimes(1)
+    expect(fixture.context.close).toHaveBeenCalledTimes(1)
+    expect(fixture.browser.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows a later valid ticket after the consumer rejects an earlier redirect', async () => {
+    const fixture = browserFixture()
+    const firstAbort = jest.fn().mockResolvedValue(undefined)
+    const secondAbort = jest.fn().mockResolvedValue(undefined)
+    const onServiceTicket = jest.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+    fixture.page.goto.mockImplementationOnce(async () => {
+      const handler = fixture.getRouteHandler()!
+      const request = (ticket: string) => ({
+        request: () => ({
+          url: () => `https://connect.garmin.cn/app?ticket=${ticket}`,
+          method: () => 'GET',
+          isNavigationRequest: () => true,
+          frame: () => fixture.mainFrame,
+        }),
+        continue: jest.fn().mockResolvedValue(undefined),
+      })
+      await handler({ ...request('ST-rejected-first'), abort: firstAbort })
+      await handler({ ...request('ST-accepted-second'), abort: secondAbort })
+    })
+    const adapter = createPlaywrightBrowserAdapter({
+      loadPlaywright: fixture.loadPlaywright,
+      env: {},
+      timeoutMs: 20,
+    })
+
+    await expect(adapter.openAndCapture({
+      ...captureOptions(),
+      onServiceTicket,
+    })).resolves.toBeUndefined()
+
+    expect(onServiceTicket.mock.calls).toEqual([
+      ['ST-rejected-first'],
+      ['ST-accepted-second'],
+    ])
+    expect(firstAbort).toHaveBeenCalledWith('blockedbyclient')
+    expect(secondAbort).toHaveBeenCalledWith('blockedbyclient')
   })
 
   it('blocks only the exact main-frame ticket redirect before it goes out', async () => {

@@ -4,6 +4,29 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 describe('maintenance scripts', () => {
+  it('publishes a DSH web client bundle with the required host services', () => {
+    const manifest = JSON.parse(readFileSync(
+      path.resolve(__dirname, '../package.json'),
+      'utf8',
+    )) as {
+      exports?: Record<string, { types?: string; default?: string }>
+      dsh?: { client?: { platform?: string; inject?: string[] } }
+    }
+
+    expect(manifest.exports?.['./client']).toEqual({
+      types: './lib/types/client/index.d.ts',
+      default: './lib/dsh-client.js',
+    })
+    expect(manifest.dsh?.client).toEqual({
+      platform: 'web',
+      inject: [
+        '@deepseek-ai/dsh-client-runtime',
+        '@deepseek-ai/dsh-client-connection',
+        '@deepseek-ai/dsh-client-ui-layout',
+      ],
+    })
+  })
+
   it('ships both test-report pages in the published package', () => {
     const manifest = JSON.parse(readFileSync(
       path.resolve(__dirname, '../package.json'),

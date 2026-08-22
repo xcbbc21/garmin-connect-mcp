@@ -127,6 +127,7 @@ export function createPlaywrightBrowserAdapter(
       let controlReject: ((error: Error) => void) | undefined
       let captured = false
       let controlSettled = false
+      let ticketRedirectHandled = false
 
       const capture = new Promise<void>((resolve) => {
         captureResolve = resolve
@@ -204,8 +205,24 @@ export function createPlaywrightBrowserAdapter(
         page.on('close', onPageClose)
 
         await withControl(page.route('**/*', async (route) => {
-          if (shouldBlockTicketRedirect(route.request(), page!, options)) {
+          const serviceTicket = serviceTicketFromBlockedRedirect(
+            route.request(),
+            page!,
+            options,
+          )
+          if (serviceTicket) {
             await route.abort('blockedbyclient')
+            if (ticketRedirectHandled) return
+            ticketRedirectHandled = true
+            let accepted = false
+            try {
+              accepted = await options.onServiceTicket(serviceTicket)
+            } finally {
+              if (!accepted) ticketRedirectHandled = false
+            }
+            if (accepted) {
+              resolveCapture()
+            }
             return
           }
           await route.continue()
@@ -373,29 +390,31 @@ async function handleObservedResponse(
   })
 }
 
-function shouldBlockTicketRedirect(
+function serviceTicketFromBlockedRedirect(
   request: PlaywrightRequestLike,
   page: PlaywrightPageLike,
   options: BrowserCaptureOptions,
-): boolean {
+): string | undefined {
   if (
     request.method() !== 'GET'
     || !request.isNavigationRequest()
     || request.frame() !== page.mainFrame()
-  ) return false
+  ) return undefined
 
   try {
     const url = new URL(request.url())
     const expected = options.blockedTicketRedirect
-    return url.protocol === 'https:'
+    const serviceTicket = url.searchParams.get(expected.searchParameter)
+    const matches = url.protocol === 'https:'
       && url.port === ''
       && url.username === ''
       && url.password === ''
       && url.origin === expected.origin
       && url.pathname === expected.pathname
       && url.searchParams.getAll(expected.searchParameter).length === 1
+    return matches && serviceTicket ? serviceTicket : undefined
   } catch {
-    return false
+    return undefined
   }
 }
 

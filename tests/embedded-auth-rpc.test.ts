@@ -1,0 +1,159 @@
+import type { Context } from '@deepseek-ai/cordis'
+import {
+  registerEmbeddedAuthRpc,
+  type EmbeddedAuthRpcController,
+} from '../src/embedded-auth-rpc'
+
+function fixture() {
+  const controller: jest.Mocked<EmbeddedAuthRpcController> = {
+    begin: jest.fn().mockResolvedValue({
+      success: true,
+      flowId: 'a'.repeat(64),
+      bridgeUrl: `http://127.0.0.1:43127/garmin-auth/bridge/${'a'.repeat(64)}`,
+      expiresAt: 1_900_000_000_000,
+    }),
+    status: jest.fn().mockReturnValue({ success: true, status: 'in_progress' }),
+    cancel: jest.fn().mockReturnValue({ success: true }),
+    close: jest.fn().mockResolvedValue(undefined),
+  }
+  const disposeRpc = jest.fn().mockResolvedValue(undefined)
+  const handle = jest.fn().mockReturnValue(disposeRpc)
+  let disposeEffect: (() => Promise<void>) | undefined
+  const child = {
+    connection: { rpc: { handle } },
+    effect: jest.fn((execute: () => () => Promise<void>) => {
+      disposeEffect = execute()
+      return jest.fn()
+    }),
+  }
+  const ctx = {
+    inject: jest.fn((_services: string[], callback: (nested: typeof child) => void) => {
+      callback(child)
+      return {}
+    }),
+  }
+  return {
+    controller,
+    factory: jest.fn(() => controller),
+    disposeRpc,
+    handle,
+    child,
+    ctx,
+    disposeEffect: () => disposeEffect,
+  }
+}
+
+describe('DSH embedded Garmin authentication RPC', () => {
+  it('waits for Connection and registers a loopback-only channel', () => {
+    const subject = fixture()
+
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      subject.factory,
+    )
+
+    expect(subject.ctx.inject).toHaveBeenCalledWith(
+      ['connection'],
+      expect.any(Function),
+    )
+    expect(subject.handle).toHaveBeenCalledWith(
+      '/garmin-auth',
+      expect.any(Function),
+      { authority: 'loopback' },
+    )
+    expect(subject.child.effect).toHaveBeenCalledWith(
+      expect.any(Function),
+      'garmin-connect: embedded auth rpc',
+    )
+  })
+
+  it('dispatches only the closed begin/status/cancel endpoints', async () => {
+    const subject = fixture()
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      subject.factory,
+    )
+    const handler = subject.handle.mock.calls[0][1]
+    const signal = new AbortController().signal
+
+    await expect(handler('begin', {}, signal)).resolves.toEqual({
+      ok: true,
+      value: expect.objectContaining({ success: true, flowId: 'a'.repeat(64) }),
+    })
+    await expect(handler('status', { flowId: 'a'.repeat(64) }, signal))
+      .resolves.toEqual({
+        ok: true,
+        value: { success: true, status: 'in_progress' },
+      })
+    await expect(handler('cancel', { flowId: 'a'.repeat(64) }, signal))
+      .resolves.toEqual({ ok: true, value: { success: true } })
+
+    expect(subject.controller.begin).toHaveBeenCalledWith(signal)
+    expect(subject.controller.status).toHaveBeenCalledWith({ flowId: 'a'.repeat(64) })
+    expect(subject.controller.cancel).toHaveBeenCalledWith({ flowId: 'a'.repeat(64) })
+  })
+
+  it('rejects malformed begin and unknown endpoints without reflecting payloads', async () => {
+    const subject = fixture()
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      subject.factory,
+    )
+    const handler = subject.handle.mock.calls[0][1]
+    const secret = 'ST-secret runner@example.test /private/session.json'
+
+    const malformed = await handler('begin', { secret }, new AbortController().signal)
+    const unknown = await handler(secret, { secret }, new AbortController().signal)
+
+    expect(malformed).toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+    expect(unknown).toEqual(malformed)
+    expect(JSON.stringify([malformed, unknown])).not.toContain(secret)
+    expect(subject.controller.begin).not.toHaveBeenCalled()
+  })
+
+  it('collapses controller failures and request cancellation to a fixed result', async () => {
+    const subject = fixture()
+    subject.controller.status.mockImplementation(() => {
+      throw new Error('ticket=ST-secret account=runner@example.test')
+    })
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      subject.factory,
+    )
+    const handler = subject.handle.mock.calls[0][1]
+    const aborted = new AbortController()
+    aborted.abort()
+
+    await expect(handler('status', {}, new AbortController().signal)).resolves.toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+    await expect(handler('begin', {}, aborted.signal)).resolves.toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+  })
+
+  it('unregisters the RPC before closing its private bridge on unload', async () => {
+    const subject = fixture()
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      subject.factory,
+    )
+
+    await subject.disposeEffect()?.()
+
+    expect(subject.disposeRpc).toHaveBeenCalledTimes(1)
+    expect(subject.controller.close).toHaveBeenCalledTimes(1)
+    expect(subject.disposeRpc.mock.invocationCallOrder[0])
+      .toBeLessThan(subject.controller.close.mock.invocationCallOrder[0])
+  })
+})
