@@ -2,10 +2,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../src/config'
 
 const mockConnect = jest.fn().mockRejectedValue(new Error('not authenticated yet'))
-const mockAcceptPersistedSessionUpdate = jest.fn().mockResolvedValue(undefined)
+const mockReplacePersistedSession = jest.fn().mockImplementation(
+  async (writer: () => Promise<void>) => writer(),
+)
 const mockClient = {
   connect: mockConnect,
-  acceptPersistedSessionUpdate: mockAcceptPersistedSessionUpdate,
+  replacePersistedSession: mockReplacePersistedSession,
 }
 const mockRegisterTools = jest.fn()
 const mockRegisterEmbeddedAuthRpc = jest.fn()
@@ -57,16 +59,19 @@ describe('plugin activation', () => {
       expect.objectContaining({
         sessionTokenFile: '/private/config/accounts/default.session.json',
       }),
+      { allowUnconfigured: true },
     )
     expect(mockRegisterTools).toHaveBeenCalledTimes(1)
     expect(mockRegisterEmbeddedAuthRpc).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      { onSessionSaved: expect.any(Function) },
+      { replaceSession: expect.any(Function) },
     )
 
     const options = mockRegisterEmbeddedAuthRpc.mock.calls[0][2]
-    await options.onSessionSaved()
-    expect(mockAcceptPersistedSessionUpdate).toHaveBeenCalledTimes(1)
+    const writer = jest.fn().mockResolvedValue(undefined)
+    await options.replaceSession(writer)
+    expect(mockReplacePersistedSession).toHaveBeenCalledWith(writer)
+    expect(writer).toHaveBeenCalledTimes(1)
   })
 })

@@ -138,11 +138,27 @@ describe('GarminClient', () => {
     )))
   })
 
+  it('still fails fast without a username outside embedded-auth mode', () => {
+    expect(() => new GarminClient(createContext(), {
+      ...baseConfig,
+      username: '',
+    })).toThrow('Garmin username is required')
+  })
+
+  it('still fails fast without credentials outside embedded-auth mode', () => {
+    expect(() => new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile: '',
+    })).toThrow('Garmin password, session token, or session token file is required')
+  })
+
   it('loads without a username so the local auth UI can report configuration', async () => {
     const client = new GarminClient(createContext(), {
       ...baseConfig,
       username: '',
-    })
+    }, { allowUnconfigured: true })
 
     await expect(client.connect()).rejects.toThrow('Garmin username is required')
   })
@@ -153,7 +169,7 @@ describe('GarminClient', () => {
       password: '',
       sessionToken: '',
       sessionTokenFile: '',
-    })
+    }, { allowUnconfigured: true })
 
     await expect(client.connect()).rejects.toThrow(
       'Garmin authentication is required; use Garmin Login or configure a session',
@@ -172,15 +188,66 @@ describe('GarminClient', () => {
     await expect(client.connect()).rejects.toThrow(
       'Garmin session token file could not be read',
     )
-    await writeFile(sessionTokenFile, JSON.stringify(createDiSession()), {
-      encoding: 'utf8',
-      mode: 0o600,
-    })
     latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
 
-    await client.acceptPersistedSessionUpdate()
+    await client.replacePersistedSession(() => writeFile(
+      sessionTokenFile,
+      JSON.stringify(createDiSession()),
+      { encoding: 'utf8', mode: 0o600 },
+    ))
     await expect(client.connect()).resolves.toBeUndefined()
     expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocks new Garmin work until a replacement session commit finishes', async () => {
+    const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
+    await client.connect()
+
+    let finishWrite!: () => void
+    let markWriteStarted!: () => void
+    const writeStarted = new Promise<void>(resolve => { markWriteStarted = resolve })
+    const replacement = client.replacePersistedSession(async () => {
+      markWriteStarted()
+      await new Promise<void>(resolve => { finishWrite = resolve })
+      await writeFile(sessionTokenFile, JSON.stringify(createDiSession()), {
+        encoding: 'utf8',
+        mode: 0o600,
+      })
+    })
+    await writeStarted
+
+    const profile = client.getUserProfile()
+    await Promise.resolve()
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+
+    finishWrite()
+    await expect(replacement).resolves.toBeUndefined()
+    await expect(profile).resolves.toEqual({ profileId: 123456789 })
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(3)
+  })
+
+  it('releases the replacement barrier and reloads the old file after write failure', async () => {
+    const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
+    await client.connect()
+
+    await expect(client.replacePersistedSession(async () => {
+      throw new Error('replacement write failed')
+    })).rejects.toThrow('replacement write failed')
+
+    await expect(client.connect()).resolves.toBeUndefined()
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(2)
   })
 
   it('loads a session token file when no inline token or password is configured', async () => {

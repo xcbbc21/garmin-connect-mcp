@@ -5,6 +5,7 @@ import type { Config } from './config'
 import {
   createGarminDiSessionRuntimeDependencies,
   GarminDiSessionRuntime,
+  replaceGarminDiSessionPath,
 } from './di-session'
 import { MAX_ZIP_BYTES } from './fit-export'
 import {
@@ -29,6 +30,11 @@ const LOG_LEVEL_RANK: Record<LogLevel, number> = {
 const DI_SESSION_REJECTED_MESSAGE =
   'Garmin DI session was rejected; run garmin-connect-auth login --browser again'
 
+export interface GarminClientOptions {
+  /** Let the local dsh UI load before its out-of-band authentication finishes. */
+  allowUnconfigured?: boolean
+}
+
 /**
  * Thin wrapper around the `garmin-connect` npm package that adds:
  *   - Cordis-aware logging
@@ -47,9 +53,26 @@ export class GarminClient {
   private sessionTokenRejected = false
   private diSessionSelected = false
   private diRuntime: GarminDiSessionRuntime | null = null
+  private sessionReplacementGate: Promise<void> | null = null
   private authEpoch = 0
 
-  constructor(ctx: Context, config: Config) {
+  constructor(
+    ctx: Context,
+    config: Config,
+    options: GarminClientOptions = {},
+  ) {
+    if (!options.allowUnconfigured && !config.username.trim()) {
+      throw new Error('Garmin username is required')
+    }
+    if (
+      !options.allowUnconfigured
+      && !config.password?.trim()
+      && !config.sessionToken?.trim()
+      && !config.sessionTokenFile?.trim()
+    ) {
+      throw new Error('Garmin password, session token, or session token file is required')
+    }
+
     this.ctx = ctx
     this.config = config
     this.cache = new MemoryCache(config.cacheTtl)
@@ -75,6 +98,9 @@ export class GarminClient {
    * never race each other.
    */
   async connect(): Promise<void> {
+    while (this.sessionReplacementGate) {
+      await this.sessionReplacementGate
+    }
     if (!this.connecting) {
       let tracked!: Promise<void>
       tracked = this.login().finally(() => {
@@ -212,39 +238,67 @@ export class GarminClient {
   }
 
   /**
-   * Forget a rejected/previous credential after the trusted auth Host has
-   * atomically replaced the configured session file. The next tool call reads
-   * and validates that file in this process; no restart is required.
+   * Own the trusted Host's complete session replacement transaction. New
+   * Garmin work is fenced while old DI refresh writes drain, then the supplied
+   * atomic writer installs the new file last.
    */
-  async acceptPersistedSessionUpdate(): Promise<void> {
+  async replacePersistedSession(writeSession: () => Promise<void>): Promise<void> {
     const sessionTokenFile = this.config.sessionTokenFile?.trim()
     if (!sessionTokenFile) {
       throw new PublicToolError('Garmin session token file is not configured')
     }
-
-    const pendingConnection = this.connecting
-    if (pendingConnection) await pendingConnection.catch(() => undefined)
-
-    this.diRuntime?.invalidate()
-    this.diRuntime = null
-    this.connected = false
-    this.sessionTokenRejected = false
-    this.diSessionSelected = false
-    this.authEpoch += 1
-    this.cache.clear()
-    this.config = {
-      ...this.config,
-      password: '',
-      sessionToken: '',
-      sessionTokenFile,
+    if (typeof writeSession !== 'function') {
+      throw new PublicToolError('Garmin DI session could not be persisted')
     }
-    const upstream = this.gc.client as any
-    upstream.oauth1Token = undefined
-    upstream.oauth2Token = undefined
+
+    while (this.sessionReplacementGate) {
+      await this.sessionReplacementGate
+    }
+    let releaseReplacement!: () => void
+    const replacementGate = new Promise<void>(resolveReplacement => {
+      releaseReplacement = resolveReplacement
+    })
+    this.sessionReplacementGate = replacementGate
+
+    let committed = false
+    try {
+      const pendingConnection = this.connecting
+      if (pendingConnection) await pendingConnection.catch(() => undefined)
+
+      this.connected = false
+      this.authEpoch += 1
+      this.cache.clear()
+      this.diRuntime?.invalidate()
+      this.diRuntime = null
+
+      await replaceGarminDiSessionPath(sessionTokenFile, writeSession)
+      committed = true
+    } finally {
+      this.connected = false
+      this.sessionTokenRejected = false
+      this.diSessionSelected = false
+      this.cache.clear()
+      this.config = {
+        ...this.config,
+        ...(committed ? { password: '', sessionToken: '' } : {}),
+        sessionTokenFile,
+      }
+      const upstream = this.gc.client as any
+      upstream.oauth1Token = undefined
+      upstream.oauth2Token = undefined
+
+      releaseReplacement()
+      if (this.sessionReplacementGate === replacementGate) {
+        this.sessionReplacementGate = null
+      }
+    }
   }
 
   /** Lazily connect on first use. Failures are logged and rethrown to the caller. */
   private async ensureConnected(): Promise<void> {
+    while (this.sessionReplacementGate) {
+      await this.sessionReplacementGate
+    }
     if (!this.connected) {
       await this.connect()
     }

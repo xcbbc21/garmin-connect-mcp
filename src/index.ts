@@ -13,7 +13,9 @@ export const inject = ['tools']
 
 export function apply(ctx: Context, config: Config) {
   const resolvedConfig = resolveEmbeddedAuthConfig(resolveConfig(config))
-  const client = new GarminClient(ctx, resolvedConfig)
+  const client = new GarminClient(ctx, resolvedConfig, {
+    allowUnconfigured: true,
+  })
 
   // Kick off the Garmin login in the background. Tool calls auto-connect on
   // first use, so a slow or temporarily failing login never blocks plugin
@@ -26,6 +28,6 @@ export function apply(ctx: Context, config: Config) {
   // Compatible DSH hosts gain an optional loopback-only browser sign-in UI.
   // The Garmin ticket and resulting session never cross into the web client.
   registerEmbeddedAuthRpc(ctx, resolvedConfig, {
-    onSessionSaved: () => client.acceptPersistedSessionUpdate(),
+    replaceSession: writer => client.replacePersistedSession(writer),
   })
 }

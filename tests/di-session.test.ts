@@ -2,6 +2,7 @@ import axios, { type AxiosRequestConfig } from 'axios'
 import { resolve } from 'node:path'
 import {
   GarminDiSessionRuntime,
+  replaceGarminDiSessionPath,
   type GarminDiRefreshResult,
   type GarminDiSessionRuntimeDependencies,
 } from '../src/di-session'
@@ -793,6 +794,136 @@ describe('GarminDiSessionRuntime', () => {
       }),
     )
     expect(businessRequests).toBe(0)
+  })
+
+  it('drains and retires old refresh writes before a replacement session is installed', async () => {
+    const sessionPath = '/private/replace-during-refresh/session.json'
+    let finishRefresh!: () => void
+    let finishWrite!: () => void
+    let markWriteStarted!: () => void
+    const writeStarted = new Promise<void>(resolve => { markWriteStarted = resolve })
+    const refresh = jest.fn(() => new Promise<GarminDiRefreshResult>(resolve => {
+      finishRefresh = () => resolve({
+        status: 200,
+        contentType: 'application/json',
+        body: {
+          access_token: 'old-rotated-access',
+          refresh_token: 'old-rotated-refresh',
+          expires_in: 3_600,
+        },
+      })
+    }))
+    const writeSession = jest.fn(async () => {
+      markWriteStarted()
+      await new Promise<void>(resolve => { finishWrite = resolve })
+    })
+    const oldClient = axios.create({
+      adapter: async config => ({
+        config,
+        data: {},
+        headers: {},
+        status: 200,
+        statusText: 'OK',
+      }),
+    })
+    const oldRuntime = new GarminDiSessionRuntime({
+      username: 'runner@example.test',
+      region: 'global',
+      session: session({ accessExpiresAtMs: NOW_MS + 30_000 }),
+      sessionPath,
+      dependencies: dependencies({ refresh, writeSession }),
+    })
+    oldRuntime.install(oldClient)
+
+    const oldRequest = oldClient.get(
+      'https://connectapi.garmin.com/activitylist-service/activities',
+    )
+    await Promise.resolve()
+    expect(refresh).toHaveBeenCalledTimes(1)
+
+    let replaced = false
+    const replacementWriter = jest.fn(async () => undefined)
+    const replacement = replaceGarminDiSessionPath(
+      sessionPath,
+      replacementWriter,
+    ).then(() => {
+      replaced = true
+    })
+    await Promise.resolve()
+    expect(replaced).toBe(false)
+    expect(replacementWriter).not.toHaveBeenCalled()
+
+    finishRefresh()
+    await writeStarted
+    expect(replaced).toBe(false)
+    expect(replacementWriter).not.toHaveBeenCalled()
+    finishWrite()
+    await replacement
+    expect(replacementWriter).toHaveBeenCalledTimes(1)
+    await expect(oldRequest).rejects.toThrow(
+      'Garmin DI session was rejected; run garmin-connect-auth login --browser again',
+    )
+
+    let replacementAuthorization: string | undefined
+    const replacementClient = axios.create({
+      adapter: async config => {
+        replacementAuthorization = config.headers?.Authorization as string | undefined
+        return {
+          config,
+          data: {},
+          headers: {},
+          status: 200,
+          statusText: 'OK',
+        }
+      },
+    })
+    const replacementRuntime = new GarminDiSessionRuntime({
+      username: 'runner@example.test',
+      region: 'global',
+      session: session({ accessToken: 'new-replacement-access' }),
+      sessionPath,
+      dependencies: dependencies(),
+    })
+    replacementRuntime.install(replacementClient)
+
+    await replacementClient.get(
+      'https://connectapi.garmin.com/activitylist-service/activities',
+    )
+    expect(replacementAuthorization).toBe('Bearer new-replacement-access')
+    replacementRuntime.invalidate()
+  })
+
+  it('blocks new runtimes for the full replacement writer and releases after failure', async () => {
+    const sessionPath = '/private/replacement-writer-barrier/session.json'
+    let finishWriter!: () => void
+    let markWriterStarted!: () => void
+    const writerStarted = new Promise<void>(resolve => { markWriterStarted = resolve })
+    const replacement = replaceGarminDiSessionPath(sessionPath, async () => {
+      markWriterStarted()
+      await new Promise<void>(resolve => { finishWriter = resolve })
+      throw new Error('write failed')
+    })
+    await writerStarted
+
+    expect(() => new GarminDiSessionRuntime({
+      username: 'runner@example.test',
+      region: 'global',
+      session: session(),
+      sessionPath,
+      dependencies: dependencies(),
+    })).toThrow('Garmin DI session file is being replaced')
+
+    finishWriter()
+    await expect(replacement).rejects.toThrow('write failed')
+
+    const runtime = new GarminDiSessionRuntime({
+      username: 'runner@example.test',
+      region: 'global',
+      session: session(),
+      sessionPath,
+      dependencies: dependencies(),
+    })
+    runtime.invalidate()
   })
 
   it('rejects an in-flight Connect API success that returns after invalidate', async () => {

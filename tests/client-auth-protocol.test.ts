@@ -1,5 +1,6 @@
 import {
   parseGarminAuthBeginRpcResult,
+  parseGarminAuthCancelRpcResult,
   parseGarminAuthStatusRpcResult,
 } from '../src/client/protocol'
 
@@ -75,6 +76,17 @@ describe('DSH Garmin authentication client protocol', () => {
         status: 'succeeded',
         ticket: 'ST-secret',
       },
+    })).toEqual({ success: false, code: 'unavailable' })
+  })
+
+  it('accepts only an exact successful cancellation envelope', () => {
+    expect(parseGarminAuthCancelRpcResult({
+      ok: true,
+      value: { success: true },
+    })).toEqual({ success: true })
+    expect(parseGarminAuthCancelRpcResult({
+      ok: true,
+      value: { success: true, ticket: 'ST-secret' },
     })).toEqual({ success: false, code: 'unavailable' })
   })
 })

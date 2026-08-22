@@ -44,7 +44,7 @@ export type EmbeddedAuthRpcControllerFactory = (
 
 export interface EmbeddedAuthRpcRegistrationOptions {
   createController?: EmbeddedAuthRpcControllerFactory
-  onSessionSaved?: () => Promise<void> | void
+  replaceSession?: (writeSession: () => Promise<void>) => Promise<void>
 }
 
 /** Resolve the one session path shared by the embedded Host and Garmin client. */
@@ -81,7 +81,7 @@ export function registerEmbeddedAuthRpc(
   const createController = registration.createController
     ?? ((value: Config) => createDefaultController(
       value,
-      registration.onSessionSaved,
+      registration.replaceSession,
     ))
   ctx.inject(['connection'], (connectionCtx) => {
     const controller = createController(config)
@@ -146,7 +146,7 @@ function createRpcHandler(
 
 function createDefaultController(
   config: Config,
-  onSessionSaved?: () => Promise<void> | void,
+  replaceSession?: (writeSession: () => Promise<void>) => Promise<void>,
 ): EmbeddedAuthRpcController {
   const http = createAxiosCanaryHttpAdapter()
   const flows = new EmbeddedAuthFlowManager({
@@ -158,10 +158,12 @@ function createDefaultController(
         } satisfies CapturedServiceTicketDiAuthSetupOptions,
         {
           http,
-          writeSession: writeSessionTokenFile,
+          writeSession: (path, session) => {
+            const writeSession = () => writeSessionTokenFile(path, session)
+            return replaceSession ? replaceSession(writeSession) : writeSession()
+          },
         },
       )
-      await onSessionSaved?.()
     },
   })
   const server = new EmbeddedAuthServer(flows)

@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
 - Email, password, MFA code, and CAPTCHA input stay inside Garmin's iframe. On the browser side, the short-lived ticket reaches only the isolated loopback bridge and is immediately passed to the Host exchange; the outer dsh page, model context, and AI-callable tool results receive neither the ticket nor DI tokens or form credentials.
 - The bridge validates the expected region, message origin, iframe source, service, and ticket before the one-shot Host exchange. The dsh page receives only public progress states.
 
+### Fixed
+- Retrying or closing the Web login no longer discards an active flow handle until the Host confirms cancellation or a terminal state.
+- Installing a newly authenticated session now fences new Garmin work and drains old in-process DI refresh writes before the atomic replacement, preventing a late refresh from overwriting the new session.
+
 ### Experimental — not release-supported
 - The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.
 - Browser third-party-cookie or iframe policy may prevent Garmin GAuth from completing. Final end-to-end testing with a real MFA account is still pending, so this must not be described as completed two-step-verification support.

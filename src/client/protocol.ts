@@ -31,6 +31,13 @@ export type GarminAuthStatusResult = {
   code: GarminAuthClientErrorCode
 }
 
+export type GarminAuthCancelResult = {
+  success: true
+} | {
+  success: false
+  code: GarminAuthClientErrorCode
+}
+
 export function parseGarminAuthBeginRpcResult(value: unknown): GarminAuthBeginResult {
   if (!isExactRecord(value, ['ok', 'value']) || value.ok !== true) {
     return unavailable()
@@ -74,6 +81,21 @@ export function parseGarminAuthStatusRpcResult(value: unknown): GarminAuthStatus
     return unavailable()
   }
   return { success: true, status: business.status }
+}
+
+export function parseGarminAuthCancelRpcResult(value: unknown): GarminAuthCancelResult {
+  if (!isExactRecord(value, ['ok', 'value']) || value.ok !== true) {
+    return unavailable()
+  }
+  const business = value.value
+  if (isBusinessFailure(business)) return business
+  if (
+    !isExactRecord(business, ['success'])
+    || business.success !== true
+  ) {
+    return unavailable()
+  }
+  return { success: true }
 }
 
 function isBusinessFailure(value: unknown): value is {

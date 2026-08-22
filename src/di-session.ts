@@ -26,6 +26,7 @@ interface SharedSessionState {
   binding: string
   session: GarminDiSessionFile
   owners: number
+  retired?: boolean
   refreshPromise?: Promise<GarminDiSessionFile>
   pendingSession?: GarminDiSessionFile
   persistPromise?: Promise<GarminDiSessionFile>
@@ -33,6 +34,60 @@ interface SharedSessionState {
 }
 
 const sharedSessionByPath = new Map<string, SharedSessionState>()
+const sessionReplacementByPath = new Map<string, Promise<void>>()
+
+/**
+ * Fence every runtime attached to one session file and wait for writes that
+ * already crossed their commit point. The replacement remains fenced until
+ * its writer finishes, so a late refresh can never restore old credentials.
+ */
+export async function replaceGarminDiSessionPath(
+  sessionPath: string,
+  writeReplacement: () => Promise<void>,
+): Promise<void> {
+  if (typeof writeReplacement !== 'function') {
+    throw new PublicToolError(DI_PERSIST_FAILED_MESSAGE)
+  }
+  const normalizedPath = resolve(sessionPath)
+  for (;;) {
+    const activeReplacement = sessionReplacementByPath.get(normalizedPath)
+    if (!activeReplacement) break
+    await activeReplacement.catch(() => undefined)
+  }
+
+  let releaseReplacement!: () => void
+  const replacementGate = new Promise<void>(resolveGate => {
+    releaseReplacement = resolveGate
+  })
+  sessionReplacementByPath.set(normalizedPath, replacementGate)
+  const shared = sharedSessionByPath.get(normalizedPath)
+
+  try {
+    if (shared) {
+      shared.retired = true
+      for (;;) {
+        const pending = [shared.refreshPromise, shared.persistPromise]
+          .filter((value): value is Promise<GarminDiSessionFile> => value !== undefined)
+        if (pending.length === 0) break
+        await Promise.allSettled(pending)
+      }
+
+      // A failed old persistence remains retryable during normal operation.
+      // Explicit replacement discards it with the retired generation.
+      shared.pendingSession = undefined
+    }
+
+    await writeReplacement()
+  } finally {
+    if (shared && sharedSessionByPath.get(normalizedPath) === shared) {
+      sharedSessionByPath.delete(normalizedPath)
+    }
+    if (sessionReplacementByPath.get(normalizedPath) === replacementGate) {
+      sessionReplacementByPath.delete(normalizedPath)
+    }
+    releaseReplacement()
+  }
+}
 
 export interface GarminDiRefreshResult {
   status: number
@@ -109,6 +164,9 @@ export class GarminDiSessionRuntime {
     this.profileUrl = `${this.connectApiOrigin}/userprofile-service/socialProfile`
     this.binding = sessionBinding(options.session)
     this.sessionPath = resolve(options.sessionPath)
+    if (sessionReplacementByPath.has(this.sessionPath)) {
+      throw new PublicToolError('Garmin DI session file is being replaced')
+    }
     const shared = sharedSessionByPath.get(this.sessionPath)
     if (shared !== undefined && shared.binding !== this.binding) {
       throw new PublicToolError(
@@ -255,7 +313,9 @@ export class GarminDiSessionRuntime {
   }
 
   private assertActive(): void {
-    if (this.invalidated) throw new PublicToolError(DI_SESSION_REJECTED_MESSAGE)
+    if (this.invalidated || this.shared.retired) {
+      throw new PublicToolError(DI_SESSION_REJECTED_MESSAGE)
+    }
   }
 
   private async refreshAndPersist(nowMs: number): Promise<GarminDiSessionFile> {
