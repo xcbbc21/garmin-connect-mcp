@@ -34,7 +34,11 @@ interface BridgeScriptHarness {
     data: unknown,
     options?: { origin?: string; sourceMatches?: boolean },
   ): void
-  pendingRequests: Array<Promise<unknown>>
+  flushRequests(): Promise<void>
+  frameHidden(): boolean
+  statusRequestCount(): number
+  statusText(): string
+  ticketRequestCount(): number
 }
 
 type TestAdapter = jest.Mocked<EmbeddedAuthServerAdapter> & {
@@ -119,6 +123,7 @@ function runBridgeScript(
   const frameWindow = {}
   const messageListeners: Array<(event: BridgeMessageEvent) => void> = []
   const pendingRequests: Array<Promise<unknown>> = []
+  const requestedPaths: string[] = []
   const inertListener = (): void => {}
   const element = (contentWindow?: object) => ({
     addEventListener: inertListener,
@@ -145,7 +150,9 @@ function runBridgeScript(
       method?: string
     },
   ): Promise<{ ok: boolean; json(): Promise<unknown> }> => {
-    const operation = request(new URL(path, bridgeUrl).toString(), {
+    const target = new URL(path, bridgeUrl)
+    requestedPaths.push(target.pathname)
+    const operation = request(target.toString(), {
       method: options.method,
       headers: { ...options.headers, Origin: bridgeOrigin },
       body: options.body,
@@ -187,7 +194,25 @@ function runBridgeScript(
         source: options.sourceMatches === false ? {} : frameWindow,
       })
     },
-    pendingRequests,
+    async flushRequests() {
+      let index = 0
+      for (;;) {
+        while (index < pendingRequests.length) {
+          await pendingRequests[index]
+          index += 1
+        }
+        await new Promise<void>(resolve => setImmediate(resolve))
+        if (index === pendingRequests.length) return
+      }
+    },
+    frameHidden: () => elements.get('garmin-auth-frame')?.hidden === true,
+    statusRequestCount: () => requestedPaths.filter(
+      path => path.endsWith('/status'),
+    ).length,
+    statusText: () => elements.get('status')?.textContent ?? '',
+    ticketRequestCount: () => requestedPaths.filter(
+      path => path.endsWith('/ticket'),
+    ).length,
   }
 }
 
@@ -307,7 +332,11 @@ describe('EmbeddedAuthServer', () => {
   })
 
   it('routes Garmin GAuth SUCCESS messages through the local ticket endpoint', async () => {
-    const { adapter, bridgeUrl, origin, response } = await openBridge()
+    const adapter = createAdapter()
+    adapter.submitTicket.mockImplementation(() => {
+      adapter.bridgeStatus.mockReturnValue({ state: 'exchanging' })
+    })
+    const { bridgeUrl, origin, response } = await openBridge(adapter)
     const harness = runBridgeScript(response.body, bridgeUrl, origin)
     const message = JSON.stringify({
       status: 'SUCCESS',
@@ -318,7 +347,7 @@ describe('EmbeddedAuthServer', () => {
 
     harness.dispatchMessage(message)
     harness.dispatchMessage(message)
-    await Promise.all([...harness.pendingRequests])
+    await harness.flushRequests()
 
     expect(adapter.submitTicket).toHaveBeenCalledTimes(1)
     expect(adapter.submitTicket).toHaveBeenCalledWith(
@@ -326,6 +355,10 @@ describe('EmbeddedAuthServer', () => {
       CSRF,
       'ST-real_gauth_ticket~1',
     )
+    expect(harness.ticketRequestCount()).toBe(1)
+    expect(harness.statusRequestCount()).toBeGreaterThanOrEqual(2)
+    expect(harness.frameHidden()).toBe(true)
+    expect(harness.statusText()).toBe('正在验证 Garmin 登录…')
   })
 
   it('rejects untrusted or malformed Garmin GAuth messages before /ticket', async () => {
@@ -349,12 +382,21 @@ describe('EmbeddedAuthServer', () => {
     }))
     harness.dispatchMessage(JSON.stringify({ ...success, extra: true }))
     harness.dispatchMessage(JSON.stringify({
+      ...success,
+      serviceUrl: 'https://sso.garmin.com/sso/embed',
+    }))
+    harness.dispatchMessage(JSON.stringify({
+      ...success,
+      serviceTicket: 'not-a-service-ticket',
+    }))
+    harness.dispatchMessage(JSON.stringify({
       serviceTicket: success.serviceTicket,
       serviceUrl: success.serviceUrl,
     }))
-    await Promise.all([...harness.pendingRequests])
+    await harness.flushRequests()
 
     expect(adapter.submitTicket).not.toHaveBeenCalled()
+    expect(harness.ticketRequestCount()).toBe(0)
   })
 
   it.each([

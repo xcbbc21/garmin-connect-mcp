@@ -2,9 +2,44 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { Script } from 'node:vm'
+
+interface TestJsxElement {
+  props: Record<string, unknown>
+  type: unknown
+}
+
+interface ClientBundleModule {
+  apply(context: unknown): void
+}
+
+interface ClientBundleDefinition {
+  factory(load: (id: string) => unknown): ClientBundleModule
+  id: string
+}
+
+function containsGarminLoginButton(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsGarminLoginButton)
+  if (typeof value !== 'object' || value === null) return false
+  const element = value as Partial<TestJsxElement>
+  if (
+    element.type === 'button'
+    && element.props?.children === 'Garmin 登录'
+  ) return true
+  return containsGarminLoginButton(element.props?.children)
+}
 
 describe('maintenance scripts', () => {
   it('publishes a DSH web client bundle with the required host services', () => {
+    const projectRoot = path.resolve(__dirname, '..')
+    const build = spawnSync(
+      process.execPath,
+      [path.join(projectRoot, 'scripts/build-client.mjs')],
+      { cwd: projectRoot, encoding: 'utf8' },
+    )
+    expect(build.status).toBe(0)
+    expect(build.stderr).toBe('')
+
     const manifest = JSON.parse(readFileSync(
       path.resolve(__dirname, '../package.json'),
       'utf8',
@@ -34,6 +69,72 @@ describe('maintenance scripts', () => {
     )
     expect(bundle).toContain('require("react/jsx-runtime")')
     expect(bundle).not.toContain('React.createElement')
+
+    let definition: ClientBundleDefinition | undefined
+    new Script(bundle).runInNewContext({
+      window: {
+        __ModuleLoader__: {
+          load(value: ClientBundleDefinition) {
+            definition = value
+          },
+        },
+      },
+    })
+    expect(definition?.id).toBe('dsh-plugin-garmin-connect')
+
+    const createElement = (
+      type: unknown,
+      props: Record<string, unknown>,
+    ): TestJsxElement => ({ type, props })
+    const react = {
+      useCallback: (callback: unknown) => callback,
+      useEffect: () => undefined,
+      useRef: (current: unknown) => ({ current }),
+      useState: (initial: unknown) => [initial, () => undefined],
+    }
+    const client = definition!.factory((id) => {
+      if (id === 'react') return react
+      if (id === 'react/jsx-runtime') {
+        return {
+          Fragment: Symbol('Fragment'),
+          jsx: createElement,
+          jsxs: createElement,
+        }
+      }
+      throw new Error(`unexpected client dependency: ${id}`)
+    })
+    let slotFactory: (() => TestJsxElement) | undefined
+    const slots = {
+      inject: jest.fn((_name: string, install: () => void) => install()),
+      register: jest.fn((
+        _definition: unknown,
+        render: () => TestJsxElement,
+      ) => {
+        slotFactory = render
+      }),
+    }
+    client.apply({
+      connection: { isLoopback: true, rpc: { call: jest.fn() } },
+      slots,
+    })
+
+    expect(slots.inject).toHaveBeenCalledWith(
+      'shell.overlay',
+      expect.any(Function),
+    )
+    expect(slots.register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'garmin-connect-auth',
+        name: 'shell.overlay',
+      }),
+      expect.any(Function),
+    )
+    const overlay = slotFactory!()
+    expect(typeof overlay.type).toBe('function')
+    const rendered = (overlay.type as (
+      props: Record<string, unknown>,
+    ) => unknown)(overlay.props)
+    expect(containsGarminLoginButton(rendered)).toBe(true)
   })
 
   it('ships both test-report pages in the published package', () => {
