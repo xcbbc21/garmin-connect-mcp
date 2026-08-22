@@ -18,19 +18,18 @@ interface ClientBundleDefinition {
   id: string
 }
 
-function containsGarminLoginButton(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsGarminLoginButton)
-  if (typeof value !== 'object' || value === null) return false
+function findButtons(value: unknown): TestJsxElement[] {
+  if (Array.isArray(value)) return value.flatMap(findButtons)
+  if (typeof value !== 'object' || value === null) return []
   const element = value as Partial<TestJsxElement>
-  if (
-    element.type === 'button'
-    && element.props?.children === 'Garmin 登录'
-  ) return true
-  return containsGarminLoginButton(element.props?.children)
+  return [
+    ...(element.type === 'button' ? [element as TestJsxElement] : []),
+    ...findButtons(element.props?.children),
+  ]
 }
 
 describe('maintenance scripts', () => {
-  it('publishes a DSH web client bundle with the required host services', () => {
+  it('publishes a DSH web client with explicit China and Global login actions', async () => {
     const projectRoot = path.resolve(__dirname, '..')
     const build = spawnSync(
       process.execPath,
@@ -72,6 +71,7 @@ describe('maintenance scripts', () => {
 
     let definition: ClientBundleDefinition | undefined
     new Script(bundle).runInNewContext({
+      AbortController,
       window: {
         __ModuleLoader__: {
           load(value: ClientBundleDefinition) {
@@ -113,8 +113,12 @@ describe('maintenance scripts', () => {
         slotFactory = render
       }),
     }
+    const rpcCall = jest.fn().mockResolvedValue({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
     client.apply({
-      connection: { isLoopback: true, rpc: { call: jest.fn() } },
+      connection: { isLoopback: true, rpc: { call: rpcCall } },
       slots,
     })
 
@@ -134,7 +138,36 @@ describe('maintenance scripts', () => {
     const rendered = (overlay.type as (
       props: Record<string, unknown>,
     ) => unknown)(overlay.props)
-    expect(containsGarminLoginButton(rendered)).toBe(true)
+    const loginButtons = findButtons(rendered).filter(button => (
+      typeof button.props['aria-label'] === 'string'
+      && button.props['aria-label'].startsWith('登录 Garmin ')
+    ))
+    expect(loginButtons.map(button => button.props['aria-label'])).toEqual([
+      '登录 Garmin 中国区',
+      '登录 Garmin 国际区',
+    ])
+
+    ;(loginButtons[0].props.onClick as () => void)()
+    await Promise.resolve()
+    await Promise.resolve()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(rpcCall).toHaveBeenCalledWith(
+      '/garmin-auth',
+      'begin',
+      { region: 'cn' },
+      expect.any(AbortSignal),
+    )
+
+    ;(loginButtons[1].props.onClick as () => void)()
+    await Promise.resolve()
+    await Promise.resolve()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(rpcCall).toHaveBeenLastCalledWith(
+      '/garmin-auth',
+      'begin',
+      { region: 'global' },
+      expect.any(AbortSignal),
+    )
   })
 
   it('ships both test-report pages in the published package', () => {

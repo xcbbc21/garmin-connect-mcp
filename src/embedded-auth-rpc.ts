@@ -9,7 +9,7 @@ import {
   type CapturedServiceTicketDiAuthSetupOptions,
 } from './browser-auth-canary'
 import { createAxiosCanaryHttpAdapter } from './browser-auth-canary-runtime'
-import type { Config } from './config'
+import type { Config, GarminRegion } from './config'
 import {
   EmbeddedAuthController,
   type EmbeddedAuthBeginResult,
@@ -32,7 +32,10 @@ type EmbeddedAuthRpcResult =
   | EmbeddedAuthCancelResult
 
 export interface EmbeddedAuthRpcController {
-  begin(signal?: AbortSignal): Promise<EmbeddedAuthBeginResult>
+  begin(
+    signal?: AbortSignal,
+    requestedRegion?: GarminRegion,
+  ): Promise<EmbeddedAuthBeginResult>
   status(payload: unknown): EmbeddedAuthStatusResult
   cancel(payload: unknown): EmbeddedAuthCancelResult
   close(): Promise<void>
@@ -117,8 +120,9 @@ function createRpcHandler(
     try {
       if (signal.aborted) return unavailable()
       if (endpoint === 'begin') {
-        if (!isExactEmptyObject(payload)) return unavailable()
-        const result = await controller.begin(signal)
+        const requestedRegion = exactBeginRegion(payload)
+        if (!requestedRegion) return unavailable()
+        const result = await controller.begin(signal, requestedRegion)
         if (signal.aborted) {
           if (result.success) {
             try {
@@ -176,11 +180,18 @@ function createDefaultController(
   })
 }
 
-function isExactEmptyObject(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false
+function exactBeginRegion(value: unknown): GarminRegion | undefined {
+  try {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return undefined
+    }
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return undefined
+    const keys = Object.keys(value)
+    if (keys.length !== 1 || keys[0] !== 'region') return undefined
+    const region = (value as Record<string, unknown>).region
+    return region === 'cn' || region === 'global' ? region : undefined
+  } catch {
+    return undefined
   }
-  const prototype = Object.getPrototypeOf(value)
-  return (prototype === Object.prototype || prototype === null)
-    && Object.keys(value).length === 0
 }

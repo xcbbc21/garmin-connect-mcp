@@ -97,6 +97,17 @@ describe('EmbeddedAuthController', () => {
     expect(JSON.stringify(result)).not.toMatch(/runner|private|session|csrf/i)
   })
 
+  it('rejects a requested login region that differs from GARMIN_REGION', async () => {
+    const { controller, flows, server } = createController({ region: 'cn' })
+
+    await expect(controller.begin(undefined, 'global')).resolves.toEqual({
+      success: false,
+      code: 'configuration',
+    })
+    expect(server.start).not.toHaveBeenCalled()
+    expect(flows.start).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['empty username', { username: '   ' }],
     ['control character in username', { username: 'runner\n@example.com' }],

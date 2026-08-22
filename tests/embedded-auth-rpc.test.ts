@@ -107,7 +107,7 @@ describe('DSH embedded Garmin authentication RPC', () => {
     const handler = subject.handle.mock.calls[0][1]
     const signal = new AbortController().signal
 
-    await expect(handler('begin', {}, signal)).resolves.toEqual({
+    await expect(handler('begin', { region: 'cn' }, signal)).resolves.toEqual({
       ok: true,
       value: expect.objectContaining({ success: true, flowId: 'a'.repeat(64) }),
     })
@@ -119,7 +119,7 @@ describe('DSH embedded Garmin authentication RPC', () => {
     await expect(handler('cancel', { flowId: 'a'.repeat(64) }, signal))
       .resolves.toEqual({ ok: true, value: { success: true } })
 
-    expect(subject.controller.begin).toHaveBeenCalledWith(signal)
+    expect(subject.controller.begin).toHaveBeenCalledWith(signal, 'cn')
     expect(subject.controller.status).toHaveBeenCalledWith({ flowId: 'a'.repeat(64) })
     expect(subject.controller.cancel).toHaveBeenCalledWith({ flowId: 'a'.repeat(64) })
   })
@@ -134,14 +134,24 @@ describe('DSH embedded Garmin authentication RPC', () => {
     const handler = subject.handle.mock.calls[0][1]
     const secret = 'ST-secret runner@example.test /private/session.json'
 
-    const malformed = await handler('begin', { secret }, new AbortController().signal)
+    const malformedPayloads = [
+      { secret },
+      {},
+      { region: 'eu' },
+      { region: 'cn', extra: true },
+      ['cn'],
+      Object.create({ region: 'cn' }),
+    ]
+    const malformed = await Promise.all(malformedPayloads.map(payload => (
+      handler('begin', payload, new AbortController().signal)
+    )))
     const unknown = await handler(secret, { secret }, new AbortController().signal)
 
-    expect(malformed).toEqual({
+    expect(malformed).toEqual(malformedPayloads.map(() => ({
       ok: true,
       value: { success: false, code: 'unavailable' },
-    })
-    expect(unknown).toEqual(malformed)
+    })))
+    expect(unknown).toEqual(malformed[0])
     expect(JSON.stringify([malformed, unknown])).not.toContain(secret)
     expect(subject.controller.begin).not.toHaveBeenCalled()
   })
@@ -164,7 +174,7 @@ describe('DSH embedded Garmin authentication RPC', () => {
       ok: true,
       value: { success: false, code: 'unavailable' },
     })
-    await expect(handler('begin', {}, aborted.signal)).resolves.toEqual({
+    await expect(handler('begin', { region: 'cn' }, aborted.signal)).resolves.toEqual({
       ok: true,
       value: { success: false, code: 'unavailable' },
     })
@@ -185,7 +195,7 @@ describe('DSH embedded Garmin authentication RPC', () => {
     )
     const handler = subject.handle.mock.calls[0][1]
     const request = new AbortController()
-    const result = handler('begin', {}, request.signal)
+    const result = handler('begin', { region: 'cn' }, request.signal)
     request.abort()
     resolveBegin({
       success: true,

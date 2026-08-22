@@ -629,35 +629,132 @@ function renderBridgePage(
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Garmin Connect 登录</title>
   <style nonce="${nonce}">
-    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f7fb;
+      color: #1b2738;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; background: Canvas; color: CanvasText; }
-    main { min-height: 100vh; display: grid; grid-template-rows: auto minmax(28rem, 1fr) auto; }
-    header, #confirmation, #result { padding: .9rem 1rem; }
-    h1 { margin: 0 0 .35rem; font-size: 1.05rem; }
-    p { margin: .25rem 0; line-height: 1.45; }
-    iframe { width: 100%; min-height: 32rem; border: 0; background: white; }
-    button { min-height: 2.5rem; margin: .6rem .5rem 0 0; padding: 0 1rem; }
+    body { margin: 0; background: #f4f7fb; color: #1b2738; }
+    main {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto minmax(28rem, 1fr) auto;
+      gap: .65rem;
+      padding: .7rem;
+    }
+    .bridge-notice {
+      display: flex;
+      align-items: center;
+      gap: .65rem;
+      min-height: 3.35rem;
+      padding: .6rem .75rem;
+      background: #f0f8f4;
+      border: 1px solid #d1eadc;
+      border-radius: .8rem;
+      color: #1e6046;
+    }
+    .notice-icon {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.8rem;
+      height: 1.8rem;
+      border-radius: 999px;
+      background: #dff3e8;
+      font-size: .8rem;
+      font-weight: 800;
+    }
+    .notice-copy { min-width: 0; }
+    .notice-copy strong { display: block; font-size: .78rem; }
+    .privacy-note { display: block; margin-top: .1rem; color: #40745f; font-size: .67rem; }
+    p { margin: .18rem 0 0; line-height: 1.42; }
+    #status { color: #516477; font-size: .72rem; }
+    iframe {
+      width: 100%;
+      min-height: 32rem;
+      border: 1px solid #dce4ed;
+      border-radius: .8rem;
+      background: white;
+      box-shadow: 0 .4rem 1.6rem rgba(35, 55, 80, .08);
+    }
+    #confirmation {
+      align-self: center;
+      width: min(30rem, calc(100vw - 2.8rem));
+      margin: 1rem auto;
+      padding: 1.4rem;
+      border: 1px solid #dce4ed;
+      border-radius: 1rem;
+      background: white;
+      box-shadow: 0 .8rem 2.5rem rgba(35, 55, 80, .12);
+      text-align: center;
+    }
+    .confirmation-title { color: #1b2738; font-size: .9rem; font-weight: 750; }
+    .confirmation-hint { color: #6a7889; font-size: .72rem; }
+    #identity {
+      margin: .9rem 0 .25rem;
+      padding: .75rem;
+      border-radius: .7rem;
+      background: #f3f7fa;
+      color: #26364a;
+      font-size: .78rem;
+      font-weight: 650;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    #result { display: flex; justify-content: flex-end; padding: 0 .1rem .1rem; }
+    button {
+      min-height: 2.35rem;
+      padding: 0 1rem;
+      border-radius: .6rem;
+      cursor: pointer;
+      font: inherit;
+      font-size: .74rem;
+      font-weight: 700;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+    button:focus-visible { outline: 3px solid rgba(8, 120, 186, .28); outline-offset: 2px; }
+    button:active { transform: translateY(1px); }
+    button:disabled { cursor: wait; opacity: .55; }
+    .primary-action { border: 1px solid #0878ba; background: #0878ba; color: white; }
+    .primary-action:hover { background: #076aa5; border-color: #076aa5; }
+    .secondary-action { border: 1px solid #d2dbe5; background: white; color: #48596c; }
+    .secondary-action:hover { border-color: #afbdcb; background: #f6f8fa; }
     [hidden] { display: none !important; }
-    #identity { white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (max-width: 520px) {
+      main { gap: .45rem; padding: .45rem; }
+      .bridge-notice { border-radius: .65rem; }
+      iframe { border-radius: .65rem; }
+      #confirmation { width: calc(100vw - 1.8rem); padding: 1rem; }
+    }
+    @media (prefers-reduced-motion: reduce) { button { transition: none; } }
   </style>
 </head>
 <body>
   <main>
-    <header>
-      <h1>Garmin Connect 登录</h1>
+    <header class="bridge-notice">
+      <span aria-hidden="true" class="notice-icon">✓</span>
+      <div class="notice-copy">
+        <strong>安全登录</strong>
+        <span class="privacy-note">仅在 Garmin 官方页面输入账号、密码和验证码</span>
       <p id="status" role="status" aria-live="polite">请在 Garmin 官方页面中完成登录和验证码验证。</p>
+      </div>
     </header>
     <iframe id="garmin-auth-frame" title="Garmin 官方登录" src="${frameUrl}"
       sandbox="allow-forms allow-scripts allow-same-origin allow-popups allow-storage-access-by-user-activation"
       referrerpolicy="no-referrer"></iframe>
     <section id="confirmation" hidden>
-      <p>请确认这是你要保存的 Garmin 账号：</p>
+      <p class="confirmation-title">确认 Garmin 账号</p>
+      <p class="confirmation-hint">请确认这是你要安全保存到本机的账号</p>
       <p id="identity"></p>
-      <button id="confirm" type="button">确认并保存</button>
-      <button id="reject" type="button">取消</button>
+      <button class="primary-action" id="confirm" type="button">确认并保存</button>
+      <button class="secondary-action" id="reject" type="button">取消</button>
     </section>
-    <section id="result"><button id="cancel" type="button">取消登录</button></section>
+    <section id="result">
+      <button class="secondary-action" id="cancel" type="button">取消登录</button>
+    </section>
   </main>
   <script nonce="${nonce}">${script}</script>
 </body>

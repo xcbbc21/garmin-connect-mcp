@@ -81,13 +81,22 @@ export class EmbeddedAuthController {
     this.server = options?.server
   }
 
-  async begin(signal?: AbortSignal): Promise<EmbeddedAuthBeginResult> {
+  async begin(
+    signal?: AbortSignal,
+    requestedRegion?: GarminRegion,
+  ): Promise<EmbeddedAuthBeginResult> {
     const configuration = normalizeConfiguration(
       this.username,
       this.region,
       this.sessionTokenFile,
     )
     if (!configuration) return configurationFailure()
+    if (
+      requestedRegion !== undefined
+      && requestedRegion !== configuration.region
+    ) {
+      return configurationFailure()
+    }
     if (this.closed || isAborted(signal)) return unavailableFailure()
     if (this.beginning) return busyFailure()
     if (!this.flows || !this.server) return unavailableFailure()
