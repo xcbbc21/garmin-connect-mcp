@@ -4,8 +4,10 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import {
+  parseGarminAuthAccountRpcResult,
   parseGarminAuthBeginRpcResult,
   parseGarminAuthStatusRpcResult,
+  type GarminAuthenticatedAccount,
   type GarminAuthBeginResult,
   type GarminAuthPublicStatus,
 } from './protocol'
@@ -40,6 +42,8 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
   const [status, setStatus] = useState<GarminAuthPublicStatus>()
   const [busy, setBusy] = useState(false)
   const [selectedRegion, setSelectedRegion] = useState<GarminLoginRegion>()
+  const [authenticatedAccount, setAuthenticatedAccount] =
+    useState<GarminAuthenticatedAccount>()
   const generation = useRef(0)
   const activeFlowId = useRef<string>()
   const beginRequest = useRef<AbortController>()
@@ -137,6 +141,36 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
   }, [cancelFlow])
 
   useEffect(() => {
+    if (!ctx.connection.isLoopback) {
+      setAuthenticatedAccount(undefined)
+      return
+    }
+    if (status !== undefined && status !== 'succeeded') return
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        const result = parseGarminAuthAccountRpcResult(
+          await ctx.connection.rpc.call(
+            RPC_CHANNEL,
+            'account',
+            {},
+            controller.signal,
+          ),
+        )
+        if (controller.signal.aborted) return
+        setAuthenticatedAccount(
+          result.success && result.authenticated
+            ? { email: result.email, region: result.region }
+            : undefined,
+        )
+      } catch {
+        if (!controller.signal.aborted) setAuthenticatedAccount(undefined)
+      }
+    })()
+    return () => controller.abort()
+  }, [ctx, status])
+
+  useEffect(() => {
     if (!open) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') closeAuthentication()
@@ -190,6 +224,7 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
 
   return (
     <GarminAuthView
+      authenticatedAccount={authenticatedAccount}
       begin={begin}
       busy={busy}
       isLoopback={ctx.connection.isLoopback}

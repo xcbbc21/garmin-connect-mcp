@@ -97,7 +97,7 @@ describe('DSH embedded Garmin authentication RPC', () => {
     )
   })
 
-  it('dispatches only the closed begin/status/cancel endpoints', async () => {
+  it('dispatches only the closed account/begin/status/cancel endpoints', async () => {
     const subject = fixture()
     registerEmbeddedAuthRpc(
       subject.ctx as unknown as Context,
@@ -122,6 +122,93 @@ describe('DSH embedded Garmin authentication RPC', () => {
     expect(subject.controller.begin).toHaveBeenCalledWith(signal, 'cn')
     expect(subject.controller.status).toHaveBeenCalledWith({ flowId: 'a'.repeat(64) })
     expect(subject.controller.cancel).toHaveBeenCalledWith({ flowId: 'a'.repeat(64) })
+  })
+
+  it('returns only a bounded authenticated account on the optional account endpoint', async () => {
+    const subject = fixture()
+    const getAuthenticatedAccount = jest.fn().mockResolvedValue({
+      email: 'runner@example.test',
+      region: 'cn',
+    })
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      {
+        createController: subject.factory,
+        getAuthenticatedAccount,
+      },
+    )
+    const handler = subject.handle.mock.calls[0][1]
+    const signal = new AbortController().signal
+
+    await expect(handler('account', {}, signal)).resolves.toEqual({
+      ok: true,
+      value: {
+        success: true,
+        authenticated: true,
+        email: 'runner@example.test',
+        region: 'cn',
+      },
+    })
+    expect(getAuthenticatedAccount).toHaveBeenCalledTimes(1)
+
+    await expect(handler('account', { extra: true }, signal)).resolves.toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+    expect(getAuthenticatedAccount).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns no email when the Host has no authenticated account', async () => {
+    const subject = fixture()
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      {
+        createController: subject.factory,
+        getAuthenticatedAccount: jest.fn().mockResolvedValue(undefined),
+      },
+    )
+    const handler = subject.handle.mock.calls[0][1]
+
+    await expect(handler(
+      'account',
+      {},
+      new AbortController().signal,
+    )).resolves.toEqual({
+      ok: true,
+      value: { success: true, authenticated: false },
+    })
+  })
+
+  it('collapses unsafe account providers without exposing their values', async () => {
+    const subject = fixture()
+    const secret = 'ST-secret'
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      {
+        createController: subject.factory,
+        getAuthenticatedAccount: jest.fn().mockResolvedValue({
+          email: 'runner@example.test',
+          region: 'global',
+          token: secret,
+        }),
+      },
+    )
+    const handler = subject.handle.mock.calls[0][1]
+
+    const response = await handler(
+      'account',
+      {},
+      new AbortController().signal,
+    )
+
+    expect(response).toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+    expect(JSON.stringify(response)).not.toContain(secret)
   })
 
   it('rejects malformed begin and unknown endpoints without reflecting payloads', async () => {

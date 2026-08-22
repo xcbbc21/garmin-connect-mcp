@@ -13,6 +13,22 @@ export type GarminAuthClientErrorCode =
   | 'configuration'
   | 'busy'
 
+export type GarminAuthenticatedAccount = {
+  email: string
+  region: 'cn' | 'global'
+}
+
+export type GarminAuthAccountResult = {
+  success: true
+  authenticated: false
+} | ({
+  success: true
+  authenticated: true
+} & GarminAuthenticatedAccount) | {
+  success: false
+  code: GarminAuthClientErrorCode
+}
+
 export type GarminAuthBeginResult = {
   success: true
   flowId: string
@@ -36,6 +52,41 @@ export type GarminAuthCancelResult = {
 } | {
   success: false
   code: GarminAuthClientErrorCode
+}
+
+export function parseGarminAuthAccountRpcResult(value: unknown): GarminAuthAccountResult {
+  if (!isExactRecord(value, ['ok', 'value']) || value.ok !== true) {
+    return unavailable()
+  }
+  const business = value.value
+  if (isBusinessFailure(business)) return business
+  if (
+    isExactRecord(business, ['success', 'authenticated'])
+    && business.success === true
+    && business.authenticated === false
+  ) {
+    return { success: true, authenticated: false }
+  }
+  if (
+    !isExactRecord(business, [
+      'success',
+      'authenticated',
+      'email',
+      'region',
+    ])
+    || business.success !== true
+    || business.authenticated !== true
+    || !isSafeEmail(business.email)
+    || (business.region !== 'cn' && business.region !== 'global')
+  ) {
+    return unavailable()
+  }
+  return {
+    success: true,
+    authenticated: true,
+    email: business.email,
+    region: business.region,
+  }
 }
 
 export function parseGarminAuthBeginRpcResult(value: unknown): GarminAuthBeginResult {
@@ -117,6 +168,14 @@ function isClientErrorCode(value: unknown): value is GarminAuthClientErrorCode {
 function isPublicStatus(value: unknown): value is GarminAuthPublicStatus {
   return typeof value === 'string'
     && (GARMIN_AUTH_PUBLIC_STATUSES as readonly string[]).includes(value)
+}
+
+function isSafeEmail(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 320
+    && value === value.trim()
+    && !/[\u0000-\u001f\u007f-\u009f]/.test(value)
 }
 
 function isFlowId(value: unknown): value is string {

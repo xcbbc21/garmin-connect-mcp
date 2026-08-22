@@ -35,6 +35,13 @@ export interface GarminClientOptions {
   allowUnconfigured?: boolean
 }
 
+export interface GarminAuthenticatedAccount {
+  email: string
+  region: Config['region']
+}
+
+type SessionRestoreResult = false | 'verified' | 'unverified'
+
 /**
  * Thin wrapper around the `garmin-connect` npm package that adds:
  *   - Cordis-aware logging
@@ -55,6 +62,7 @@ export class GarminClient {
   private diRuntime: GarminDiSessionRuntime | null = null
   private sessionReplacementGate: Promise<void> | null = null
   private authEpoch = 0
+  private authenticatedAccount?: GarminAuthenticatedAccount
 
   constructor(
     ctx: Context,
@@ -111,28 +119,41 @@ export class GarminClient {
     return this.connecting
   }
 
+  /** Return only an account identity established by a trusted Host auth path. */
+  getAuthenticatedAccount(): GarminAuthenticatedAccount | undefined {
+    if (this.sessionReplacementGate || !this.authenticatedAccount) return undefined
+    return { ...this.authenticatedAccount }
+  }
+
   private async login(): Promise<void> {
     try {
+      let identityVerified = false
       if (!this.config.username.trim()) {
         throw new PublicToolError('Garmin username is required')
       }
       if (this.hasConfiguredSession() && !this.sessionTokenRejected) {
         this.log('info', '[garmin] Restoring session from token…')
-        if (!await this.restoreConfiguredSession()) {
+        const restored = await this.restoreConfiguredSession()
+        if (!restored) {
           this.log('warn', '[garmin] Configured session is unavailable; falling back to password login.')
           await this.withRequestTimeout(() => this.gc.login())
+          identityVerified = true
+        } else {
+          identityVerified = restored === 'verified'
         }
       } else if (this.diSessionSelected) {
         throw new PublicToolError(DI_SESSION_REJECTED_MESSAGE)
       } else if (this.config.password?.trim()) {
         this.log('info', '[garmin] Logging in with username/password…')
         await this.withRequestTimeout(() => this.gc.login())
+        identityVerified = true
       } else {
         throw new PublicToolError(
           'Garmin authentication is required; use Garmin Login or configure a session',
         )
       }
       this.connected = true
+      if (identityVerified) this.markAuthenticatedAccount()
       this.log('info', '[garmin] ✅ Connected successfully.')
     } catch (err) {
       this.connected = false
@@ -147,7 +168,7 @@ export class GarminClient {
     }
   }
 
-  private async restoreConfiguredSession(): Promise<boolean> {
+  private async restoreConfiguredSession(): Promise<SessionRestoreResult> {
     const inlineToken = this.config.sessionToken?.trim()
     try {
       let tokens: unknown
@@ -183,7 +204,7 @@ export class GarminClient {
             throw error
           }
           runtime.validateProfile(profile)
-          return true
+          return 'verified'
         }
         if (!sessionFileMatchesAccount(
           sessionFile,
@@ -200,7 +221,7 @@ export class GarminClient {
         throw new Error('Invalid token structure')
       }
       this.gc.loadToken(tokens.oauth1 as any, tokens.oauth2 as any)
-      return true
+      return 'unverified'
     } catch (error) {
       if (error instanceof GarminDiSessionFileError) {
         this.diSessionSelected = true
@@ -229,6 +250,7 @@ export class GarminClient {
   private rejectConfiguredSessionToken(): void {
     this.sessionTokenRejected = true
     this.connected = false
+    this.authenticatedAccount = undefined
     this.authEpoch += 1
     this.cache.clear()
     this.diRuntime?.invalidate()
@@ -261,6 +283,7 @@ export class GarminClient {
     this.sessionReplacementGate = replacementGate
 
     let committed = false
+    let verifiedReplacement = false
     try {
       const pendingConnection = this.connecting
       if (pendingConnection) await pendingConnection.catch(() => undefined)
@@ -273,6 +296,21 @@ export class GarminClient {
 
       await replaceGarminDiSessionPath(sessionTokenFile, writeSession)
       committed = true
+      try {
+        const session = await readSessionTokenFile(resolve(sessionTokenFile))
+        verifiedReplacement = isDiSessionFile(session)
+          && sessionFileMatchesAccount(
+            session,
+            this.config.username,
+            this.config.region,
+          )
+          && (
+            session.tokens.refreshExpiresAtMs === null
+            || session.tokens.refreshExpiresAtMs > Date.now()
+          )
+      } catch {
+        verifiedReplacement = false
+      }
     } finally {
       this.connected = false
       this.sessionTokenRejected = false
@@ -286,6 +324,10 @@ export class GarminClient {
       const upstream = this.gc.client as any
       upstream.oauth1Token = undefined
       upstream.oauth2Token = undefined
+      if (committed) {
+        if (verifiedReplacement) this.markAuthenticatedAccount()
+        else this.authenticatedAccount = undefined
+      }
 
       releaseReplacement()
       if (this.sessionReplacementGate === replacementGate) {
@@ -348,6 +390,7 @@ export class GarminClient {
           }
           this.log('warn', '[garmin] Session expired, reconnecting…')
           this.connected = false
+          this.authenticatedAccount = undefined
           await this.connect()
           continue
         }
@@ -425,6 +468,7 @@ export class GarminClient {
 
   private discardStaleRefresh(): void {
     this.connected = false
+    this.authenticatedAccount = undefined
     this.authEpoch += 1
     this.cache.clear()
     const upstream = this.gc.client as any
@@ -526,6 +570,7 @@ export class GarminClient {
           this.rejectConfiguredSessionToken()
         } else {
           this.connected = false
+          this.authenticatedAccount = undefined
         }
         throw new PublicToolError(
           'Garmin authentication expired before workout creation; ' +
@@ -550,6 +595,22 @@ export class GarminClient {
       )
     }
     return JSON.stringify(this.gc.exportToken())
+  }
+
+  private markAuthenticatedAccount(): void {
+    const email = this.config.username.trim()
+    if (
+      email.length === 0
+      || email.length > 320
+      || /[\u0000-\u001f\u007f-\u009f]/.test(email)
+    ) {
+      this.authenticatedAccount = undefined
+      return
+    }
+    this.authenticatedAccount = {
+      email,
+      region: this.config.region,
+    }
   }
 }
 

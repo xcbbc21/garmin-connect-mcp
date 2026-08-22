@@ -20,7 +20,7 @@ export function apply(ctx: Context, config: Config) {
   // Kick off the Garmin login in the background. Tool calls auto-connect on
   // first use, so a slow or temporarily failing login never blocks plugin
   // activation (dsh's Cordis fork has no 'ready' lifecycle event).
-  void client.connect().catch(() => {})
+  const initialConnection = client.connect().catch(() => undefined)
 
   // Register all AI-callable tools
   registerTools(ctx, client, resolvedConfig)
@@ -28,6 +28,10 @@ export function apply(ctx: Context, config: Config) {
   // Compatible DSH hosts gain an optional loopback-only browser sign-in UI.
   // The Garmin ticket and resulting session never cross into the web client.
   registerEmbeddedAuthRpc(ctx, resolvedConfig, {
+    getAuthenticatedAccount: async () => {
+      await initialConnection
+      return client.getAuthenticatedAccount()
+    },
     replaceSession: writer => client.replacePersistedSession(writer),
   })
 }

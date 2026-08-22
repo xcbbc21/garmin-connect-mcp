@@ -1,4 +1,5 @@
 import {
+  parseGarminAuthAccountRpcResult,
   parseGarminAuthBeginRpcResult,
   parseGarminAuthCancelRpcResult,
   parseGarminAuthStatusRpcResult,
@@ -7,6 +8,62 @@ import {
 const flowId = 'a'.repeat(64)
 
 describe('DSH Garmin authentication client protocol', () => {
+  it('accepts exact authenticated and unauthenticated account summaries', () => {
+    expect(parseGarminAuthAccountRpcResult({
+      ok: true,
+      value: { success: true, authenticated: false },
+    })).toEqual({ success: true, authenticated: false })
+
+    expect(parseGarminAuthAccountRpcResult({
+      ok: true,
+      value: {
+        success: true,
+        authenticated: true,
+        email: 'runner@example.test',
+        region: 'cn',
+      },
+    })).toEqual({
+      success: true,
+      authenticated: true,
+      email: 'runner@example.test',
+      region: 'cn',
+    })
+  })
+
+  it.each([
+    { success: true, authenticated: false, email: 'runner@example.test' },
+    {
+      success: true,
+      authenticated: true,
+      email: 'runner@example.test',
+      region: 'eu',
+    },
+    {
+      success: true,
+      authenticated: true,
+      email: `runner@${'x'.repeat(320)}.test`,
+      region: 'global',
+    },
+    {
+      success: true,
+      authenticated: true,
+      email: 'runner@example.test\r\nX-Token: ST-secret',
+      region: 'global',
+    },
+    {
+      success: true,
+      authenticated: true,
+      email: 'runner@example.test',
+      region: 'global',
+      token: 'ST-secret',
+    },
+  ])('rejects an unsafe authenticated account summary: %#', (value) => {
+    const parsed = parseGarminAuthAccountRpcResult({ ok: true, value })
+
+    expect(parsed).toEqual({ success: false, code: 'unavailable' })
+    expect(JSON.stringify(parsed)).not.toContain('ST-secret')
+  })
+
   it('accepts a bounded loopback bridge begin result', () => {
     expect(parseGarminAuthBeginRpcResult({
       ok: true,

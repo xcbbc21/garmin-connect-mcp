@@ -57,6 +57,7 @@ export const regionCopyStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   lineHeight: 1.15,
+  minWidth: 0,
 }
 
 export const regionNameStyle: CSSProperties = { fontSize: 13, fontWeight: 720 }
@@ -66,6 +67,10 @@ export const regionDomainStyle: CSSProperties = {
   fontSize: 9.5,
   fontWeight: 550,
   marginTop: 3,
+  maxWidth: 184,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
 }
 
 export const disabledButtonStyle: CSSProperties = {
@@ -335,6 +340,10 @@ export const CLIENT_STYLES = `
     .gca-launcher { right: 8px !important; top: 8px !important; gap: 6px !important; }
     .gca-region-button { min-width: 0 !important; padding: 8px 10px !important; }
     .gca-region-copy small { display: none; }
+    .gca-region-button[data-authenticated="true"] .gca-region-copy small {
+      display: block;
+      max-width: 118px !important;
+    }
     .gca-backdrop { padding: 8px !important; }
     .gca-dialog {
       border-radius: 15px !important;

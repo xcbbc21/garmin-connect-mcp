@@ -27,9 +27,33 @@ const ACCOUNT_ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/
 type Environment = Readonly<Record<string, string | undefined>>
 
 type EmbeddedAuthRpcResult =
+  | EmbeddedAuthAccountResult
   | EmbeddedAuthBeginResult
   | EmbeddedAuthStatusResult
   | EmbeddedAuthCancelResult
+
+export type EmbeddedAuthAccountResult = {
+  success: true
+  authenticated: false
+} | {
+  success: true
+  authenticated: true
+  email: string
+  region: GarminRegion
+} | {
+  success: false
+  code: 'unavailable'
+}
+
+export interface EmbeddedAuthAuthenticatedAccount {
+  email: string
+  region: GarminRegion
+}
+
+export type EmbeddedAuthAuthenticatedAccountProvider = () =>
+  | EmbeddedAuthAuthenticatedAccount
+  | undefined
+  | Promise<EmbeddedAuthAuthenticatedAccount | undefined>
 
 export interface EmbeddedAuthRpcController {
   begin(
@@ -47,6 +71,7 @@ export type EmbeddedAuthRpcControllerFactory = (
 
 export interface EmbeddedAuthRpcRegistrationOptions {
   createController?: EmbeddedAuthRpcControllerFactory
+  getAuthenticatedAccount?: EmbeddedAuthAuthenticatedAccountProvider
   replaceSession?: (writeSession: () => Promise<void>) => Promise<void>
 }
 
@@ -91,7 +116,7 @@ export function registerEmbeddedAuthRpc(
     const connection = connectionCtx.connection as HostConnectionHandle
     const disposeRpc = connection.rpc.handle(
       RPC_CHANNEL,
-      createRpcHandler(controller),
+      createRpcHandler(controller, registration.getAuthenticatedAccount),
       { authority: 'loopback' },
     )
 
@@ -110,6 +135,7 @@ export function registerEmbeddedAuthRpc(
 
 function createRpcHandler(
   controller: EmbeddedAuthRpcController,
+  getAuthenticatedAccount?: EmbeddedAuthAuthenticatedAccountProvider,
 ): ConnectionRpcHandler {
   return async (endpoint, payload, signal) => {
     const unavailable = (): { ok: true; value: EmbeddedAuthRpcResult } => ({
@@ -119,6 +145,27 @@ function createRpcHandler(
 
     try {
       if (signal.aborted) return unavailable()
+      if (endpoint === 'account') {
+        if (!isExactEmptyObject(payload)) return unavailable()
+        const rawAccount = await getAuthenticatedAccount?.()
+        if (rawAccount === undefined) {
+          return {
+            ok: true,
+            value: { success: true, authenticated: false },
+          }
+        }
+        const account = exactAuthenticatedAccount(rawAccount)
+        if (!account) return unavailable()
+        return {
+          ok: true,
+          value: {
+            success: true,
+            authenticated: true,
+            email: account.email,
+            region: account.region,
+          },
+        }
+      }
       if (endpoint === 'begin') {
         const requestedRegion = exactBeginRegion(payload)
         if (!requestedRegion) return unavailable()
@@ -191,6 +238,49 @@ function exactBeginRegion(value: unknown): GarminRegion | undefined {
     if (keys.length !== 1 || keys[0] !== 'region') return undefined
     const region = (value as Record<string, unknown>).region
     return region === 'cn' || region === 'global' ? region : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function isExactEmptyObject(value: unknown): boolean {
+  try {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return false
+    }
+    const prototype = Object.getPrototypeOf(value)
+    return (prototype === Object.prototype || prototype === null)
+      && Object.keys(value).length === 0
+  } catch {
+    return false
+  }
+}
+
+function exactAuthenticatedAccount(
+  value: unknown,
+): EmbeddedAuthAuthenticatedAccount | undefined {
+  try {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return undefined
+    }
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return undefined
+    const keys = Object.keys(value).sort()
+    if (keys.length !== 2 || keys[0] !== 'email' || keys[1] !== 'region') {
+      return undefined
+    }
+    const { email, region } = value as Record<string, unknown>
+    if (
+      typeof email !== 'string'
+      || email.length === 0
+      || email.length > 320
+      || email !== email.trim()
+      || /[\u0000-\u001f\u007f-\u009f]/.test(email)
+      || (region !== 'cn' && region !== 'global')
+    ) {
+      return undefined
+    }
+    return { email, region }
   } catch {
     return undefined
   }

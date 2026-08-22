@@ -176,6 +176,17 @@ describe('GarminClient', () => {
     )
   })
 
+  it('publishes the configured account only after password authentication succeeds', async () => {
+    const client = new GarminClient(createContext(), baseConfig)
+
+    expect(client.getAuthenticatedAccount()).toBeUndefined()
+    await client.connect()
+    expect(client.getAuthenticatedAccount()).toEqual({
+      email: 'runner@example.test',
+      region: 'global',
+    })
+  })
+
   it('accepts a newly persisted DI session after an earlier missing-file failure', async () => {
     const sessionTokenFile = await createEmptySessionPath()
     const client = new GarminClient(createContext(), {
@@ -195,6 +206,10 @@ describe('GarminClient', () => {
       JSON.stringify(createDiSession()),
       { encoding: 'utf8', mode: 0o600 },
     ))
+    expect(client.getAuthenticatedAccount()).toEqual({
+      email: 'runner@example.test',
+      region: 'global',
+    })
     await expect(client.connect()).resolves.toBeUndefined()
     expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
   })
@@ -265,6 +280,7 @@ describe('GarminClient', () => {
     await expect(client.connect()).resolves.toBeUndefined()
     expect(latestGarmin().loadToken).toHaveBeenCalledWith(tokens.oauth1, tokens.oauth2)
     expect(latestGarmin().login).not.toHaveBeenCalled()
+    expect(client.getAuthenticatedAccount()).toBeUndefined()
   })
 
   it('loads a profile-bound DI session without password or legacy OAuth', async () => {
@@ -278,6 +294,10 @@ describe('GarminClient', () => {
     latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
 
     await expect(client.connect()).resolves.toBeUndefined()
+    expect(client.getAuthenticatedAccount()).toEqual({
+      email: 'runner@example.test',
+      region: 'global',
+    })
     expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
     expect(latestGarmin().login).not.toHaveBeenCalled()
@@ -314,6 +334,7 @@ describe('GarminClient', () => {
     await expect(client.getActivities()).rejects.toThrow(
       'Garmin DI session was rejected; run garmin-connect-auth login --browser again',
     )
+    expect(client.getAuthenticatedAccount()).toBeUndefined()
     expect(latestGarmin().login).not.toHaveBeenCalled()
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
   })

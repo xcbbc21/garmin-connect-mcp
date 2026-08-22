@@ -5,8 +5,13 @@ const mockConnect = jest.fn().mockRejectedValue(new Error('not authenticated yet
 const mockReplacePersistedSession = jest.fn().mockImplementation(
   async (writer: () => Promise<void>) => writer(),
 )
+const mockGetAuthenticatedAccount = jest.fn().mockReturnValue({
+  email: 'runner@example.test',
+  region: 'global',
+})
 const mockClient = {
   connect: mockConnect,
+  getAuthenticatedAccount: mockGetAuthenticatedAccount,
   replacePersistedSession: mockReplacePersistedSession,
 }
 const mockRegisterTools = jest.fn()
@@ -65,10 +70,18 @@ describe('plugin activation', () => {
     expect(mockRegisterEmbeddedAuthRpc).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      { replaceSession: expect.any(Function) },
+      {
+        getAuthenticatedAccount: expect.any(Function),
+        replaceSession: expect.any(Function),
+      },
     )
 
     const options = mockRegisterEmbeddedAuthRpc.mock.calls[0][2]
+    await expect(options.getAuthenticatedAccount()).resolves.toEqual({
+      email: 'runner@example.test',
+      region: 'global',
+    })
+    expect(mockGetAuthenticatedAccount).toHaveBeenCalledTimes(1)
     const writer = jest.fn().mockResolvedValue(undefined)
     await options.replaceSession(writer)
     expect(mockReplacePersistedSession).toHaveBeenCalledWith(writer)

@@ -3,7 +3,9 @@ import type {
   GarminAuthBeginResult,
   GarminAuthClientErrorCode,
   GarminAuthPublicStatus,
+  GarminAuthenticatedAccount,
 } from './protocol'
+import { regionLoginSubtitle } from './presentation'
 import {
   CLIENT_STYLES,
   backdropStyle,
@@ -64,6 +66,7 @@ const REGION_DETAILS: Record<GarminLoginRegion, {
 }
 
 export interface GarminAuthViewProps {
+  authenticatedAccount?: GarminAuthenticatedAccount
   begin?: GarminAuthBeginResult
   busy: boolean
   isLoopback: boolean
@@ -76,6 +79,7 @@ export interface GarminAuthViewProps {
 }
 
 export function GarminAuthView({
+  authenticatedAccount,
   begin,
   busy,
   isLoopback,
@@ -90,7 +94,10 @@ export function GarminAuthView({
     return (
       <div className="gca-launcher" style={badgeWrapStyle}>
         <style>{CLIENT_STYLES}</style>
-        {LOGIN_REGIONS.map(region => renderRegionLoginButton(region, true))}
+        {LOGIN_REGIONS.map(region => renderRegionLoginButton(
+          region,
+          true,
+        ))}
       </div>
     )
   }
@@ -104,6 +111,7 @@ export function GarminAuthView({
         region,
         false,
         value => void onLogin(value),
+        authenticatedAccount,
       ))}
       {open && (
         <div className="gca-backdrop" role="presentation" style={backdropStyle} onMouseDown={event => {
@@ -197,14 +205,22 @@ function renderRegionLoginButton(
   region: GarminLoginRegion,
   disabled: boolean,
   onLogin?: (region: GarminLoginRegion) => void,
+  authenticatedAccount?: GarminAuthenticatedAccount,
 ): ReactElement {
   const details = REGION_DETAILS[region]
   const isChina = region === 'cn'
+  const accountMatches = authenticatedAccount?.region === region
+  const subtitle = regionLoginSubtitle(
+    region,
+    details.domain,
+    authenticatedAccount,
+  )
   return (
     <button
       aria-label={`登录 Garmin ${details.label}`}
       className="gca-region-button"
       disabled={disabled}
+      data-authenticated={accountMatches ? 'true' : undefined}
       key={region}
       onClick={onLogin ? () => onLogin(region) : undefined}
       style={{
@@ -214,7 +230,9 @@ function renderRegionLoginButton(
       }}
       title={disabled
         ? 'Garmin 登录仅支持本机 DSH'
-        : `登录 Garmin ${details.label}账号`}
+        : accountMatches
+          ? `已登录 Garmin ${details.label}账号：${authenticatedAccount.email}`
+          : `登录 Garmin ${details.label}账号`}
     >
       {isChina ? <span style={regionMarkStyle}>CN</span> : <GlobeIcon />}
       <span className="gca-region-copy" style={regionCopyStyle}>
@@ -222,8 +240,8 @@ function renderRegionLoginButton(
         <small style={{
           ...regionDomainStyle,
           ...(!isChina ? { color: 'rgba(255,255,255,.72)' } : {}),
-        }}>
-          {details.domain}
+        }} title={accountMatches ? subtitle : undefined}>
+          {subtitle}
         </small>
       </span>
     </button>
