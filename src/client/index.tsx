@@ -33,44 +33,82 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
   const [status, setStatus] = useState<GarminAuthPublicStatus>()
   const [busy, setBusy] = useState(false)
   const generation = useRef(0)
+  const activeFlowId = useRef<string>()
+  const beginRequest = useRef<AbortController>()
+
+  const cancelFlow = useCallback(async (
+    flowId: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    try {
+      await ctx.connection.rpc.call(RPC_CHANNEL, 'cancel', { flowId }, signal)
+    } catch {
+      // The Host also expires and cleans up abandoned flows fail-closed.
+    }
+  }, [ctx])
 
   const beginAuthentication = useCallback(async () => {
-    if (!ctx.connection.isLoopback || busy) return
+    if (!ctx.connection.isLoopback || busy || beginRequest.current) return
     const current = ++generation.current
+    const previousFlowId = activeFlowId.current
+    activeFlowId.current = undefined
     setOpen(true)
     setBusy(true)
     setBegin(undefined)
     setStatus(undefined)
+    const controller = new AbortController()
+    beginRequest.current = controller
     try {
+      if (previousFlowId) {
+        await cancelFlow(previousFlowId, controller.signal)
+      }
+      if (generation.current !== current || controller.signal.aborted) return
       const result = parseGarminAuthBeginRpcResult(
-        await ctx.connection.rpc.call(RPC_CHANNEL, 'begin', {}),
+        await ctx.connection.rpc.call(
+          RPC_CHANNEL,
+          'begin',
+          {},
+          controller.signal,
+        ),
       )
-      if (generation.current !== current) return
+      if (generation.current !== current || controller.signal.aborted) {
+        if (result.success) await cancelFlow(result.flowId)
+        return
+      }
       setBegin(result)
-      if (result.success) setStatus('in_progress')
+      if (result.success) {
+        activeFlowId.current = result.flowId
+        setStatus('in_progress')
+      }
     } catch {
-      if (generation.current === current) {
+      if (generation.current === current && !controller.signal.aborted) {
         setBegin({ success: false, code: 'unavailable' })
       }
     } finally {
+      if (beginRequest.current === controller) beginRequest.current = undefined
       if (generation.current === current) setBusy(false)
     }
-  }, [busy, ctx])
+  }, [busy, cancelFlow, ctx])
 
   const closeAuthentication = useCallback(() => {
     generation.current += 1
-    const active = begin?.success === true && status === 'in_progress'
-      ? begin.flowId
-      : undefined
+    beginRequest.current?.abort()
+    beginRequest.current = undefined
+    const active = activeFlowId.current
+    activeFlowId.current = undefined
     setOpen(false)
     setBegin(undefined)
     setStatus(undefined)
     setBusy(false)
-    if (active) {
-      void ctx.connection.rpc.call(RPC_CHANNEL, 'cancel', { flowId: active })
-        .catch(() => undefined)
-    }
-  }, [begin, ctx, status])
+    if (active) void cancelFlow(active)
+  }, [cancelFlow])
+
+  useEffect(() => () => {
+    beginRequest.current?.abort()
+    const active = activeFlowId.current
+    activeFlowId.current = undefined
+    if (active) void cancelFlow(active)
+  }, [cancelFlow])
 
   useEffect(() => {
     if (!open) return
@@ -104,6 +142,9 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
           return
         }
         setStatus(result.status)
+        if (isTerminal(result.status) && activeFlowId.current === flowId) {
+          activeFlowId.current = undefined
+        }
         if (!isTerminal(result.status)) {
           timer = setTimeout(() => void poll(), STATUS_POLL_MS)
         }

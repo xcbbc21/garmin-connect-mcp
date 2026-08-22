@@ -107,6 +107,12 @@ async function createSessionFile(source: string): Promise<string> {
   return path
 }
 
+async function createEmptySessionPath(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), 'garmin-session-test-'))
+  temporaryDirectories.push(directory)
+  return join(directory, 'session.json')
+}
+
 function createDiSession(
   username = 'runner@example.test',
   region: 'global' | 'cn' = 'global',
@@ -132,20 +138,49 @@ describe('GarminClient', () => {
     )))
   })
 
-  it('fails fast when the Garmin username is empty', () => {
-    expect(() => new GarminClient(createContext(), {
+  it('loads without a username so the local auth UI can report configuration', async () => {
+    const client = new GarminClient(createContext(), {
       ...baseConfig,
       username: '',
-    })).toThrow('Garmin username is required')
+    })
+
+    await expect(client.connect()).rejects.toThrow('Garmin username is required')
   })
 
-  it('fails fast when neither a password nor a session token is configured', () => {
-    expect(() => new GarminClient(createContext(), {
+  it('loads without credentials so embedded authentication can initialize', async () => {
+    const client = new GarminClient(createContext(), {
       ...baseConfig,
       password: '',
       sessionToken: '',
       sessionTokenFile: '',
-    })).toThrow('Garmin password, session token, or session token file is required')
+    })
+
+    await expect(client.connect()).rejects.toThrow(
+      'Garmin authentication is required; use Garmin Login or configure a session',
+    )
+  })
+
+  it('accepts a newly persisted DI session after an earlier missing-file failure', async () => {
+    const sessionTokenFile = await createEmptySessionPath()
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+
+    await expect(client.connect()).rejects.toThrow(
+      'Garmin session token file could not be read',
+    )
+    await writeFile(sessionTokenFile, JSON.stringify(createDiSession()), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
+
+    await client.acceptPersistedSessionUpdate()
+    await expect(client.connect()).resolves.toBeUndefined()
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
   })
 
   it('loads a session token file when no inline token or password is configured', async () => {

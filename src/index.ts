@@ -1,7 +1,10 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Config, resolveConfig } from './config'
 import { GarminClient } from './client'
-import { registerEmbeddedAuthRpc } from './embedded-auth-rpc'
+import {
+  registerEmbeddedAuthRpc,
+  resolveEmbeddedAuthConfig,
+} from './embedded-auth-rpc'
 import { registerTools } from './tools'
 
 export const name = 'garmin-connect'
@@ -9,7 +12,7 @@ export { Config, resolveConfig }
 export const inject = ['tools']
 
 export function apply(ctx: Context, config: Config) {
-  const resolvedConfig = resolveConfig(config)
+  const resolvedConfig = resolveEmbeddedAuthConfig(resolveConfig(config))
   const client = new GarminClient(ctx, resolvedConfig)
 
   // Kick off the Garmin login in the background. Tool calls auto-connect on
@@ -22,5 +25,7 @@ export function apply(ctx: Context, config: Config) {
 
   // Compatible DSH hosts gain an optional loopback-only browser sign-in UI.
   // The Garmin ticket and resulting session never cross into the web client.
-  registerEmbeddedAuthRpc(ctx, resolvedConfig)
+  registerEmbeddedAuthRpc(ctx, resolvedConfig, {
+    onSessionSaved: () => client.acceptPersistedSessionUpdate(),
+  })
 }

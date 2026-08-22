@@ -24,6 +24,8 @@ const RPC_CHANNEL = '/garmin-auth'
 const RPC_EFFECT_LABEL = 'garmin-connect: embedded auth rpc'
 const ACCOUNT_ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/
 
+type Environment = Readonly<Record<string, string | undefined>>
+
 type EmbeddedAuthRpcResult =
   | EmbeddedAuthBeginResult
   | EmbeddedAuthStatusResult
@@ -40,6 +42,28 @@ export type EmbeddedAuthRpcControllerFactory = (
   config: Config,
 ) => EmbeddedAuthRpcController
 
+export interface EmbeddedAuthRpcRegistrationOptions {
+  createController?: EmbeddedAuthRpcControllerFactory
+  onSessionSaved?: () => Promise<void> | void
+}
+
+/** Resolve the one session path shared by the embedded Host and Garmin client. */
+export function resolveEmbeddedAuthConfig(
+  config: Config,
+  env: Environment = process.env,
+): Config {
+  const configuredPath = config.sessionTokenFile?.trim()
+  if (configuredPath) return { ...config, sessionTokenFile: configuredPath }
+
+  const account = env.GARMIN_ACCOUNT?.trim() || 'default'
+  return {
+    ...config,
+    sessionTokenFile: ACCOUNT_ALIAS_PATTERN.test(account)
+      ? defaultAccountSessionPath(account, env)
+      : '',
+  }
+}
+
 /**
  * Register the private Host half of embedded Garmin authentication.
  *
@@ -49,8 +73,16 @@ export type EmbeddedAuthRpcControllerFactory = (
 export function registerEmbeddedAuthRpc(
   ctx: Context,
   config: Config,
-  createController: EmbeddedAuthRpcControllerFactory = createDefaultController,
+  options: EmbeddedAuthRpcRegistrationOptions | EmbeddedAuthRpcControllerFactory = {},
 ): void {
+  const registration = typeof options === 'function'
+    ? { createController: options }
+    : options
+  const createController = registration.createController
+    ?? ((value: Config) => createDefaultController(
+      value,
+      registration.onSessionSaved,
+    ))
   ctx.inject(['connection'], (connectionCtx) => {
     const controller = createController(config)
     const connection = connectionCtx.connection as HostConnectionHandle
@@ -86,7 +118,18 @@ function createRpcHandler(
       if (signal.aborted) return unavailable()
       if (endpoint === 'begin') {
         if (!isExactEmptyObject(payload)) return unavailable()
-        return { ok: true, value: await controller.begin(signal) }
+        const result = await controller.begin(signal)
+        if (signal.aborted) {
+          if (result.success) {
+            try {
+              controller.cancel({ flowId: result.flowId })
+            } catch {
+              // Cancellation is best effort at this already-aborted boundary.
+            }
+          }
+          return unavailable()
+        }
+        return { ok: true, value: result }
       }
       if (endpoint === 'status') {
         return { ok: true, value: controller.status(payload) }
@@ -101,30 +144,31 @@ function createRpcHandler(
   }
 }
 
-function createDefaultController(config: Config): EmbeddedAuthRpcController {
-  const account = process.env.GARMIN_ACCOUNT?.trim() || 'default'
-  const sessionTokenFile = config.sessionTokenFile?.trim()
-    || (ACCOUNT_ALIAS_PATTERN.test(account)
-      ? defaultAccountSessionPath(account)
-      : '')
+function createDefaultController(
+  config: Config,
+  onSessionSaved?: () => Promise<void> | void,
+): EmbeddedAuthRpcController {
   const http = createAxiosCanaryHttpAdapter()
   const flows = new EmbeddedAuthFlowManager({
-    authenticate: input => runCapturedServiceTicketDiAuthSetup(
-      {
-        ...input,
-        serviceTarget: 'sso-embed',
-      } satisfies CapturedServiceTicketDiAuthSetupOptions,
-      {
-        http,
-        writeSession: writeSessionTokenFile,
-      },
-    ).then(() => undefined),
+    authenticate: async (input) => {
+      await runCapturedServiceTicketDiAuthSetup(
+        {
+          ...input,
+          serviceTarget: 'sso-embed',
+        } satisfies CapturedServiceTicketDiAuthSetupOptions,
+        {
+          http,
+          writeSession: writeSessionTokenFile,
+        },
+      )
+      await onSessionSaved?.()
+    },
   })
   const server = new EmbeddedAuthServer(flows)
   return new EmbeddedAuthController({
     username: config.username,
     region: config.region,
-    sessionTokenFile,
+    sessionTokenFile: config.sessionTokenFile ?? '',
     flows,
     server,
   })

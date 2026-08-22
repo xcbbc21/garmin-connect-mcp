@@ -186,9 +186,55 @@ describe('EmbeddedAuthFlowManager', () => {
     await settle()
     expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({
       state: 'succeeded',
-      identity: confirmation.identity,
     })
     expect(manager.publicStatus(started.flowId)).toEqual({ state: 'succeeded' })
+  })
+
+  it('treats saving as an irrevocable commit point', async () => {
+    let now = 40_000
+    const saveGate = deferred()
+    const manager = new EmbeddedAuthFlowManager({
+      authenticate: async (input) => {
+        await input.confirmIdentity({ userName: 'runner' })
+        await saveGate.promise
+      },
+      now: () => now,
+      randomBytes: deterministicRandom(31, 32),
+      ttlMs: 1_000,
+    })
+    const started = manager.start(startInput)
+    const { csrf } = manager.bridgeBootstrap(started.flowId)
+    manager.submitTicket(started.flowId, csrf, 'ST-saving')
+    await settle()
+    manager.confirm(started.flowId, csrf, true)
+    now = 50_000
+
+    expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({
+      state: 'saving',
+      identity: { userName: 'runner' },
+    })
+    expect(() => manager.cancel(started.flowId, csrf))
+      .toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
+
+    saveGate.resolve()
+    await settle()
+    await settle()
+    expect(manager.publicStatus(started.flowId)).toEqual({ state: 'succeeded' })
+  })
+
+  it('prunes terminal records before starting another flow', () => {
+    const manager = new EmbeddedAuthFlowManager({
+      authenticate: jest.fn(),
+      randomBytes: deterministicRandom(33, 34, 35, 36),
+    })
+    const first = manager.start(startInput)
+    const firstCsrf = manager.bridgeBootstrap(first.flowId).csrf
+    manager.cancel(first.flowId, firstCsrf)
+
+    manager.start(startInput)
+
+    expect(() => manager.publicStatus(first.flowId))
+      .toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
   })
 
   it('treats rejected identity as cancellation and aborts authentication', async () => {
@@ -214,7 +260,6 @@ describe('EmbeddedAuthFlowManager', () => {
     expect(signal?.aborted).toBe(true)
     expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({
       state: 'cancelled',
-      identity: { userName: 'runner' },
     })
     expect(manager.publicStatus(started.flowId)).toEqual({ state: 'cancelled' })
   })
@@ -305,7 +350,7 @@ describe('EmbeddedAuthFlowManager', () => {
     expect(manager.publicStatus(started.flowId)).toEqual({ state: 'expired' })
   })
 
-  it('expires a terminal flow, removes its identity, and refuses later bootstrap', async () => {
+  it('keeps a scrubbed terminal result until the next flow prunes it', async () => {
     let now = 20_000
     const authenticate = jest.fn(async (input: EmbeddedAuthAuthenticateInput) => {
       await input.confirmIdentity({ displayName: 'Visible Runner' })
@@ -326,10 +371,11 @@ describe('EmbeddedAuthFlowManager', () => {
 
     now = 21_000
 
-    expect(manager.publicStatus(started.flowId)).toEqual({ state: 'expired' })
-    expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({ state: 'expired' })
-    expect(() => manager.bridgeBootstrap(started.flowId))
-      .toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
+    expect(manager.publicStatus(started.flowId)).toEqual({ state: 'succeeded' })
+    expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({ state: 'succeeded' })
+    expect(manager.bridgeBootstrap(started.flowId)).toEqual(expect.objectContaining({
+      csrf,
+    }))
   })
 
   it('resolves a pending identity decision as false when the flow expires', async () => {

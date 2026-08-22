@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import {
   registerEmbeddedAuthRpc,
+  resolveEmbeddedAuthConfig,
   type EmbeddedAuthRpcController,
 } from '../src/embedded-auth-rpc'
 
@@ -44,6 +45,34 @@ function fixture() {
 }
 
 describe('DSH embedded Garmin authentication RPC', () => {
+  it('uses one default account session path for the Host and Garmin client', () => {
+    const config = resolveEmbeddedAuthConfig({
+      username: 'runner@example.test',
+      region: 'cn',
+      sessionTokenFile: '',
+    } as never, {
+      GARMIN_ACCOUNT: 'personal',
+      XDG_CONFIG_HOME: '/private/config',
+    })
+
+    expect(config.sessionTokenFile).toBe(
+      '/private/config/dsh-plugin-garmin-connect/accounts/personal.session.json',
+    )
+  })
+
+  it('fails configuration closed for an invalid account alias', () => {
+    const config = resolveEmbeddedAuthConfig({
+      username: 'runner@example.test',
+      region: 'global',
+      sessionTokenFile: '',
+    } as never, {
+      GARMIN_ACCOUNT: '../escape',
+      XDG_CONFIG_HOME: '/private/config',
+    })
+
+    expect(config.sessionTokenFile).toBe('')
+  })
+
   it('waits for Connection and registers a loopback-only channel', () => {
     const subject = fixture()
 
@@ -138,6 +167,39 @@ describe('DSH embedded Garmin authentication RPC', () => {
     await expect(handler('begin', {}, aborted.signal)).resolves.toEqual({
       ok: true,
       value: { success: false, code: 'unavailable' },
+    })
+  })
+
+  it('cancels a flow that finishes after its begin request was aborted', async () => {
+    const subject = fixture()
+    type BeginResult = Awaited<ReturnType<EmbeddedAuthRpcController['begin']>>
+    let resolveBegin!: (value: BeginResult) => void
+    const pendingBegin = new Promise<BeginResult>((resolve) => {
+      resolveBegin = resolve
+    })
+    subject.controller.begin.mockReturnValue(pendingBegin)
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      subject.factory,
+    )
+    const handler = subject.handle.mock.calls[0][1]
+    const request = new AbortController()
+    const result = handler('begin', {}, request.signal)
+    request.abort()
+    resolveBegin({
+      success: true,
+      flowId: 'a'.repeat(64),
+      bridgeUrl: `http://127.0.0.1:43127/garmin-auth/bridge/${'a'.repeat(64)}`,
+      expiresAt: 1_900_000_000_000,
+    })
+
+    await expect(result).resolves.toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+    expect(subject.controller.cancel).toHaveBeenCalledWith({
+      flowId: 'a'.repeat(64),
     })
   })
 

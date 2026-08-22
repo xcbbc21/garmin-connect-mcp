@@ -153,6 +153,7 @@ export class EmbeddedAuthFlowManager {
   start(input: EmbeddedAuthStartInput): EmbeddedAuthStartResult {
     try {
       const normalized = normalizeStartInput(input)
+      this.pruneTerminalFlows()
       const frameConfig = createGarminEmbeddedAuthFrameConfig(
         normalized.region,
         normalized.bridgeOrigin,
@@ -256,6 +257,7 @@ export class EmbeddedAuthFlowManager {
 
     if (accepted) {
       flow.state = 'saving'
+      clearFlowTimer(flow)
       settleConfirmation(flow, true)
       return
     }
@@ -264,8 +266,16 @@ export class EmbeddedAuthFlowManager {
 
   cancel(flowId: string, csrf: string): void {
     const flow = this.authorize(flowId, csrf)
-    if (isTerminal(flow.state)) throw rejection()
+    if (flow.state === 'saving' || isTerminal(flow.state)) throw rejection()
     this.cancelFlow(flow)
+  }
+
+  private pruneTerminalFlows(): void {
+    for (const [flowId, flow] of this.flows) {
+      if (!isTerminal(flow.state)) continue
+      clearFlowTimer(flow)
+      this.flows.delete(flowId)
+    }
   }
 
   private uniqueFlowId(): string {
@@ -336,31 +346,32 @@ export class EmbeddedAuthFlowManager {
   }
 
   private completeAuthentication(flow: EmbeddedAuthFlowRecord): void {
-    this.expireFlow(flow)
     if (isTerminal(flow.state)) return
     if (flow.state !== 'saving') {
       this.failFlow(flow)
       return
     }
     flow.state = 'succeeded'
+    scrubFlow(flow)
   }
 
   private failFlow(flow: EmbeddedAuthFlowRecord): void {
-    this.expireFlow(flow)
     if (isTerminal(flow.state)) return
     flow.state = 'failed'
     flow.controller.abort()
     settleConfirmation(flow, false)
+    scrubFlow(flow)
   }
 
   private cancelFlow(flow: EmbeddedAuthFlowRecord): void {
     flow.state = 'cancelled'
     flow.controller.abort()
     settleConfirmation(flow, false)
+    scrubFlow(flow)
   }
 
   private expireFlow(flow: EmbeddedAuthFlowRecord, force = false): void {
-    if (flow.state === 'expired') return
+    if (flow.state === 'saving' || isTerminal(flow.state)) return
     if (!force) {
       try {
         const currentTime = this.now()
@@ -372,10 +383,7 @@ export class EmbeddedAuthFlowManager {
     flow.state = 'expired'
     flow.controller.abort()
     settleConfirmation(flow, false)
-    flow.identity = undefined
-    flow.username = ''
-    flow.sessionTokenFile = ''
-    clearFlowTimer(flow)
+    scrubFlow(flow)
   }
 }
 
@@ -479,6 +487,14 @@ function isTerminal(state: EmbeddedAuthFlowState): boolean {
 function clearFlowTimer(flow: EmbeddedAuthFlowRecord): void {
   if (flow.timer) clearTimeout(flow.timer)
   flow.timer = undefined
+}
+
+function scrubFlow(flow: EmbeddedAuthFlowRecord): void {
+  flow.identity = undefined
+  flow.username = ''
+  flow.sessionTokenFile = ''
+  flow.confirmation = undefined
+  clearFlowTimer(flow)
 }
 
 function constantTimeEqual(left: string, right: string): boolean {

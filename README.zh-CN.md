@@ -169,6 +169,7 @@ cp .env.example .env
 | 环境变量 | 必填 | 说明 |
 |---|---|---|
 | `GARMIN_USERNAME` | ✅ | Garmin 账号邮箱 |
+| `GARMIN_ACCOUNT` | ❌ | 默认 Web 登录 session 路径使用的小写本地别名（未设置时为 `default`） |
 | `GARMIN_PASSWORD` | ✅* | 旧版直接登录密码；不要用于下方的 MFA 交互式初始化 |
 | `GARMIN_SESSION_TOKEN` | ✅* | 内联预认证令牌（仍支持，但 session 文件更安全） |
 | `GARMIN_SESSION_TOKEN_FILE` | ✅* | 本地认证命令生成的 owner-only DI v2（或兼容的旧 OAuth）session 文件路径 |
@@ -179,8 +180,9 @@ cp .env.example .env
 | `GARMIN_LOG_LEVEL` | ❌ | 日志级别：`debug` \| `info` \| `warn` \| `error` |
 | `GARMIN_ACTIVITY_DETAIL` | ❌ | `compact`（默认）或 `full`（扩展运动数据，可能包含精确路线/位置；凭据及账号/社交标识会被过滤） |
 
-> \* `GARMIN_PASSWORD`、`GARMIN_SESSION_TOKEN`、`GARMIN_SESSION_TOKEN_FILE`
-> 三选一即可。受保护的 session 文件比内联 token 更安全，尤其适合隔离多个进程；
+> \* 正常读取数据时，`GARMIN_PASSWORD`、`GARMIN_SESSION_TOKEN`、
+> `GARMIN_SESSION_TOKEN_FILE` 三选一即可；实验性本机 Web 登录可以在三者都没有时启动，
+> 并创建默认账号 session 文件。受保护的 session 文件比内联 token 更安全，尤其适合隔离多个进程；
 > 这不代表未完成的 MFA 初始化已经得到支持。如果同时配置，内联 token
 > 优先于文件；有效 session 优先于密码登录。
 >
@@ -205,6 +207,13 @@ DI token 交换。Host 探测 Garmin profile，向用户显示安全化后的 pr
 确认后才原子写入绑定配置账号与区域、且仅所有者可访问的 session。外层 dsh 页面只会
 收到公开的进度状态；dsh 页面、模型上下文和 AI 可调用工具返回都拿不到 ticket、DI
 token、密码、MFA 验证码或 CAPTCHA 答案。
+
+打开对话框前必须配置 `GARMIN_USERNAME` 和正确的 `GARMIN_REGION`。该 Web 流程可不设置
+`GARMIN_SESSION_TOKEN_FILE`：Host 会使用 `GARMIN_ACCOUNT`（默认 `default`），在通常的
+POSIX 配置路径写入
+`~/.config/dsh-plugin-garmin-connect/accounts/<alias>.session.json`（其他平台使用对应配置
+目录）。用户确认并成功落盘后，当前插件会清除之前的 session 拒绝状态；下一次工具调用
+即可读取新文件，不需要重启 dsh。
 
 该 Web 流程有意只支持 dsh 的 loopback 本机网页，不是远程、托管或隧道登录端点。
 浏览器的第三方 Cookie 与 iframe 策略可能让 Garmin GAuth 无法完成，并且目前尚未使用

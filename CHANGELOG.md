@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Added an experimental Garmin sign-in entry to the local dsh Web UI. It opens a custom bridge on an ephemeral `127.0.0.1` port and embeds Garmin's official GAuth page inside that bridge.
 - After the bridge receives one valid region-bound service ticket, the plugin Host immediately exchanges it for DI credentials, probes a sanitized Garmin profile for user confirmation, and atomically saves an owner-only session bound to the configured account and region.
+- When no session path is configured, the local Web flow derives one from `GARMIN_ACCOUNT`; after a confirmed write, the running Garmin client forgets any earlier rejected session and can load the new file on its next tool call without a restart.
 
 ### Security
 - Email, password, MFA code, and CAPTCHA input stay inside Garmin's iframe. On the browser side, the short-lived ticket reaches only the isolated loopback bridge and is immediately passed to the Host exchange; the outer dsh page, model context, and AI-callable tool results receive neither the ticket nor DI tokens or form credentials.

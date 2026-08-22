@@ -50,17 +50,6 @@ export class GarminClient {
   private authEpoch = 0
 
   constructor(ctx: Context, config: Config) {
-    if (!config.username.trim()) {
-      throw new Error('Garmin username is required')
-    }
-    if (
-      !config.password?.trim()
-      && !config.sessionToken?.trim()
-      && !config.sessionTokenFile?.trim()
-    ) {
-      throw new Error('Garmin password, session token, or session token file is required')
-    }
-
     this.ctx = ctx
     this.config = config
     this.cache = new MemoryCache(config.cacheTtl)
@@ -98,6 +87,9 @@ export class GarminClient {
 
   private async login(): Promise<void> {
     try {
+      if (!this.config.username.trim()) {
+        throw new PublicToolError('Garmin username is required')
+      }
       if (this.hasConfiguredSession() && !this.sessionTokenRejected) {
         this.log('info', '[garmin] Restoring session from token…')
         if (!await this.restoreConfiguredSession()) {
@@ -111,7 +103,7 @@ export class GarminClient {
         await this.withRequestTimeout(() => this.gc.login())
       } else {
         throw new PublicToolError(
-          'Garmin session token was rejected; provide a new token or password',
+          'Garmin authentication is required; use Garmin Login or configure a session',
         )
       }
       this.connected = true
@@ -214,6 +206,38 @@ export class GarminClient {
     this.authEpoch += 1
     this.cache.clear()
     this.diRuntime?.invalidate()
+    const upstream = this.gc.client as any
+    upstream.oauth1Token = undefined
+    upstream.oauth2Token = undefined
+  }
+
+  /**
+   * Forget a rejected/previous credential after the trusted auth Host has
+   * atomically replaced the configured session file. The next tool call reads
+   * and validates that file in this process; no restart is required.
+   */
+  async acceptPersistedSessionUpdate(): Promise<void> {
+    const sessionTokenFile = this.config.sessionTokenFile?.trim()
+    if (!sessionTokenFile) {
+      throw new PublicToolError('Garmin session token file is not configured')
+    }
+
+    const pendingConnection = this.connecting
+    if (pendingConnection) await pendingConnection.catch(() => undefined)
+
+    this.diRuntime?.invalidate()
+    this.diRuntime = null
+    this.connected = false
+    this.sessionTokenRejected = false
+    this.diSessionSelected = false
+    this.authEpoch += 1
+    this.cache.clear()
+    this.config = {
+      ...this.config,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    }
     const upstream = this.gc.client as any
     upstream.oauth1Token = undefined
     upstream.oauth2Token = undefined
