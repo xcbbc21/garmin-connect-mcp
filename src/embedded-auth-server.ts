@@ -719,7 +719,14 @@ function bridgeScript(config: string): string {
     }
     if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return undefined
     const keys = Object.keys(decoded)
-    if (keys.length !== 2 || !keys.includes('serviceTicket') || !keys.includes('serviceUrl')) return undefined
+    if (
+      keys.length !== 4
+      || !keys.includes('status')
+      || !keys.includes('successDetails')
+      || !keys.includes('serviceTicket')
+      || !keys.includes('serviceUrl')
+    ) return undefined
+    if (decoded.status !== 'SUCCESS' || decoded.successDetails !== 'Login Successful') return undefined
     if (typeof decoded.serviceTicket !== 'string' || typeof decoded.serviceUrl !== 'string') return undefined
     if (decoded.serviceUrl !== serviceUrl) return undefined
     if (decoded.serviceTicket.length > 2048 || !/^ST-[A-Za-z0-9._~-]+$/.test(decoded.serviceTicket)) return undefined
@@ -730,7 +737,7 @@ function bridgeScript(config: string): string {
     const values = []
     if (identity && typeof identity.displayName === 'string') values.push(identity.displayName)
     if (identity && typeof identity.userName === 'string') values.push(identity.userName)
-    identityNode.textContent = values.join('\n')
+    identityNode.textContent = values.join('\\n')
   }
   const poll = async () => {
     try {

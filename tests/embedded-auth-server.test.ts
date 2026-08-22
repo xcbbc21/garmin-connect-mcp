@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { Script } from 'node:vm'
 import { EmbeddedAuthFlowManager } from '../src/embedded-auth-flow'
 import {
   EmbeddedAuthServer,
@@ -20,6 +21,18 @@ interface RequestResult {
   status: number
   headers: http.IncomingHttpHeaders
   body: string
+}
+
+interface BridgeMessageEvent {
+  data: unknown
+  origin: string
+  source: object
+}
+
+interface BridgeScriptHarness {
+  dispatchMessage(data: unknown): void
+  frameWindow: object
+  pendingRequests: Array<Promise<unknown>>
 }
 
 type TestAdapter = jest.Mocked<EmbeddedAuthServerAdapter> & {
@@ -83,6 +96,93 @@ function bridgeHeaders(origin: string): http.OutgoingHttpHeaders {
     Origin: origin,
     'Content-Type': 'application/json',
     'X-Garmin-Auth-CSRF': CSRF,
+  }
+}
+
+function extractInlineScript(html: string): string {
+  const matches = Array.from(
+    html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi),
+  )
+  if (matches.length !== 1 || matches[0][1] === undefined) {
+    throw new Error('expected exactly one bridge script')
+  }
+  return matches[0][1]
+}
+
+function runBridgeScript(
+  html: string,
+  bridgeUrl: string,
+  bridgeOrigin: string,
+): BridgeScriptHarness {
+  const frameWindow = {}
+  const messageListeners: Array<(event: BridgeMessageEvent) => void> = []
+  const pendingRequests: Array<Promise<unknown>> = []
+  const inertListener = (): void => {}
+  const element = (contentWindow?: object) => ({
+    addEventListener: inertListener,
+    contentWindow,
+    disabled: false,
+    hidden: false,
+    textContent: '',
+  })
+  const elements = new Map<string, ReturnType<typeof element>>([
+    ['garmin-auth-frame', element(frameWindow)],
+    ['status', element()],
+    ['confirmation', element()],
+    ['identity', element()],
+    ['confirm', element()],
+    ['reject', element()],
+    ['cancel', element()],
+  ])
+
+  const bridgeFetch = (
+    path: string,
+    options: {
+      body?: string
+      headers?: http.OutgoingHttpHeaders
+      method?: string
+    },
+  ): Promise<{ ok: boolean; json(): Promise<unknown> }> => {
+    const operation = request(new URL(path, bridgeUrl).toString(), {
+      method: options.method,
+      headers: { ...options.headers, Origin: bridgeOrigin },
+      body: options.body,
+    }).then(response => ({
+      ok: response.status >= 200 && response.status < 300,
+      json: async () => JSON.parse(response.body) as unknown,
+    }))
+    pendingRequests.push(operation)
+    return operation
+  }
+
+  new Script(extractInlineScript(html)).runInNewContext({
+    clearTimeout: () => {},
+    document: {
+      getElementById: (id: string) => elements.get(id),
+    },
+    fetch: bridgeFetch,
+    location: { pathname: new URL(bridgeUrl).pathname },
+    setTimeout: () => 1,
+    TextEncoder,
+    window: {
+      addEventListener: (
+        type: string,
+        listener: (event: BridgeMessageEvent) => void,
+      ) => {
+        if (type === 'message') messageListeners.push(listener)
+      },
+    },
+  })
+
+  if (messageListeners.length !== 1) {
+    throw new Error('expected exactly one Garmin message listener')
+  }
+  return {
+    dispatchMessage(data: unknown) {
+      messageListeners[0]({ data, origin: SSO_ORIGIN, source: frameWindow })
+    },
+    frameWindow,
+    pendingRequests,
   }
 }
 
@@ -181,6 +281,46 @@ describe('EmbeddedAuthServer', () => {
     expect(response.body).not.toMatch(/parent\.postMessage|localStorage|sessionStorage|document\.cookie/)
     expect(response.body).not.toContain('ST-ticket-secret')
     expect(adapter.bridgeBootstrap).toHaveBeenCalledWith(FLOW_ID)
+  })
+
+  it('serves a bridge whose inline script is valid JavaScript', async () => {
+    const adapter = createAdapter()
+    const server = new EmbeddedAuthServer(adapter)
+    servers.push(server)
+    const origin = await server.start()
+    adapter.setBridgeOrigin(origin)
+
+    const response = await request(server.bridgeUrl(FLOW_ID))
+    const inlineScript = extractInlineScript(response.body)
+
+    expect(response.status).toBe(200)
+    expect(() => new Script(inlineScript)).not.toThrow()
+  })
+
+  it('routes Garmin GAuth SUCCESS messages through the local ticket endpoint', async () => {
+    const adapter = createAdapter()
+    const server = new EmbeddedAuthServer(adapter)
+    servers.push(server)
+    const origin = await server.start()
+    adapter.setBridgeOrigin(origin)
+    const bridgeUrl = server.bridgeUrl(FLOW_ID)
+    const response = await request(bridgeUrl)
+    const harness = runBridgeScript(response.body, bridgeUrl, origin)
+
+    harness.dispatchMessage(JSON.stringify({
+      status: 'SUCCESS',
+      successDetails: 'Login Successful',
+      serviceTicket: 'ST-real_gauth_ticket~1',
+      serviceUrl: SERVICE_URL,
+    }))
+    await Promise.all([...harness.pendingRequests])
+
+    expect(adapter.submitTicket).toHaveBeenCalledTimes(1)
+    expect(adapter.submitTicket).toHaveBeenCalledWith(
+      FLOW_ID,
+      CSRF,
+      'ST-real_gauth_ticket~1',
+    )
   })
 
   it.each([
