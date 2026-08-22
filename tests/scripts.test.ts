@@ -9,7 +9,7 @@ describe('maintenance scripts', () => {
       path.resolve(__dirname, '../package.json'),
       'utf8',
     )) as {
-      exports?: Record<string, { types?: string; default?: string }>
+      exports?: Record<string, string | { types?: string; default?: string }>
       dsh?: { client?: { platform?: string; inject?: string[] } }
     }
 
@@ -17,6 +17,8 @@ describe('maintenance scripts', () => {
       types: './lib/types/client/index.d.ts',
       default: './lib/dsh-client.js',
     })
+    // DSH resolves this subpath while discovering dsh.client declarations.
+    expect(manifest.exports?.['./package.json']).toBe('./package.json')
     expect(manifest.dsh?.client).toEqual({
       platform: 'web',
       inject: [
@@ -25,6 +27,13 @@ describe('maintenance scripts', () => {
         '@deepseek-ai/dsh-client-ui-layout',
       ],
     })
+
+    const bundle = readFileSync(
+      path.resolve(__dirname, '../lib/dsh-client.js'),
+      'utf8',
+    )
+    expect(bundle).toContain('require("react/jsx-runtime")')
+    expect(bundle).not.toContain('React.createElement')
   })
 
   it('ships both test-report pages in the published package', () => {

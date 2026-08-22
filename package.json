@@ -12,7 +12,8 @@
     "./client": {
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/dsh-client.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "garmin-connect-mcp": "lib/mcp.js",
