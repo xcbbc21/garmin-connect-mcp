@@ -205,7 +205,9 @@ current directory. The plugin loads the workspace `.env` automatically.
 #### Two-step verification — experimental local dsh preview
 
 When dsh and its Web UI are running together on the same local machine, use the
-**Garmin Login** entry in the top bar. It opens a custom bridge on an ephemeral
+**China account** or **International account** Garmin button in the top bar. The
+selected button must match the process's configured `GARMIN_REGION`; a mismatch
+fails before any Garmin page is opened. A matching selection opens a custom bridge on an ephemeral
 `127.0.0.1` port; that bridge, rather than the dsh page itself, embeds Garmin's
 official GAuth page. Email, password, MFA code, and any CAPTCHA are entered only
 inside the Garmin iframe.

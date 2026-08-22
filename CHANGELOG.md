@@ -17,6 +17,9 @@ All notable changes to this project will be documented in this file.
 - Retrying or closing the Web login no longer discards an active flow handle until the Host confirms cancellation or a terminal state.
 - Installing a newly authenticated session now fences new Garmin work and drains old in-process DI refresh writes before the atomic replacement, preventing a late refresh from overwriting the new session.
 
+### Changed
+- The local dsh Web UI now presents separate China and International Garmin login buttons, validates the selected region against `GARMIN_REGION`, and uses a responsive, security-focused dialog and bridge layout.
+
 ### Experimental — not release-supported
 - The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.
 - Browser third-party-cookie or iframe policy may prevent Garmin GAuth from completing. Final end-to-end testing with a real MFA account is still pending, so this must not be described as completed two-step-verification support.
