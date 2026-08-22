@@ -21,6 +21,7 @@ import {
 } from './view'
 
 const RPC_CHANNEL = '/garmin-auth'
+const ACCOUNT_REFRESH_MS = 15_000
 const STATUS_POLL_MS = 750
 
 type GarminClientContext = ClientContext & { connection: ConnectionHandle }
@@ -46,6 +47,7 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
     useState<GarminAuthenticatedAccount>()
   const generation = useRef(0)
   const activeFlowId = useRef<string>()
+  const accountRequest = useRef<AbortController>()
   const beginRequest = useRef<AbortController>()
 
   const cancelFlow = useCallback((
@@ -140,13 +142,14 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
     if (active) void cancelFlow(active)
   }, [cancelFlow])
 
-  useEffect(() => {
+  const refreshAuthenticatedAccount = useCallback(() => {
     if (!ctx.connection.isLoopback) {
       setAuthenticatedAccount(undefined)
       return
     }
-    if (status !== undefined && status !== 'succeeded') return
+    accountRequest.current?.abort()
     const controller = new AbortController()
+    accountRequest.current = controller
     void (async () => {
       try {
         const result = parseGarminAuthAccountRpcResult(
@@ -165,10 +168,30 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
         )
       } catch {
         if (!controller.signal.aborted) setAuthenticatedAccount(undefined)
+      } finally {
+        if (accountRequest.current === controller) {
+          accountRequest.current = undefined
+        }
       }
     })()
-    return () => controller.abort()
-  }, [ctx, status])
+  }, [ctx])
+
+  useEffect(() => {
+    refreshAuthenticatedAccount()
+    if (!ctx.connection.isLoopback) return
+    const onFocus = (): void => refreshAuthenticatedAccount()
+    const timer = setInterval(refreshAuthenticatedAccount, ACCOUNT_REFRESH_MS)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+      accountRequest.current?.abort()
+    }
+  }, [ctx.connection.isLoopback, refreshAuthenticatedAccount])
+
+  useEffect(() => {
+    if (status === 'succeeded') refreshAuthenticatedAccount()
+  }, [refreshAuthenticatedAccount, status])
 
   useEffect(() => {
     if (!open) return

@@ -204,14 +204,16 @@ Garmin iframe。
 
 Garmin 产生的短期 service ticket 只会到达隔离的 loopback 桥页。桥页会校验预期区域、
 消息来源、iframe 来源、service 与 ticket，然后立即交给插件 Host 执行严格绑定区域的
-DI token 交换。Host 探测 Garmin profile，向用户显示安全化后的 profile 供确认，只有
-确认后才原子写入绑定配置账号与区域、且仅所有者可访问的 session。外层 dsh 页面只会
-收到公开的进度状态；dsh 页面、模型上下文和 AI 可调用工具返回都拿不到 ticket、DI
-token、密码、MFA 验证码或 CAPTCHA 答案。
+DI token 交换。Host 探测 Garmin profile，向用户显示安全化后的 profile 供确认。只有
+用户确认该 Garmin 账号与配置邮箱对应后，才原子写入绑定配置账号与区域、且仅所有者可访问
+的 session。外层 dsh 页面只会收到公开的进度状态；dsh 页面、模型上下文和 AI 可调用工具
+返回都拿不到 ticket、DI token、密码、MFA 验证码或 CAPTCHA 答案。
 
 当 Host 已通过密码登录、绑定 profile 的 DI session 或刚完成的 Web 登录确认账号身份时，
 匹配区域的按钮副标题会显示 `已登录：「账号邮箱」`；另一地区仍显示域名。仅加载但尚未
 验证身份的旧版 OAuth token 不会显示为已登录，状态接口也不会返回 ticket 或 token。
+本机网页每 15 秒及重新聚焦时刷新一次该状态，因此 Host 后续拒绝凭据或首次工具调用完成
+认证后，副标题会自动更新。
 
 打开对话框前必须配置 `GARMIN_USERNAME` 和正确的 `GARMIN_REGION`。该 Web 流程可不设置
 `GARMIN_SESSION_TOKEN_FILE`：Host 会使用 `GARMIN_ACCOUNT`（默认 `default`），在通常的

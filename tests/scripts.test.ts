@@ -75,14 +75,31 @@ describe('maintenance scripts', () => {
     expect(bundle).not.toContain('React.createElement')
 
     let definition: ClientBundleDefinition | undefined
+    const intervalCallbacks: Array<() => void> = []
+    const windowListeners = new Map<string, () => void>()
+    const clearIntervalMock = jest.fn()
+    const setIntervalMock = jest.fn((callback: () => void, _delay: number) => {
+      intervalCallbacks.push(callback)
+      return intervalCallbacks.length
+    })
+    const addEventListener = jest.fn((event: string, callback: () => void) => {
+      windowListeners.set(event, callback)
+    })
+    const removeEventListener = jest.fn((event: string) => {
+      windowListeners.delete(event)
+    })
     new Script(bundle).runInNewContext({
       AbortController,
+      clearInterval: clearIntervalMock,
+      setInterval: setIntervalMock,
       window: {
         __ModuleLoader__: {
           load(value: ClientBundleDefinition) {
             definition = value
           },
         },
+        addEventListener,
+        removeEventListener,
       },
     })
     expect(definition?.id).toBe('dsh-plugin-garmin-connect')
@@ -91,9 +108,10 @@ describe('maintenance scripts', () => {
       type: unknown,
       props: Record<string, unknown>,
     ): TestJsxElement => ({ type, props })
+    const effects: Array<() => void | (() => void)> = []
     const react = {
       useCallback: (callback: unknown) => callback,
-      useEffect: () => undefined,
+      useEffect: (effect: () => void | (() => void)) => effects.push(effect),
       useRef: (current: unknown) => ({ current }),
       useState: (initial: unknown) => [initial, () => undefined],
     }
@@ -143,6 +161,42 @@ describe('maintenance scripts', () => {
     const rendered = (overlay.type as (
       props: Record<string, unknown>,
     ) => unknown)(overlay.props)
+    const cleanups = effects
+      .map(effect => effect())
+      .filter((cleanup): cleanup is () => void => typeof cleanup === 'function')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(rpcCall).toHaveBeenCalledWith(
+      '/garmin-auth',
+      'account',
+      {},
+      expect.any(AbortSignal),
+    )
+    expect(setIntervalMock).toHaveBeenCalledWith(expect.any(Function), 15_000)
+
+    rpcCall.mockClear()
+    intervalCallbacks[0]()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(rpcCall).toHaveBeenCalledWith(
+      '/garmin-auth',
+      'account',
+      {},
+      expect.any(AbortSignal),
+    )
+
+    rpcCall.mockClear()
+    windowListeners.get('focus')?.()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(rpcCall).toHaveBeenCalledWith(
+      '/garmin-auth',
+      'account',
+      {},
+      expect.any(AbortSignal),
+    )
+
     const loginButtons = findButtons(rendered).filter(button => (
       typeof button.props['aria-label'] === 'string'
       && button.props['aria-label'].startsWith('登录 Garmin ')
@@ -173,6 +227,10 @@ describe('maintenance scripts', () => {
       { region: 'global' },
       expect.any(AbortSignal),
     )
+
+    cleanups.forEach(cleanup => cleanup())
+    expect(clearIntervalMock).toHaveBeenCalled()
+    expect(removeEventListener).toHaveBeenCalledWith('focus', expect.any(Function))
   })
 
   it('ships both test-report pages in the published package', () => {

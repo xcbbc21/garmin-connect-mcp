@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 ### Security
 - Email, password, MFA code, and CAPTCHA input stay inside Garmin's iframe. On the browser side, the short-lived ticket reaches only the isolated loopback bridge and is immediately passed to the Host exchange; the outer dsh page, model context, and AI-callable tool results receive neither the ticket nor DI tokens or form credentials.
 - The bridge validates the expected region, message origin, iframe source, service, and ticket before the one-shot Host exchange. The dsh page receives only public progress states.
+- Before saving a browser-authenticated session under the configured email, the bridge now explicitly asks the user to confirm that the sanitized Garmin profile corresponds to that email.
 
 ### Fixed
 - Retrying or closing the Web login no longer discards an active flow handle until the Host confirms cancellation or a terminal state.
@@ -20,6 +21,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - The local dsh Web UI now presents separate China and International Garmin login buttons, validates the selected region against `GARMIN_REGION`, and uses a responsive, security-focused dialog and bridge layout.
 - Once the Host has verified an account identity, the matching region button shows the configured account email as its signed-in subtitle; identity-unverified legacy OAuth tokens keep the neutral domain subtitle.
+- The signed-in subtitle refreshes every 15 seconds and when the page regains focus, so later Host-side credential rejection and lazy authentication are reflected without a reload.
 
 ### Experimental — not release-supported
 - The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.

@@ -216,8 +216,9 @@ Garmin sends its short-lived service ticket only to the isolated loopback bridge
 The bridge validates the expected region, message origin, iframe source, service,
 and ticket, then immediately hands it to the plugin Host for the region-bound DI
 token exchange. The Host probes the Garmin profile, shows a sanitized profile to
-the user for confirmation, and only then atomically saves an owner-only session
-bound to the configured account and region. The outer dsh page receives only
+the user, and asks them to confirm that it corresponds to the configured email.
+Only then does it atomically save an owner-only session bound to the configured
+account and region. The outer dsh page receives only
 public progress states: the dsh page, model context, and AI-callable tool results
 never receive the ticket, DI token, password, MFA code, or CAPTCHA response.
 
@@ -225,7 +226,9 @@ After the Host verifies the account through password login, a profile-bound DI
 session, or a newly confirmed Web login, the matching region button subtitle
 shows the verified account email as signed in; the other region keeps its
 domain. Merely loading an identity-unverified legacy OAuth token does not show
-this state, and the status endpoint never returns a ticket or token.
+this state, and the status endpoint never returns a ticket or token. The local
+page refreshes this state every 15 seconds and whenever the window regains focus,
+so later credential rejection or a successful lazy login updates the subtitle.
 
 Configure `GARMIN_USERNAME` and the correct `GARMIN_REGION` before opening the
 dialog. `GARMIN_SESSION_TOKEN_FILE` is optional for this Web flow: when omitted,

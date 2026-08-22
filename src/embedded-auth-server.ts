@@ -747,7 +747,7 @@ function renderBridgePage(
       referrerpolicy="no-referrer"></iframe>
     <section id="confirmation" hidden>
       <p class="confirmation-title">确认 Garmin 账号</p>
-      <p class="confirmation-hint">请确认这是你要安全保存到本机的账号</p>
+      <p class="confirmation-hint">请确认该 Garmin 账号与你配置的邮箱对应，再安全保存到本机</p>
       <p id="identity"></p>
       <button class="primary-action" id="confirm" type="button">确认并保存</button>
       <button class="secondary-action" id="reject" type="button">取消</button>

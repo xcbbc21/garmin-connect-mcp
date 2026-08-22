@@ -315,6 +315,7 @@ describe('EmbeddedAuthServer', () => {
     expect(response.body).toContain('id="garmin-auth-frame"')
     expect(response.body).toContain('https://sso.garmin.cn/sso/signin')
     expect(response.body).toContain('仅在 Garmin 官方页面输入账号、密码和验证码')
+    expect(response.body).toContain('请确认该 Garmin 账号与你配置的邮箱对应')
     expect(response.body).toContain('class="bridge-notice"')
     expect(response.body).toContain('class="primary-action"')
     expect(response.body).not.toContain('<h1>Garmin Connect 登录</h1>')
