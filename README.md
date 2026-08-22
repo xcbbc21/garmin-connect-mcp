@@ -221,6 +221,12 @@ bound to the configured account and region. The outer dsh page receives only
 public progress states: the dsh page, model context, and AI-callable tool results
 never receive the ticket, DI token, password, MFA code, or CAPTCHA response.
 
+After the Host verifies the account through password login, a profile-bound DI
+session, or a newly confirmed Web login, the matching region button subtitle
+shows the verified account email as signed in; the other region keeps its
+domain. Merely loading an identity-unverified legacy OAuth token does not show
+this state, and the status endpoint never returns a ticket or token.
+
 Configure `GARMIN_USERNAME` and the correct `GARMIN_REGION` before opening the
 dialog. `GARMIN_SESSION_TOKEN_FILE` is optional for this Web flow: when omitted,
 the Host uses `GARMIN_ACCOUNT` (default `default`) and writes

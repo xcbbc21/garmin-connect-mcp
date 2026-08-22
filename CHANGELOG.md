@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - The local dsh Web UI now presents separate China and International Garmin login buttons, validates the selected region against `GARMIN_REGION`, and uses a responsive, security-focused dialog and bridge layout.
+- Once the Host has verified an account identity, the matching region button shows the configured account email as its signed-in subtitle; identity-unverified legacy OAuth tokens keep the neutral domain subtitle.
 
 ### Experimental — not release-supported
 - The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.

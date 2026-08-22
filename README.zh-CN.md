@@ -209,6 +209,10 @@ DI token 交换。Host 探测 Garmin profile，向用户显示安全化后的 pr
 收到公开的进度状态；dsh 页面、模型上下文和 AI 可调用工具返回都拿不到 ticket、DI
 token、密码、MFA 验证码或 CAPTCHA 答案。
 
+当 Host 已通过密码登录、绑定 profile 的 DI session 或刚完成的 Web 登录确认账号身份时，
+匹配区域的按钮副标题会显示 `已登录：「账号邮箱」`；另一地区仍显示域名。仅加载但尚未
+验证身份的旧版 OAuth token 不会显示为已登录，状态接口也不会返回 ticket 或 token。
+
 打开对话框前必须配置 `GARMIN_USERNAME` 和正确的 `GARMIN_REGION`。该 Web 流程可不设置
 `GARMIN_SESSION_TOKEN_FILE`：Host 会使用 `GARMIN_ACCOUNT`（默认 `default`），在通常的
 POSIX 配置路径写入
