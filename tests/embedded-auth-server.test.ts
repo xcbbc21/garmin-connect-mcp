@@ -30,8 +30,10 @@ interface BridgeMessageEvent {
 }
 
 interface BridgeScriptHarness {
-  dispatchMessage(data: unknown): void
-  frameWindow: object
+  dispatchMessage(
+    data: unknown,
+    options?: { origin?: string; sourceMatches?: boolean },
+  ): void
   pendingRequests: Array<Promise<unknown>>
 }
 
@@ -178,16 +180,29 @@ function runBridgeScript(
     throw new Error('expected exactly one Garmin message listener')
   }
   return {
-    dispatchMessage(data: unknown) {
-      messageListeners[0]({ data, origin: SSO_ORIGIN, source: frameWindow })
+    dispatchMessage(data, options = {}) {
+      messageListeners[0]({
+        data,
+        origin: options.origin ?? SSO_ORIGIN,
+        source: options.sourceMatches === false ? {} : frameWindow,
+      })
     },
-    frameWindow,
     pendingRequests,
   }
 }
 
 describe('EmbeddedAuthServer', () => {
   const servers: EmbeddedAuthServer[] = []
+
+  const openBridge = async (adapter = createAdapter()) => {
+    const server = new EmbeddedAuthServer(adapter)
+    servers.push(server)
+    const origin = await server.start()
+    adapter.setBridgeOrigin(origin)
+    const bridgeUrl = server.bridgeUrl(FLOW_ID)
+    const response = await request(bridgeUrl)
+    return { adapter, bridgeUrl, origin, response }
+  }
 
   afterEach(async () => {
     await Promise.all(servers.splice(0).map(server => server.close()))
@@ -284,13 +299,7 @@ describe('EmbeddedAuthServer', () => {
   })
 
   it('serves a bridge whose inline script is valid JavaScript', async () => {
-    const adapter = createAdapter()
-    const server = new EmbeddedAuthServer(adapter)
-    servers.push(server)
-    const origin = await server.start()
-    adapter.setBridgeOrigin(origin)
-
-    const response = await request(server.bridgeUrl(FLOW_ID))
+    const { response } = await openBridge()
     const inlineScript = extractInlineScript(response.body)
 
     expect(response.status).toBe(200)
@@ -298,21 +307,17 @@ describe('EmbeddedAuthServer', () => {
   })
 
   it('routes Garmin GAuth SUCCESS messages through the local ticket endpoint', async () => {
-    const adapter = createAdapter()
-    const server = new EmbeddedAuthServer(adapter)
-    servers.push(server)
-    const origin = await server.start()
-    adapter.setBridgeOrigin(origin)
-    const bridgeUrl = server.bridgeUrl(FLOW_ID)
-    const response = await request(bridgeUrl)
+    const { adapter, bridgeUrl, origin, response } = await openBridge()
     const harness = runBridgeScript(response.body, bridgeUrl, origin)
-
-    harness.dispatchMessage(JSON.stringify({
+    const message = JSON.stringify({
       status: 'SUCCESS',
       successDetails: 'Login Successful',
       serviceTicket: 'ST-real_gauth_ticket~1',
       serviceUrl: SERVICE_URL,
-    }))
+    })
+
+    harness.dispatchMessage(message)
+    harness.dispatchMessage(message)
     await Promise.all([...harness.pendingRequests])
 
     expect(adapter.submitTicket).toHaveBeenCalledTimes(1)
@@ -321,6 +326,35 @@ describe('EmbeddedAuthServer', () => {
       CSRF,
       'ST-real_gauth_ticket~1',
     )
+  })
+
+  it('rejects untrusted or malformed Garmin GAuth messages before /ticket', async () => {
+    const { adapter, bridgeUrl, origin, response } = await openBridge()
+    const harness = runBridgeScript(response.body, bridgeUrl, origin)
+    const success = {
+      status: 'SUCCESS',
+      successDetails: 'Login Successful',
+      serviceTicket: 'ST-must_not_be_submitted',
+      serviceUrl: SERVICE_URL,
+    }
+
+    harness.dispatchMessage(JSON.stringify(success), {
+      origin: 'https://sso.garmin.com',
+    })
+    harness.dispatchMessage(JSON.stringify(success), { sourceMatches: false })
+    harness.dispatchMessage(JSON.stringify({ ...success, status: 'FAILURE' }))
+    harness.dispatchMessage(JSON.stringify({
+      ...success,
+      successDetails: 'Unexpected success detail',
+    }))
+    harness.dispatchMessage(JSON.stringify({ ...success, extra: true }))
+    harness.dispatchMessage(JSON.stringify({
+      serviceTicket: success.serviceTicket,
+      serviceUrl: success.serviceUrl,
+    }))
+    await Promise.all([...harness.pendingRequests])
+
+    expect(adapter.submitTicket).not.toHaveBeenCalled()
   })
 
   it.each([
