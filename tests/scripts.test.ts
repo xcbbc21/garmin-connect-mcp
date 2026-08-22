@@ -22,6 +22,11 @@ function findButtons(value: unknown): TestJsxElement[] {
   if (Array.isArray(value)) return value.flatMap(findButtons)
   if (typeof value !== 'object' || value === null) return []
   const element = value as Partial<TestJsxElement>
+  if (typeof element.type === 'function') {
+    return findButtons((element.type as (
+      props: Record<string, unknown>,
+    ) => unknown)(element.props ?? {}))
+  }
   return [
     ...(element.type === 'button' ? [element as TestJsxElement] : []),
     ...findButtons(element.props?.children),
