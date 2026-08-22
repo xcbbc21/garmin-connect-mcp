@@ -12,8 +12,10 @@
 **[English](README.md)** | 中文 | **[测试报告](TEST_REPORT.zh-CN.md)** | **[更新日志](CHANGELOG.md)**
 
 > [!WARNING]
-> **0.1.5 状态：** Garmin 两步验证尚未完成，不属于本次发布支持的能力。下文浏览器
-> 认证命令仅供本地开发调试，请勿依赖它进行生产访问或 session 恢复。
+> **未发布的实验状态：** dsh 本机网页现已加入嵌入式 Garmin 登录流程，但 Garmin
+> 两步验证仍不是正式发布支持的能力。它尚未使用真实 MFA 账号完成最终端到端验证，
+> 浏览器的第三方 Cookie 或 iframe 策略也可能阻断流程。请保留终端 `--browser` 流程
+> 作为后备，不要依赖任一预览功能进行生产访问或 session 恢复。
 
 ---
 
@@ -149,8 +151,10 @@ npx --legacy-peer-deps=false @deepseek-ai/dsh web
 
 ### 3. 配置凭据
 
-插件自身不会持久化凭据。请使用环境变量（或启动器提供的密钥存储），并确保
-`.env` 不进入版本控制。
+普通运行时凭据来自环境变量（或启动器提供的密钥存储），请确保 `.env` 不进入版本
+控制。实验性本机 Web 流程是唯一的有限例外：用户明确确认 profile 后，Host 会原子
+保存仅所有者可访问的 DI session 文件，但绝不会保存密码、MFA 验证码或 CAPTCHA
+答案。
 
 ```bash
 # 仅源码目录：复制随仓库提供的模板
@@ -188,10 +192,26 @@ cp .env.example .env
 > `GARMIN_SESSION_TOKEN` 与 `GARMIN_SESSION_TOKEN_FILE` 的内容都和密码一样敏感。
 > Token 导出不会作为 AI 可调用工具提供，也绝不要把 Token 粘贴进 AI 对话。
 
-#### 两步验证——未完成的开发预览
+#### 两步验证——实验性的 dsh 本机网页预览
 
-下方浏览器初始化流程仅保留用于开发和诊断，不是 0.1.5 支持的认证路径。若要参与
-测试，请在可信的本地终端中亲自运行，并显式选择账号所属区域：
+当 dsh 与它的 Web UI 运行在同一台本机时，可使用顶部栏中的 **Garmin 登录**入口。
+它会在随机 `127.0.0.1` 端口打开一个自定义桥页；Garmin 官方 GAuth 页面嵌入这个独立
+桥页，而不是直接嵌入 dsh 页面。邮箱、密码、MFA 验证码和任何 CAPTCHA 都只输入
+Garmin iframe。
+
+Garmin 产生的短期 service ticket 只会到达隔离的 loopback 桥页。桥页会校验预期区域、
+消息来源、iframe 来源、service 与 ticket，然后立即交给插件 Host 执行严格绑定区域的
+DI token 交换。Host 探测 Garmin profile，向用户显示安全化后的 profile 供确认，只有
+确认后才原子写入绑定配置账号与区域、且仅所有者可访问的 session。外层 dsh 页面只会
+收到公开的进度状态；dsh 页面、模型上下文和 AI 可调用工具返回都拿不到 ticket、DI
+token、密码、MFA 验证码或 CAPTCHA 答案。
+
+该 Web 流程有意只支持 dsh 的 loopback 本机网页，不是远程、托管或隧道登录端点。
+浏览器的第三方 Cookie 与 iframe 策略可能让 Garmin GAuth 无法完成，并且目前尚未使用
+真实 MFA 账号完成最终端到端测试。因此它仍是实验功能，不能标记为已完成认证能力。
+
+下方隔离浏览器命令继续作为开发和诊断后备，同样不是 0.1.5 支持的认证路径。请在
+可信的本地终端中亲自运行，并显式选择账号所属区域：
 
 ```bash
 # Garmin 国际区
@@ -274,7 +294,8 @@ profile（包括 `profileIdHash`）；绑定信息不会重复保存明文邮箱
 
 为保持向后兼容，只有 `oauth1`、`oauth2` 两个字段的旧 session 文件仍可读取。旧文件
 没有可校验的 profile 绑定；预期替代方案是带错账号保护且经过验证的 DI v2 session，
-但目前不能把未完成的浏览器命令当作受支持的生成方式。在 POSIX 系统中，旧文件本身
+但目前无论是实验性的 dsh Web 桥页还是未完成的 CLI 浏览器命令，都不能当作正式支持
+的生成方式。在 POSIX 系统中，旧文件本身
 仍须通过当前 owner-only 文件权限检查（通常为 `0600`）。
 
 POSIX 上默认账号目录会以 owner-only 权限创建。如需自定义 session 文件，可添加
@@ -282,18 +303,20 @@ POSIX 上默认账号目录会以 owner-only 权限创建。如需自定义 sess
 不能授予 group/other 任何权限（通常为 `0700`）；不存在的父目录会以 owner-only 权限
 创建。遇到不安全父目录时命令会拒绝写入，不会擅自放宽或修改其权限。
 
-MFA 初始化依赖 Garmin 私有 SSO/DI 流程，目前尚未完成。2026-08-21 的真实中国区
+后备 CLI 初始化依赖 Garmin 私有 SSO/DI 流程，目前尚未完成。2026-08-21 的真实中国区
 登录已产生短期 service ticket，DI exchange 与 profile probe 也分别得到验证；但当前
 浏览器拦截可能让 Garmin 跳转页停在 `ERR_BLOCKED_BY_CLIENT`，完整的“捕获 → 交换 →
 确认后写入 session → 重启 dsh/MCP → 刷新”链路尚未重新完成端到端验证，国际区浏览器
-链路也未验证。因此这些命令仍只是开发预览，不属于 0.1.5 的受支持功能。
+链路也未验证。因此这些命令仍只是开发预览，不属于 0.1.5 的受支持功能。新的 dsh
+loopback 桥页不再依赖这个跳转完成页，但它同样尚未使用真实 MFA 账号完成最终端到端
+验证。
 
 #### 多账号：每个账号使用独立进程
 
 当前支持的运行时模型是“每账号每进程隔离”：每个 dsh、Codex、Claude Code 或其他
 MCP 进程分别设置自己的 `GARMIN_USERNAME`、`GARMIN_REGION` 和
 `GARMIN_SESSION_TOKEN_FILE`，并使用独立初始化的 session。对于 MFA 账号，目前不能
-依赖尚未完成的浏览器流程来生成这些 session。
+依赖任一实验性浏览器流程来生成这些 session。
 
 不要把一个 session 文件复制给其他进程，也不要让并发进程共享同一文件。Garmin 的
 refresh token 可能轮换，否则并发写入可能互相覆盖或使凭据失效。例如分别使用
@@ -415,7 +438,8 @@ npm run test:integration
 | 支持环境变量及标记为 secret 的配置 | ✅ |
 | `.env` 已加入 `.gitignore`，不会被提交到 Git | ✅ |
 | 账号标识与凭据字段均标记为 `role('secret')` | ✅ |
-| 浏览器 MFA 初始化 | ⚠️ 未完成的开发预览；0.1.5 不提供正式支持 |
+| dsh 本机 Web MFA 桥页 | ⚠️ 实验性；仅 loopback，真实账号 MFA 端到端验证仍待完成 |
+| CLI `--browser` MFA 后备 | ⚠️ 未完成的开发预览；0.1.5 不提供正式支持 |
 | DI v2 session 绑定 username、region 与 `profileIdHash`；旧两字段 session 保持兼容 | ✅ |
 | 每进程独立初始化的 session 文件支持进程隔离多账号 | ✅ |
 | access token 提前刷新；幂等 GET 最多重放一次，写请求不重放 | ✅ |
@@ -430,7 +454,8 @@ npm run test:integration
 经过验证的 owner-only DI v2 或兼容旧 session 文件，dsh/MCP 可以通过
 `GARMIN_SESSION_TOKEN_FILE` 读取它，运行时不再需要账号密码。DI 文件会绑定规范化
 username、region 和 `profileIdHash`；为兼容旧版本，无绑定的 `oauth1`/`oauth2` 两字段
-文件仍可读取。使用上方浏览器命令创建新的 MFA session 仍未完成。Garmin refresh token
+文件仍可读取。通过上方 dsh Web 桥页或浏览器命令创建新的 MFA session 仍属实验功能，
+尚未得到正式发布支持。Garmin refresh token
 可能轮换，因此 dsh、Codex、Claude Code 或其他进程之间不得并发共享或复制同一文件。
 
 ---
@@ -801,7 +826,7 @@ npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add dsh-plugi
 - [x] **创建训练** — 安全预览并创建训练库条目
 - [x] **MCP 服务器** — 支持 Codex、Claude Code/Desktop、Cursor、Windsurf、WorkBuddy、ZCode
 - [x] **跑步教练** — 8 种课型、4 套训练理念与强制个性化问询
-- [ ] **浏览器 MFA 初始化** — 完成不会留下阻断页面的跳转 ticket 捕获，并端到端验证已确认 DI v2 持久化、dsh/MCP 重启与刷新，以及中国区/国际区流程
+- [ ] **浏览器 MFA 初始化** — loopback dsh 桥页已嵌入 Garmin 官方 GAuth，并让凭据/ticket 与 dsh、AI 界面隔离；继续完成真实 MFA、DI v2 持久化、重启/刷新、第三方 Cookie 及中国区/国际区端到端验证
 - [x] **进程隔离多账号** — 每个 dsh/MCP 进程使用单独初始化的 session 文件；不支持并发共享文件
 - [x] **FIT 下载** — 从原始归档安全提取一个 FIT 到用户所选父目录下自动生成的“区域+规范化邮箱”子目录
 - [ ] **训练状态** — VO2 Max、训练负荷、恢复时间

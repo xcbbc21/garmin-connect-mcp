@@ -12,10 +12,12 @@
 English | **[简体中文](README.zh-CN.md)** | **[Test Report](TEST_REPORT.md)** | **[Changelog](CHANGELOG.md)**
 
 > [!WARNING]
-> **0.1.5 status:** Garmin two-step verification is unfinished and is not a
-> supported release capability. The browser authentication commands documented
-> below are developer previews for local testing only; do not depend on them for
-> production access or session recovery.
+> **Unreleased experimental status:** the local dsh Web UI now has an embedded
+> Garmin sign-in flow, but Garmin two-step verification is still not a supported
+> release capability. It has not completed final end-to-end testing with a real
+> MFA account; browser third-party-cookie or iframe policy may also block it.
+> Keep the terminal `--browser` flow available as the fallback, and do not depend
+> on either preview for production access or session recovery.
 
 ---
 
@@ -151,8 +153,11 @@ The web UI starts at `http://127.0.0.1:3080` by default. If you launch Harness v
 
 ### 3. Configure Credentials
 
-The plugin does not persist credentials itself. Use environment variables (or a
-secret store provided by your launcher) and keep `.env` out of version control.
+Normal runtime credentials come from environment variables (or a secret store
+provided by your launcher); keep `.env` out of version control. The experimental
+local Web flow is the narrow exception: after explicit profile confirmation, the
+Host atomically saves an owner-only DI session file. It never saves the password,
+MFA code, or CAPTCHA response.
 
 ```bash
 # Source checkout only: copy the bundled template
@@ -195,10 +200,31 @@ current directory. The plugin loads the workspace `.env` automatically.
 > sensitive as a password. Token export is intentionally not AI-callable; never
 > paste a token into an AI conversation.
 
-#### Two-step verification — unfinished developer preview
+#### Two-step verification — experimental local dsh preview
 
-The browser setup below is retained for development and diagnosis, but it is
-not a supported 0.1.5 authentication path. If you choose to test it, run it
+When dsh and its Web UI are running together on the same local machine, use the
+**Garmin Login** entry in the top bar. It opens a custom bridge on an ephemeral
+`127.0.0.1` port; that bridge, rather than the dsh page itself, embeds Garmin's
+official GAuth page. Email, password, MFA code, and any CAPTCHA are entered only
+inside the Garmin iframe.
+
+Garmin sends its short-lived service ticket only to the isolated loopback bridge.
+The bridge validates the expected region, message origin, iframe source, service,
+and ticket, then immediately hands it to the plugin Host for the region-bound DI
+token exchange. The Host probes the Garmin profile, shows a sanitized profile to
+the user for confirmation, and only then atomically saves an owner-only session
+bound to the configured account and region. The outer dsh page receives only
+public progress states: the dsh page, model context, and AI-callable tool results
+never receive the ticket, DI token, password, MFA code, or CAPTCHA response.
+
+This Web flow is intentionally limited to the loopback dsh Web UI. It is not a
+remote, hosted, or tunneled login endpoint. Browser third-party-cookie and iframe
+policies can prevent Garmin GAuth from completing, and final end-to-end testing
+with a real MFA account has not yet been completed. Treat it as experimental,
+not as a completed authentication capability.
+
+The isolated-browser command below remains the fallback for development and
+diagnosis. It is likewise not a supported 0.1.5 authentication path. Run it
 yourself in a trusted local terminal from this source checkout and select the
 account's region explicitly:
 
@@ -299,7 +325,8 @@ other write requests are never replayed automatically.
 For backward compatibility, legacy session files containing only the two
 `oauth1` and `oauth2` fields are still accepted. They have no profile binding;
 the intended replacement is a validated DI v2 session with the mismatch guard,
-but the unfinished browser command is not yet a supported way to generate one.
+but neither the experimental dsh Web bridge nor the unfinished CLI browser
+command is yet a release-supported way to generate one.
 On POSIX, a legacy file must still pass the current owner-only file-permission
 check (normally mode `0600`).
 
@@ -309,21 +336,23 @@ On POSIX systems, an existing parent directory must grant no permissions to
 group or other users (normally mode `0700`); a missing parent is created
 owner-only. The command refuses an unsafe parent instead of weakening it.
 
-This MFA bootstrap uses Garmin's private SSO/DI flow and is unfinished. On
+The fallback CLI bootstrap uses Garmin's private SSO/DI flow and is unfinished. On
 2026-08-21, a real China-region browser login produced a short-lived service
 ticket and the DI exchange/profile probe was verified separately. The current
 browser interception can leave the redirected Garmin page at
 `ERR_BLOCKED_BY_CLIENT`, and the complete capture → exchange → confirmed
 session write → dsh/MCP restart/refresh path has not been revalidated end to
 end. The Global-region browser path is also unverified. These commands remain a
-developer preview and are not part of the supported 0.1.5 feature set.
+developer preview and are not part of the supported 0.1.5 feature set. The new
+dsh loopback bridge avoids depending on that redirected completion page, but it
+has not yet completed final end-to-end testing with a real MFA account either.
 
 #### Multiple accounts: one isolated process per account
 
 The supported runtime model is one account per process and one independently
 initialized session per process. Give each dsh, Codex, Claude Code, or other MCP
 process its own `GARMIN_USERNAME`, `GARMIN_REGION`, and
-`GARMIN_SESSION_TOKEN_FILE`. The unfinished browser bootstrap cannot yet be
+`GARMIN_SESSION_TOKEN_FILE`. Neither experimental browser bootstrap can yet be
 relied on to create those sessions for MFA accounts.
 
 Do not copy one session file to another process, and do not let simultaneous
@@ -464,7 +493,8 @@ explicitly want normalized details in your local terminal output.
 | Environment-variable and secret-marked configuration are supported | ✅ |
 | `.env` is in `.gitignore` | ✅ |
 | Account identifier and credentials marked with `role('secret')` in Cordis schema | ✅ |
-| Browser MFA bootstrap | ⚠️ Unfinished developer preview; not supported for 0.1.5 |
+| Local dsh Web MFA bridge | ⚠️ Experimental; loopback only, real-account MFA E2E still pending |
+| CLI `--browser` MFA fallback | ⚠️ Unfinished developer preview; not supported for 0.1.5 |
 | DI v2 sessions bind username, region, and `profileIdHash`; legacy two-field sessions remain compatible | ✅ |
 | Independently initialized per-process session files support isolated multi-account setups | ✅ |
 | Access refresh is preemptive; idempotent GET replay is limited to once and writes are never replayed | ✅ |
@@ -482,7 +512,8 @@ session file, dsh/MCP can read it through `GARMIN_SESSION_TOKEN_FILE`; the
 runtime does not need the account password. The DI file binds normalized
 username and region as well as `profileIdHash`; legacy unbound
 `oauth1`/`oauth2` files remain readable for compatibility. Creating a new MFA
-session with the browser commands above is still unfinished. Because Garmin
+session through the dsh Web bridge or browser commands above remains
+experimental and is not yet release-supported. Because Garmin
 refresh tokens may rotate, never concurrently share or copy one session file
 across dsh, Codex, Claude Code, or other processes.
 
@@ -885,7 +916,7 @@ Distribution notes:
 - [x] **Workout Creation** — safely preview and create structured workout-library entries
 - [x] **MCP Server** — use with Codex, Claude Code/Desktop, Cursor, Windsurf, WorkBuddy, ZCode
 - [x] **Running Coach** — 8 workout types, 4 training philosophies, and mandatory personalized intake
-- [ ] **Browser MFA Bootstrap** — finish redirect-ticket capture without a blocked completion page, then verify confirmed DI v2 persistence, dsh/MCP restart, refresh, and both CN/Global flows end to end
+- [ ] **Browser MFA Bootstrap** — the loopback dsh bridge now embeds official Garmin GAuth and keeps credentials/tickets out of dsh and AI surfaces; finish real-MFA, DI v2 persistence, restart/refresh, third-party-cookie, and CN/Global end-to-end verification
 - [x] **Process-isolated Accounts** — one independently initialized session file per dsh/MCP process; concurrent file sharing is unsupported
 - [x] **FIT Download** — safely extract one FIT from the original archive into an automatic region-and-normalized-email subdirectory under a user-selected parent
 - [ ] **Training Status** — VO2 Max, training load, recovery time

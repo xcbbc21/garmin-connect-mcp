@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Added an experimental Garmin sign-in entry to the local dsh Web UI. It opens a custom bridge on an ephemeral `127.0.0.1` port and embeds Garmin's official GAuth page inside that bridge.
+- After the bridge receives one valid region-bound service ticket, the plugin Host immediately exchanges it for DI credentials, probes a sanitized Garmin profile for user confirmation, and atomically saves an owner-only session bound to the configured account and region.
+
+### Security
+- Email, password, MFA code, and CAPTCHA input stay inside Garmin's iframe. On the browser side, the short-lived ticket reaches only the isolated loopback bridge and is immediately passed to the Host exchange; the outer dsh page, model context, and AI-callable tool results receive neither the ticket nor DI tokens or form credentials.
+- The bridge validates the expected region, message origin, iframe source, service, and ticket before the one-shot Host exchange. The dsh page receives only public progress states.
+
+### Experimental — not release-supported
+- The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.
+- Browser third-party-cookie or iframe policy may prevent Garmin GAuth from completing. Final end-to-end testing with a real MFA account is still pending, so this must not be described as completed two-step-verification support.
+- `garmin-connect-auth login --browser` remains the isolated-browser fallback for development and diagnosis.
+
 ## [0.1.5] - 2026-08-21
 
 > This release compares against npm `0.1.4`. Browser-based Garmin two-step
