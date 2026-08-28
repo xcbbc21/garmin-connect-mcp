@@ -12,10 +12,10 @@
 **[English](README.md)** | 中文 | **[测试报告](TEST_REPORT.zh-CN.md)** | **[更新日志](CHANGELOG.md)**
 
 > [!WARNING]
-> **未发布的实验状态：** dsh 本机网页现已加入嵌入式 Garmin 登录流程，但 Garmin
-> 两步验证仍不是正式发布支持的能力。它尚未使用真实 MFA 账号完成最终端到端验证，
-> 浏览器的第三方 Cookie 或 iframe 策略也可能阻断流程。请保留终端 `--browser` 流程
-> 作为后备，不要依赖任一预览功能进行生产访问或 session 恢复。
+> **未发布的实验状态：** dsh 本机网页、`garmin-connect-auth serve` 系统浏览器流程与
+> MCP URL elicitation 现在可以初始化同一种 owner-only session。Garmin 两步验证仍是
+> 预览功能：中国区与国际区真实 MFA 账号的完整端到端验证仍待完成，浏览器策略也可能
+> 阻断流程。旧的 `login --browser` 命令仅保留用于诊断。
 
 ---
 
@@ -169,7 +169,7 @@ cp .env.example .env
 | 环境变量 | 必填 | 说明 |
 |---|---|---|
 | `GARMIN_USERNAME` | ✅ | Garmin 账号邮箱 |
-| `GARMIN_ACCOUNT` | ❌ | 默认 Web 登录 session 路径使用的小写本地别名（未设置时为 `default`） |
+| `GARMIN_ACCOUNT` | ❌ | Web/CLI/MCP 隐式 session 路径使用的小写本地别名（未设置时为 `default`） |
 | `GARMIN_PASSWORD` | ✅* | 旧版直接登录密码；不要用于下方的 MFA 交互式初始化 |
 | `GARMIN_SESSION_TOKEN` | ✅* | 内联预认证令牌（仍支持，但 session 文件更安全） |
 | `GARMIN_SESSION_TOKEN_FILE` | ✅* | 本地认证命令生成的 owner-only DI v2（或兼容的旧 OAuth）session 文件路径 |
@@ -181,10 +181,12 @@ cp .env.example .env
 | `GARMIN_ACTIVITY_DETAIL` | ❌ | `compact`（默认）或 `full`（扩展运动数据，可能包含精确路线/位置；凭据及账号/社交标识会被过滤） |
 
 > \* 正常读取数据时，`GARMIN_PASSWORD`、`GARMIN_SESSION_TOKEN`、
-> `GARMIN_SESSION_TOKEN_FILE` 三选一即可；实验性本机 Web 登录可以在三者都没有时启动，
-> 并创建默认账号 session 文件。受保护的 session 文件比内联 token 更安全，尤其适合隔离多个进程；
+> `GARMIN_SESSION_TOKEN_FILE` 三选一即可；实验性本机 Web、`auth:serve` 和独立 MCP
+> 可以在三者都没有时启动，并创建隐式账号 session 文件。受保护的 session 文件比内联
+> token 更安全，尤其适合隔离多个进程；
 > 这不代表未完成的 MFA 初始化已经得到支持。如果同时配置，内联 token
-> 优先于文件；有效 session 优先于密码登录。
+> 会优先于文件，直到 Garmin 明确拒绝它；此后新写入且账号匹配的 session 文件可在重试
+> 时接管。有效 session 优先于密码登录。
 >
 > ⚠️ 如果密码包含 `#` 等特殊符号，请用**双引号**包裹，否则 `#` 后的内容会被当作注释截断：
 > ```
@@ -226,81 +228,59 @@ POSIX 配置路径写入
 浏览器的第三方 Cookie 与 iframe 策略可能让 Garmin GAuth 无法完成，并且目前尚未使用
 真实 MFA 账号完成最终端到端测试。因此它仍是实验功能，不能标记为已完成认证能力。
 
-下方隔离浏览器命令继续作为开发和诊断后备，同样不是 0.1.5 支持的认证路径。请在
-可信的本地终端中亲自运行，并显式选择账号所属区域：
+#### 本机系统浏览器认证——预览
+
+CLI 与 MCP 客户端推荐使用新的 loopback broker 预览流程，并显式选择账号别名与区域。
+该命令强制同时提供两个参数，不会从 `GARMIN_ACCOUNT`/`GARMIN_REGION` 推断，以免双账号
+环境把 session 写到错误账号：
 
 ```bash
-# Garmin 国际区
-npm run auth:setup -- --browser --account personal --region global
+# 已安装的可执行命令
+garmin-connect-auth serve --account personal --region global --open
+garmin-connect-auth serve --account personal-cn --region cn --open
 
-# 佳明中国区
-npm run auth:setup -- --browser --account personal --region cn
+# 源码目录
+npm run auth:serve -- --account personal --region global
+npm run auth:serve -- --account personal-cn --region cn
 ```
 
-`auth:setup` 只是源码仓库中的 npm script 别名。安装包对外稳定的系统命令名是
-`garmin-connect-auth`，因此 Codex、Claude Code（CC）及其他本地客户端都可以引导用户
-使用同一个认证入口：
+`serve` 会在随机 `127.0.0.1` 端口启动一次性桥页，并用系统默认浏览器打开。它不会创建
+或管理隔离的 Chrome/Playwright profile；操作系统可能复用已经运行的默认浏览器，也可能
+启动已配置的默认浏览器。CLI 可能读取已配置的账号邮箱，但密码、MFA
+验证码和 CAPTCHA 始终只在 Garmin 页面中输入，不能通过命令行参数、环境变量、MCP
+工具参数或模型输入传入。桥页只接收短期 service ticket，并交给本地 runtime 完成区域
+绑定的 DI exchange；页面显示安全化 profile 供确认后，runtime 才写入 owner-only session。
+
+未配置 `GARMIN_SESSION_TOKEN_FILE` 时，输出路径由 `GARMIN_ACCOUNT`/`--account` 推导：
+POSIX 常规配置路径为
+`~/.config/dsh-plugin-garmin-connect/accounts/<alias>.session.json`（其他平台使用对应配置根
+目录）。随后进程只需下列非密码配置：
+
+```dotenv
+GARMIN_USERNAME=your-email@example.com
+GARMIN_ACCOUNT=personal
+GARMIN_REGION=global
+GARMIN_FIT_DOWNLOAD_DIR=/absolute/path/to/garmin-fit-parent
+```
+
+该浏览器初始化仍是预览功能。中国区与国际区真实 MFA 账号的完整端到端验证仍待完成，
+因此不能把它当作生产环境 session 恢复保证。
+
+#### 旧版浏览器诊断
+
+`garmin-connect-auth login --browser` 仅保留用于开发和诊断，不再是 `serve` 或 MCP 认证的
+推荐后备。它通过 Playwright 启动隔离 Chrome，仍可能遇到重定向拦截。无落盘 canary 也
+使用这条旧链路：
 
 ```bash
-garmin-connect-auth --help
 garmin-connect-auth login --browser --account personal --region global
-garmin-connect-auth login --browser --account personal --region cn
-```
-
-直接运行裸命令的前提是 npm 可执行文件已进入 `PATH`，通常需要全局安装；
-dsh 的嵌套依赖或普通本地依赖不会自动暴露这个系统命令。可以全局安装已发布版本，
-也可以直接通过 `npx` 运行：
-
-```bash
-npm install -g dsh-plugin-garmin-connect@0.1.5
-npx -y --package dsh-plugin-garmin-connect@0.1.5 \
-  garmin-connect-auth login --browser --account personal --region global
-```
-
-源码 checkout 仍可使用 `npm install -g .` 或
-`npm run auth:setup -- --browser ...`。无论使用哪种入口，命令都会打开隔离、可见的系统
-Google Chrome。邮箱、密码、MFA 验证码和 CAPTCHA 只能在 Garmin 页面中输入；CLI
-不会读取这些表单值，也不接受通过命令行参数、环境变量、MCP 工具参数或模型输入传入。
-
-浏览器关闭后，CLI 会交换短期 service ticket，并探测与区域绑定的 Garmin DI profile
-接口。随后本地终端会并列显示经过安全化处理的 Garmin profile label、请求的账号别名和
-配置的 username。只有确认它们属于目标账号时才键入完全一致的 `yes`；其他任何输入都
-会取消写入。确认成功后才会写入 owner-only 的 DI v2 session 并输出路径。Codex、
-Claude Code、模型及其他代理不得读取或复制 session 内容或凭据。
-
-为兼容旧用法，省略 `--browser` 的终端认证流程仍然保留；它在本地终端中隐藏密码/MFA
-输入，但不能可靠处理 CAPTCHA 等仅浏览器挑战，也不是受支持的两步验证方案。
-
-如需诊断同一套浏览器/DI 链路，但不希望生成凭据，当前源码还保留一个明确“不落盘”
-的实验命令：
-
-```bash
-# 必须显式选择账号所属区域。
+garmin-connect-auth login --browser --account personal-cn --region cn
 npm run auth:canary -- --region global
 npm run auth:canary -- --region cn
 ```
 
-该 canary 会打开隔离、可见的系统 Google Chrome 窗口。邮箱、密码、MFA 或 CAPTCHA
-只在 Garmin 页面中输入，CLI 不读取这些表单值。程序只捕获一张短期 service ticket，
-随后立即关闭临时浏览器，再执行一次严格绑定区域的 DI token 交换并验证 profile API；
-不会保存 Cookie、Token、截图、trace、视频、HAR 或 session 文件。因此 canary 通过
-也只提供局部诊断证据；0.1.5 尚未提供受支持的浏览器 MFA session 创建流程。
-
-Canary 需要系统 Google Chrome，以及普通依赖安装时提供的可选 `playwright-core` 驱动。
-如果安装依赖时使用了 `--omit=optional`，canary 将不可用，但普通登录、dsh 和 MCP
-运行不受影响。
-
-未完成的初始化命令被设计为只在浏览器登录和显式 profile 确认成功后保存 DI v2
-session 并输出文件路径；POSIX 上 session 文件权限为仅文件所有者可读写的 `0600`；Windows 上使用当前用户配置
-目录，但尚未显式校验 Windows ACL。它不会保存密码或 MFA 验证码。运行时使用该路径
-并删除 `GARMIN_PASSWORD`：
-
-```dotenv
-GARMIN_USERNAME=your-email@example.com
-GARMIN_REGION=cn
-GARMIN_SESSION_TOKEN_FILE=/absolute/path/to/personal.session.json
-GARMIN_FIT_DOWNLOAD_DIR=/absolute/path/to/garmin-fit-parent
-```
+为兼容旧用法，不带 `--browser` 的隐藏终端输入流程仍保留，但无法可靠完成 CAPTCHA 等
+浏览器挑战。这些诊断入口不会改变 MFA 初始化的预览状态。
 
 DI v2 文件会通过不可逆摘要绑定规范化 username、region，以及刚探测到的 Garmin
 profile（包括 `profileIdHash`）；绑定信息不会重复保存明文邮箱。运行时会在发布刷新后的
@@ -310,29 +290,33 @@ profile（包括 `profileIdHash`）；绑定信息不会重复保存明文邮箱
 
 为保持向后兼容，只有 `oauth1`、`oauth2` 两个字段的旧 session 文件仍可读取。旧文件
 没有可校验的 profile 绑定；预期替代方案是带错账号保护且经过验证的 DI v2 session，
-但目前无论是实验性的 dsh Web 桥页还是未完成的 CLI 浏览器命令，都不能当作正式支持
-的生成方式。在 POSIX 系统中，旧文件本身
-仍须通过当前 owner-only 文件权限检查（通常为 `0600`）。
+但浏览器生成 DI v2 session 仍是预览功能，并非正式支持的生产恢复保证。在 POSIX
+系统中，旧文件本身
+仍须通过当前 owner-only 文件权限检查（通常为 `0600`）、完整安全祖先链校验，以及最终
+私有父目录校验（通常为 `0700`）。
 
-POSIX 上默认账号目录会以 owner-only 权限创建。如需自定义 session 文件，可添加
-`--output /absolute/private/path/personal.session.json`。在 POSIX 系统中，已经存在的父目录
-不能授予 group/other 任何权限（通常为 `0700`）；不存在的父目录会以 owner-only 权限
-创建。遇到不安全父目录时命令会拒绝写入，不会擅自放宽或修改其权限。
+POSIX 上会在打开 Garmin 认证前准备默认账号目录。如需自定义 session 文件，可添加
+`--output /absolute/private/path/personal.session.json`。预检会规范化已有且安全的链接目标、
+拒绝可被他人写入的不安全祖先，并要求最终父目录属于当前有效 UID、owner 具备写入和执行
+权限且 group/other 无任何权限（通常为 `0700`）；缺失层级会逐级以 `0700` 创建。写入器
+使用规范化后的目标，并在原子替换前再次核验父目录、已有目标和 no-follow 临时文件句柄。
+macOS 上还会拒绝每个已检查祖先、父目录、已有文件和空临时文件中的授权型扩展 ACL；仅有
+看似私有的 `0700`/`0600` mode 并不能绕过该校验。
 
-后备 CLI 初始化依赖 Garmin 私有 SSO/DI 流程，目前尚未完成。2026-08-21 的真实中国区
-登录已产生短期 service ticket，DI exchange 与 profile probe 也分别得到验证；但当前
-浏览器拦截可能让 Garmin 跳转页停在 `ERR_BLOCKED_BY_CLIENT`，完整的“捕获 → 交换 →
-确认后写入 session → 重启 dsh/MCP → 刷新”链路尚未重新完成端到端验证，国际区浏览器
-链路也未验证。因此这些命令仍只是开发预览，不属于 0.1.5 的受支持功能。新的 dsh
-loopback 桥页不再依赖这个跳转完成页，但它同样尚未使用真实 MFA 账号完成最终端到端
-验证。
+Windows 上，隐式账号路径会优先使用当前用户的本机 `LOCALAPPDATA`，而不是可能被重定向的
+漫游 `APPDATA`。显式目标也请放在当前用户的本机系统 profile/config 根目录之下，并使用
+全新的专用子目录树；不支持 UNC/网络目录。从最长匹配的 Windows 特殊目录根到 session 父目录，每一级都必须使用受保护
+DACL：owner 是当前 SID，且只有一条当前 SID 的 `FullControl` 规则。缺失层级会以该
+DACL 原子创建；已有但不精确的层级和任何重解析点都会被拒绝，不会被改写。空临时文件也
+会在写入凭据字节前应用同样严格的文件 DACL，读取 session 时还会重新验证整条目录链和
+文件 ACL。早期预览版仅靠标记的目录不再可信；请迁移到全新的专用子目录树。
 
 #### 多账号：每个账号使用独立进程
 
 当前支持的运行时模型是“每账号每进程隔离”：每个 dsh、Codex、Claude Code 或其他
-MCP 进程分别设置自己的 `GARMIN_USERNAME`、`GARMIN_REGION` 和
-`GARMIN_SESSION_TOKEN_FILE`，并使用独立初始化的 session。对于 MFA 账号，目前不能
-依赖任一实验性浏览器流程来生成这些 session。
+MCP 进程分别设置自己的 `GARMIN_USERNAME`、`GARMIN_REGION` 与 `GARMIN_ACCOUNT`（或
+显式的 `GARMIN_SESSION_TOKEN_FILE`）。每个进程都可延迟读取自己的隐式账号 session
+路径，但真实账号 MFA 初始化仍是预览功能。
 
 不要把一个 session 文件复制给其他进程，也不要让并发进程共享同一文件。Garmin 的
 refresh token 可能轮换，否则并发写入可能互相覆盖或使凭据失效。例如分别使用
@@ -341,8 +325,9 @@ refresh token 可能轮换，否则并发写入可能互相覆盖或使凭据失
 文件。
 
 多个进程可以共享同一个 `GARMIN_FIT_DOWNLOAD_DIR` 父目录，插件会按各自配置的区域和邮箱
-自动建立独立账号子目录，因此同一邮箱的 `cn` 与 `global` 账号也不会冲突。例如把两个服务器命名为 `garmin-personal` 和
-`garmin-family`，调用时明确选择目标服务器。
+自动建立独立账号子目录，因此同一邮箱的 `cn` 与 `global` 账号也不会冲突。只有一个 MCP
+条目时，普通 Garmin 查询默认使用该条目；有两个条目时命名为 `garmin-cn` 和
+`garmin-global`，仅在目标账号有歧义时才需要在提问中指出服务器名。
 
 这是进程隔离，不是单进程账号选择器，也不是多租户授权系统。不要把同一个 MCP
 进程共享给互不信任的用户；当前尚未实现按用户访问控制。在同一对话中切换账号和
@@ -455,7 +440,8 @@ npm run test:integration
 | `.env` 已加入 `.gitignore`，不会被提交到 Git | ✅ |
 | 账号标识与凭据字段均标记为 `role('secret')` | ✅ |
 | dsh 本机 Web MFA 桥页 | ⚠️ 实验性；仅 loopback，真实账号 MFA 端到端验证仍待完成 |
-| CLI `--browser` MFA 后备 | ⚠️ 未完成的开发预览；0.1.5 不提供正式支持 |
+| CLI `serve` 与 MCP URL elicitation | ⚠️ 实验性；离线覆盖已通过，真实账号 MFA E2E 待完成 |
+| 旧 CLI `login --browser` / `canary` | ⚠️ 仅 Playwright 诊断，不作为认证后备 |
 | DI v2 session 绑定 username、region 与 `profileIdHash`；旧两字段 session 保持兼容 | ✅ |
 | 每进程独立初始化的 session 文件支持进程隔离多账号 | ✅ |
 | access token 提前刷新；幂等 GET 最多重放一次，写请求不重放 | ✅ |
@@ -470,7 +456,7 @@ npm run test:integration
 经过验证的 owner-only DI v2 或兼容旧 session 文件，dsh/MCP 可以通过
 `GARMIN_SESSION_TOKEN_FILE` 读取它，运行时不再需要账号密码。DI 文件会绑定规范化
 username、region 和 `profileIdHash`；为兼容旧版本，无绑定的 `oauth1`/`oauth2` 两字段
-文件仍可读取。通过上方 dsh Web 桥页或浏览器命令创建新的 MFA session 仍属实验功能，
+文件仍可读取。通过上方 dsh Web 桥页、`serve` 或 MCP URL elicitation 创建新的 MFA session 仍属实验功能，
 尚未得到正式发布支持。Garmin refresh token
 可能轮换，因此 dsh、Codex、Claude Code 或其他进程之间不得并发共享或复制同一文件。
 
@@ -494,21 +480,43 @@ npm run build
 请把示例中的 `/absolute/path/to/garmin-connect-plugin-for-dsh` 替换为本地源码目录的
 真实绝对路径。
 
-下面只说明如何把**已经验证过的** session 文件接入 MCP 客户端，并不表示未完成的浏览器
-MFA 初始化已经成为 0.1.5 的受支持流程。让客户端进程获得非密码的账号/区域信息、
-session 文件路径与 FIT 父目录，并把下面的占位路径替换为本机绝对路径：
+MCP 进程需要邮箱、显式区域和本地账号别名。session 文件路径可以不配置；此时服务会
+根据 `GARMIN_ACCOUNT` 推导 owner-only 路径。让客户端进程获得这些值及可选 FIT 父目录：
 
 ```bash
 export GARMIN_USERNAME='你的佳明邮箱'
 export GARMIN_REGION='cn'
-export GARMIN_SESSION_TOKEN_FILE='/absolute/path/to/personal.session.json'
+export GARMIN_ACCOUNT='personal-cn'
 export GARMIN_FIT_DOWNLOAD_DIR='/absolute/path/to/garmin-fit-parent'
+# 可选覆盖；否则使用 accounts/personal-cn.session.json。
+# export GARMIN_SESSION_TOKEN_FILE='/absolute/path/to/personal-cn.session.json'
 ```
 
-不要在这些环境变量中放密码或 MFA 验证码。MCP 服务器不会提示 MFA，只能读取已有的有效
-session。session 文件和 FIT 父目录都需要保护，因为活动文件可能包含精确位置与
-健康数据。每个同时运行的客户端进程都需要单独初始化的 session 文件；Codex、
-Claude Code、dsh 或其他客户端之间不得复制或并发共享同一文件。
+不要在这些环境变量中放密码或 MFA 验证码。工具遇到 session 缺失、过期或被拒绝，
+且客户端声明支持 MCP URL elicitation 时，本次工具调用会返回一个随机的本机
+`127.0.0.1` 登录链接。打开链接，在浏览器中完成 Garmin 登录/MFA 与 profile 确认，
+等待完成通知后，再重试原请求。服务端不会自动重放，因此不会借认证流程重复执行写入。
+不支持 URL elicitation 的客户端会收到等价的可信终端回退命令：
+
+若环境中仍保留旧的 `GARMIN_PASSWORD`，无需 MFA 的密码登录仍可继续工作；如果锁定版本
+的 SDK 返回 MFA/ticket challenge，则会把它转换成同一个可由浏览器恢复的 MCP 认证状态，
+密码和上游错误文本都不会进入工具结果。
+
+```bash
+garmin-connect-auth serve --account personal-cn --region cn --open
+```
+
+如果该 MCP 条目显式设置了 `GARMIN_SESSION_TOKEN_FILE`，请在可信终端导出同一个值，或
+给命令追加 `--output` 并使用相同目标。回退错误不会把本机路径回显到模型上下文。
+`serve` 成功写入内容已变化且账号匹配的 session 后，重新调用工具即可让仍在运行的 MCP
+进程热加载同一个安全文件快照，无需重启 MCP。内容未变化的已拒绝文件、refresh 已过期
+的替换文件或其他账号的文件都不会被再次发给 Garmin 探测。如果内联
+`GARMIN_SESSION_TOKEN` 已被明确拒绝，这个安全替换也会在内存中接管，旧内联凭据不会重试。
+
+密码和 MFA 验证码只进入 Garmin 页面，不进入 MCP 工具或模型。session 文件与 FIT
+父目录都需要保护，因为它们可能授予账号访问能力或包含精确位置与健康数据。每个同时
+运行的客户端进程都要使用独立别名/session，不得在 Codex、Claude Code、dsh 等进程间
+复制或并发共享同一文件。真实账号 MFA 端到端仍为上文所述预览状态。
 
 ### OpenAI Codex（桌面端、CLI 与 IDE 扩展）
 
@@ -520,16 +528,17 @@ Claude Code、dsh 或其他客户端之间不得复制或并发共享同一文�
 [mcp_servers.garmin-connect]
 command = "node"
 args = ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"]
-env_vars = ["GARMIN_USERNAME", "GARMIN_REGION", "GARMIN_SESSION_TOKEN_FILE", "GARMIN_FIT_DOWNLOAD_DIR"]
+env_vars = ["GARMIN_USERNAME", "GARMIN_REGION", "GARMIN_ACCOUNT", "GARMIN_SESSION_TOKEN_FILE", "GARMIN_FIT_DOWNLOAD_DIR"]
 
 # 只读工具可正常运行；写本地文件或 Garmin 数据前由 Codex 请求批准。
 default_tools_approval_mode = "writes"
 ```
 
-此配置只读取单独分配给该 Codex 进程的 DI v2 session；Codex 不会接收或询问密码/MFA
-验证码。不要复用已经分配给 dsh、Claude Code 或其他运行中进程的 session。第二个账号
-请新增 `[mcp_servers.garmin-family]` 等服务器表，并提供另一个独立初始化的 session
-文件。它可以复用同一个 FIT 父目录，输出会自动
+此配置使用单独分配给该 Codex 进程的 session。若 Codex 声明 URL elicitation 能力，
+它可以显示上文的本机登录链接；否则用同一别名执行可信终端 `serve` 命令。密码/MFA
+仍只进入 Garmin 页面。不要复用已经分配给 dsh、Claude Code 或其他运行中进程的
+session。国内与国际账号可分别新增 `garmin-cn`、`garmin-global` 等服务器表。它们可
+复用同一个 FIT 父目录，输出会自动
 进入该账号的“区域+规范化邮箱”子目录。
 
 Codex 进程必须继承上面导出的变量。如果桌面端不是从该终端启动，请在
@@ -555,11 +564,12 @@ session 内容写入 `~/.claude.json`，只配置 owner-only 文件路径：
 
 ```bash
 claude mcp add-json --scope user garmin-connect \
-  '{"type":"stdio","command":"node","args":["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],"env":{"GARMIN_USERNAME":"${GARMIN_USERNAME}","GARMIN_REGION":"${GARMIN_REGION:-global}","GARMIN_SESSION_TOKEN_FILE":"${GARMIN_SESSION_TOKEN_FILE}","GARMIN_FIT_DOWNLOAD_DIR":"${GARMIN_FIT_DOWNLOAD_DIR}"}}'
+  '{"type":"stdio","command":"node","args":["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],"env":{"GARMIN_USERNAME":"${GARMIN_USERNAME}","GARMIN_REGION":"${GARMIN_REGION:-global}","GARMIN_ACCOUNT":"${GARMIN_ACCOUNT:-default}","GARMIN_SESSION_TOKEN_FILE":"${GARMIN_SESSION_TOKEN_FILE}","GARMIN_FIT_DOWNLOAD_DIR":"${GARMIN_FIT_DOWNLOAD_DIR}"}}'
 ```
 
-该服务器只读取单独分配给此 Claude Code 进程的 DI v2 session；Claude Code 不会接收
-或询问密码/MFA 验证码。每增加一个进程或账号，都以不同名称注册服务器并提供另一个
+该服务器使用单独分配给此 Claude Code 进程的 session。客户端若未显示 MCP URL
+elicitation，就用可信终端 `serve` 命令初始化；密码/MFA 仍只进入 Garmin 页面。每增加
+一个进程或账号，都以不同名称注册服务器并提供另一个
 独立初始化的 session 文件；不要复制其他进程的 session。
 这些服务器可以复用同一个 FIT 父目录。
 
@@ -601,6 +611,7 @@ claude mcp list
       "env": {
         "GARMIN_USERNAME": "你的佳明邮箱",
         "GARMIN_REGION": "cn",
+        "GARMIN_ACCOUNT": "personal-cn",
         "GARMIN_SESSION_TOKEN_FILE": "/absolute/path/to/personal.session.json",
         "GARMIN_FIT_DOWNLOAD_DIR": "/absolute/path/to/garmin-fit-parent"
       }
@@ -637,6 +648,7 @@ WorkBuddy 桌面端支持用户级和项目级的本地 MCP。Garmin 属于个�
       "env": {
         "GARMIN_USERNAME": "你的佳明邮箱",
         "GARMIN_REGION": "cn",
+        "GARMIN_ACCOUNT": "personal-cn",
         "GARMIN_SESSION_TOKEN_FILE": "/absolute/path/to/personal.session.json",
         "GARMIN_FIT_DOWNLOAD_DIR": "/absolute/path/to/garmin-fit-parent"
       }
@@ -651,8 +663,9 @@ macOS/Linux 用 `command -v node`、Windows 用 `where node` 查找 Node.js 的�
 添加 `type`。保存后确认服务器状态变绿，再从只读查询开始测试。参见
 [WorkBuddy 官方 MCP 指南](https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/MCP-Guide)。
 
-这里的 session 文件必须是独立初始化且经过验证的文件；WorkBuddy 不会接收密码/MFA
-验证码。每增加一个账号，就新增一个命名的 `mcpServers` 条目，并使用独立的
+这里的 session 文件必须独立初始化；客户端若未显示 URL elicitation，就使用可信终端
+`serve` 命令。WorkBuddy 与模型不会接收密码/MFA 验证码。每增加一个账号，就新增一个
+命名的 `mcpServers` 条目，并使用独立的
 session 文件；多个条目可共享同一个 FIT 父目录，“区域+邮箱”账号子目录会自动生成。
 
 ### ZCode
@@ -671,6 +684,7 @@ session 文件；多个条目可共享同一个 FIT 父目录，“区域+邮箱
         "env": {
           "GARMIN_USERNAME": "你的佳明邮箱",
           "GARMIN_REGION": "cn",
+          "GARMIN_ACCOUNT": "personal-cn",
           "GARMIN_SESSION_TOKEN_FILE": "/absolute/path/to/personal.session.json",
           "GARMIN_FIT_DOWNLOAD_DIR": "/absolute/path/to/garmin-fit-parent"
         }
@@ -685,8 +699,9 @@ ZCode 也可以导入已有的 Codex 或 Claude Code MCP 配置。它兼容使�
 ZCode 就会整体跳过该 `.agents` 文件，而不是合并。参见
 [ZCode 官方 MCP 指南](https://zcode.z.ai/cn/docs/mcp-services)。
 
-这里的 session 文件必须是独立初始化且经过验证的文件；ZCode 不会接收密码/MFA
-验证码。每增加一个账号，就新增一个命名服务器，并使用独立的 session 文件；多个
+这里的 session 文件必须独立初始化；客户端若未显示 URL elicitation，就使用可信终端
+`serve` 命令。ZCode 与模型不会接收密码/MFA 验证码。每增加一个账号，就新增一个命名
+服务器，并使用独立的 session 文件；多个
 服务器可共享同一个 FIT 父目录，“区域+邮箱”账号子目录会自动生成。
 
 以上配置已与两款客户端公布的 schema 核对，但尚未记录使用真实 Garmin 账号完成的
@@ -709,16 +724,18 @@ npx -y --package dsh-plugin-garmin-connect garmin-connect-mcp
 ### 手动运行
 
 ```bash
-# 使用已有的有效 session 文件运行 MCP 服务器（标准输入输出）
+# 运行 MCP 服务器（stdio）；账号 session 路径会被懒推导。
 GARMIN_USERNAME=xxx \
-GARMIN_SESSION_TOKEN_FILE=/absolute/path/to/personal.session.json \
+GARMIN_ACCOUNT=personal-cn \
+GARMIN_REGION=cn \
 GARMIN_FIT_DOWNLOAD_DIR=/absolute/path/to/garmin-fit-parent \
 node lib/mcp.js
 ```
 
 MCP 服务器通过标准协议暴露与 dsh 插件**相同的 10 个工具及参数语义**：运动记录、
 睡眠、步数、心率、体重、训练库模板、个人资料、跑步技能、本地 FIT 下载，以及训练
-预览/创建。两个 AI 接口均不会提供认证、MFA 提交或 Session Token 导出。
+预览/创建。任何 AI 可调用工具都不接收密码/MFA，也不导出 Session Token；浏览器认证
+通过对话之外的本机 URL elicitation 完成，完成后由用户重试原工具。
 
 ---
 
@@ -788,14 +805,21 @@ src/
 ├── index.ts          # 插件入口（Cordis apply 函数）
 ├── config.ts         # 配置 Schema（schemastery），支持环境变量自动解析
 ├── client.ts         # Garmin API 封装，含缓存层
+├── account-session.ts # 按账号别名推导 session 落盘位置
 ├── auth.ts           # 私有 SSO 认证流程与本地 MFA 回调
-├── auth-cli.ts       # 可信本地 CLI：浏览器 DI 或旧版终端认证
+├── auth-cli.ts       # 可信本地 CLI：serve 与旧版诊断命令
 ├── browser-auth-canary.ts # 隔离 Chrome DI 初始化/canary 核心
+├── embedded-auth-runtime.ts # Web/CLI/MCP 共用 ticket-to-session runtime
+├── local-auth-broker.ts # 一次性 loopback/系统浏览器 broker
 ├── di-session.ts     # DI 运行时校验、刷新与安全 GET 重放
 ├── session-store.ts  # 严格读取 session 文件并原子私有写入
+├── darwin-private-acl.ts # Darwin 扩展 ACL 校验
+├── windows-private-acl.ts # Windows 当前用户 SID/DACL 私有化
 ├── fit-export.ts     # 从原始 ZIP 限量、无覆盖地提取 FIT
 ├── tool-service.ts   # dsh 与 MCP 共用的工具行为
 ├── mcp.ts            # 独立 MCP 适配器（用于 Codex/Claude Code 等客户端）
+├── mcp-auth.ts       # URL elicitation、完成通知与回退说明
+├── mcp-shutdown.ts   # MCP 认证的有界 stdio/信号清理
 ├── knowledge/
 │   ├── running-skills.ts  # 8 种课型 + 4 套精简训练理念
 │   └── workout-schema.ts  # 训练定义 → Garmin JSON 构建器
