@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 - In the local Web bridge, email, password, MFA code, and CAPTCHA input stay inside Garmin's iframe. On the browser side, the short-lived ticket reaches only the isolated loopback bridge and is immediately passed to the Host exchange; the outer dsh page, model context, and AI-callable tool results receive neither the ticket nor DI tokens or form credentials.
-- The bridge validates the expected region, message origin, iframe source, service, and ticket before the one-shot Host exchange. The dsh page receives only public progress states.
+- The bridge validates the expected region, message origin, iframe source, service, and ticket before the one-shot Host exchange. A ticket service is accepted only when it is the region's exact Garmin embed URL or the exact current `http://127.0.0.1:<port>` bridge origin; the ticket/service pair is preserved unchanged through DI exchange. The dsh page receives only public progress states.
 - Before saving a browser-authenticated session under the configured email, the bridge now explicitly asks the user to confirm that the sanitized Garmin profile corresponds to that email.
 - System-browser launching validates the exact random loopback bridge URL and uses shell-free platform launchers; Windows resolves a strictly validated absolute System32 `rundll32.exe` instead of permitting current-directory binary lookup. Passwords, MFA codes, tickets, and tokens are never accepted as CLI arguments or written to MCP tool results.
 - MCP authentication never auto-replays the interrupted tool, so workout/FIT writes cannot be duplicated by authentication completion. Account/region mismatch, unsafe session permissions, transient network failures, persistence failures, and unknown write outcomes do not get misclassified as MFA prompts.
@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - All browser-auth entry points now run the same session-destination preflight before starting a loopback listener. Windows implicit paths prefer local `LOCALAPPDATA`; UNC/network session destinations remain unsupported.
 
 ### Fixed
+- China-region MFA tickets that Garmin binds to the current loopback bridge are now exchanged with that exact service instead of being incorrectly rewritten to the Garmin embed URL. Cross-region services, other loopback ports/hosts, paths, queries, fragments, credentials, and malformed variants are rejected before any DI request.
 - Retrying or closing the Web login no longer discards an active flow handle until the Host confirms cancellation or a terminal state.
 - Installing a newly authenticated session now fences new Garmin work and drains old in-process DI refresh writes before the atomic replacement, preventing a late refresh from overwriting the new session.
 - A running MCP process now hot-loads a separately persisted account-matching session after missing, expired, or rejected credentials. It consumes the same private parsed snapshot used for change detection, never retries unchanged or locally unusable replacements, and still requires an explicit retry of the interrupted tool.
@@ -35,6 +36,7 @@ All notable changes to this project will be documented in this file.
 - A legacy configured password still works for non-MFA accounts; the pinned SDK's exact MFA/ticket failure is now converted to typed browser-recoverable authentication so dsh/MCP can surface the loopback flow.
 
 ### Changed
+- The local Web, `serve`, and MCP browser-auth flows now allow 10 minutes for password, CAPTCHA, and MFA completion before expiring.
 - The local dsh Web UI now presents separate China and International Garmin login buttons, validates the selected region against `GARMIN_REGION`, and uses a responsive, security-focused dialog and bridge layout.
 - Once the Host has verified an account identity, the matching region button shows the configured account email as its signed-in subtitle; identity-unverified legacy OAuth tokens keep the neutral domain subtitle.
 - The signed-in subtitle refreshes every 15 seconds and when the page regains focus, so later Host-side credential rejection and lazy authentication are reflected without a reload.
@@ -45,8 +47,8 @@ All notable changes to this project will be documented in this file.
 
 ### Experimental — not release-supported
 - The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.
-- Browser third-party-cookie or iframe policy may prevent Garmin GAuth from completing. Final end-to-end testing with a real MFA account is still pending, so this must not be described as completed two-step-verification support.
-- The new `serve` and MCP URL-elicitation paths have automated loopback/runtime coverage, but real-account China and International MFA, persisted-session consumption, and refresh are not yet verified end to end.
+- Browser third-party-cookie or iframe policy may prevent Garmin GAuth from completing. On 2026-08-29, a real China-region MFA run passed the visible browser, exact loopback-bound ticket exchange, profile confirmation, owner-only session persistence, fresh-client session consumption, profile probe, and recent-activity read chain. Same-process hot loading is covered by automated tests; International-region real-account MFA and refresh-token rotation remain unverified, so the feature stays experimental.
+- The new `serve` and MCP URL-elicitation paths have automated loopback/runtime coverage. The successful China-region run used the same shared runtime through a local browser; concrete MCP-client URL elicitation and International-region MFA still require manual verification.
 - `garmin-connect-auth login --browser` and `canary` remain legacy Playwright diagnostics, not the recommended fallback for `serve` or MCP authentication.
 
 ## [0.1.5] - 2026-08-21

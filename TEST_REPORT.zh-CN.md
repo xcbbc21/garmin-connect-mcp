@@ -6,21 +6,22 @@
 已经验证的范围、主动排除的操作，以及仍需人工验证的项目。
 
 > **验证范围：** 下列自动检查已在本机源码树重新执行。新的系统浏览器与 MCP 认证路径
-> 已有离线覆盖，但中国区和国际区真实账号的完整 MFA 浏览器到刷新链路完成前，仍只按
-> 预览功能说明。
+> 已有离线覆盖。2026-08-29 还在本机跑通了真实中国区 MFA 的浏览器、session 落盘与
+> 只读调用链路；国际区 MFA、真实 refresh token 轮换及具体 MCP 客户端 URL elicitation
+> 仍是预览缺口。
 
 ## 验证概览
 
 | 项目 | 结果 |
 | --- | --- |
-| 测试日期 | 2026-08-28 |
+| 测试日期 | 2026-08-29 |
 | package manifest | `0.1.5` + `Unreleased` 修改 |
-| 发布就绪度 | **自动门禁通过** — 真实账号 MFA 端到端仍为预览 |
-| 本机自动测试 | **通过** — 36 个套件、736 项测试 |
+| 发布就绪度 | **自动门禁通过** — 国际区/refresh/具体客户端验证前，浏览器 MFA 仍属实验功能 |
+| 本机自动测试 | **通过** — 36 个套件、774 项测试 |
 | TypeScript 构建 | **通过** |
-| npm 打包烟测 | **通过** — 163 个文件；压缩后 281.6 kB；解压后 1.1 MB |
+| npm 打包烟测 | **通过** — 163 个文件；压缩后 284.7 kB；解压后 1.1 MB |
 | 真实 Garmin 集成 | **本次未重跑** — 2026-08-21 的 `global` 只读基线为 8/8 |
-| 两步验证 | **预览** — runtime/broker/MCP 离线覆盖通过；真实 CN/global E2E 待完成 |
+| 两步验证 | **预览** — 真实 CN 浏览器/session/profile/活动读取链路通过；国际区与真实 refresh 待验证 |
 
 ## 自动验证
 
@@ -38,15 +39,15 @@ npm run pack:smoke
 | 指标 | 结果 |
 | --- | ---: |
 | 测试套件 | 36 个通过 |
-| 测试 | 736 项通过 |
-| 语句覆盖率 | 85.56% |
-| 分支覆盖率 | 79.32% |
-| 函数覆盖率 | 87.04% |
-| 行覆盖率 | 88.45% |
+| 测试 | 774 项通过 |
+| 语句覆盖率 | 85.64% |
+| 分支覆盖率 | 79.34% |
+| 函数覆盖率 | 87.16% |
+| 行覆盖率 | 88.51% |
 
 `npm run build` 已成功完成。`npm run pack:smoke` 也已通过，检查的 npm 包包含
 163 个文件（包含新的本地认证与 MCP 认证 runtime、更新日志及中英文测试报告页面），
-压缩后大小为 281.6 kB，解压后大小为 1.1 MB。
+压缩后大小为 284.7 kB，解压后大小为 1.1 MB。
 
 测试还覆盖了绝对路径、有界且无 shell 的 Windows PowerShell/.NET ACL 边界、静态编码的
 精确 DACL 程序、当前 SID owner、全链重解析点与不可信根目录拒绝、逐层目录 fail-closed
@@ -67,6 +68,10 @@ POSIX 覆盖还包括有效 UID owner 与 owner 写入/执行权限、不安全�
 controller 的排空超时不串行叠加、失效内联 token 只能由账号绑定 session 接管，以及 MCP
 stdin/退出信号关闭会在有界凭据清理结束前持续拦截终止信号。CLI 的 browser、canary 与
 `serve` 关闭同样给首个信号一个有界优雅退出窗口，第二个信号则立即请求强制退出。
+浏览器认证流程现在使用精确的 10 分钟有效期。测试会把已验证的 ticket service 从桥页
+消息、服务端提交、流程管理一直原样传到 DI 表单；只接受对应区域的固定 embed service
+或本次精确的 `http://127.0.0.1:<端口>` 桥页 origin。区域不符、其他主机/端口、路径、
+查询、fragment、凭据、畸形变体，以及 service 回退/重试都会在 DI 请求前被拒绝。
 
 ## 真实 Garmin 只读集成
 
@@ -94,18 +99,22 @@ GARMIN_INTEGRATION_VERBOSE=false npm run test:integration
 数据。运行时明确关闭了 verbose 输出，因此只显示状态和数量，不显示账号标识、活动
 明细或健康数值。
 
-## 中国区浏览器 MFA／DI 局部验证
+## 中国区浏览器 MFA／DI 验证
 
-经账号所有者明确同意，2026-08-21 使用可见 Chrome 完成了 Garmin 托管的中国区登录，
-并产生一张短期 service ticket。受限诊断程序另行完成了一次中国区 DI ticket 交换和
-profile API 探测。全程只输出固定阶段名，没有打印邮箱、密码、MFA 验证码、Cookie、
-ticket、Token、profile 数据或响应正文。
+经账号所有者明确同意，2026-08-29 使用可见浏览器完成了 Garmin 托管的中国区密码和
+MFA 挑战。Garmin 将一次性 service ticket 绑定到本次随机 loopback origin；共享本地
+runtime 原样保留 ticket/service 配对，完成中国区 DI 交换，显示安全化 profile 供确认，
+并原子写入绑定账号与区域、且仅所有者可访问的 DI v2 session。
 
-这仍只是真实账号的局部证据，不代表新流程已经完成端到端验证。当前自动测试已经覆盖
-共享 loopback runtime、ticket 交换、显式 profile 确认、仅所有者可读的 session 提交、
-无 shell 的系统浏览器启动、终端清理、缺失／过期／拒绝三类凭据状态、MCP URL
-elicitation、完成通知、并发流程共用及同进程 session 替换。这些测试使用受控 fixture 和
-模拟 Garmin DI HTTP，不能替代中国区与国际区各一次真实 MFA 验证。
+落盘文件进一步确认是当前用户所有、mode 为 `0600`、link count 为 1 的普通非符号链接
+文件，schema version 为 2，绑定中国区，access/refresh 凭据均未过期，并通过私有 session
+reader 校验。随后新建的只读 Garmin client 使用该文件，完成账号身份核验、profile 探测
+及最近活动读取。同进程无需重启的热加载由自动测试覆盖，不作为本次真实账号运行结论。
+
+全程只输出固定阶段名与结果，不记录邮箱、密码、MFA 验证码、Cookie、ticket、Token、
+profile 内容、活动明细、响应正文或本地 session 路径。这证明了真实中国区浏览器到
+session 再到只读调用的链路，但不代表国际区 MFA、真实 refresh token 轮换或具体 MCP
+客户端的 URL elicitation UI 已通过。
 
 ## FIT 导出验证
 
@@ -131,8 +140,9 @@ elicitation、完成通知、并发流程共用及同进程 session 替换。这
 
 以下场景尚未使用真实账号或客户端完成端到端验证：
 
-- 使用真实中国区和国际区 MFA 账号完整运行 `garmin-connect-auth serve`，再分别通过
-  dsh/MCP 使用并刷新保存的 session。
+- 使用真实国际区 MFA 账号运行浏览器认证流程。
+- 对浏览器生成的 session 实际触发 access/refresh token 轮换；自动 fixture 已覆盖刷新
+  逻辑，但本次未强制真实账号刷新。
 - 在 Codex、Claude Code 等具体客户端中验证 MCP URL elicitation、完成通知与重试；
   当前仅离线覆盖能力回退。
 - 在真实 `windows-latest` runner 上执行新增 ACL 烟测；workflow 已加入，但本机 macOS
@@ -148,9 +158,9 @@ elicitation、完成通知、并发流程共用及同进程 session 替换。这
 - 集成测试使用的私有 `.env` 不属于本报告，禁止提交或发布。
 - 本报告不包含密码、session token、MFA 验证码、账号标识、本地目标路径、活动明细
   或健康数值。
-- 2026-08-28 本次快照没有执行 Garmin 数据写操作或真实浏览器认证；session 持久化只用
-  合成凭据在隔离的临时／测试位置中验证。
+- 本次没有执行 Garmin 数据写操作。经授权的真实中国区浏览器认证写入了一份本机私有
+  session，随后只执行 profile 与最近活动读取；本报告不记录任何私密值或目标路径。
 - package manifest 仍为 `0.1.5`；新认证工作记录在 `Unreleased`，本次验证没有发布它。
 
-后续每个候选版本都应重新运行上述自动检查。真实 MFA、FIT 及客户端烟测只能在账号
-所有者明确同意后执行，并继续使用同等的隐私保护措施。
+后续每个候选版本都应重新运行上述自动检查。国际区 MFA、真实 refresh 轮换、FIT 及
+客户端烟测只能在账号所有者明确同意后执行，并继续使用同等的隐私保护措施。

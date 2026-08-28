@@ -9,21 +9,22 @@ verification.
 
 > **Verification scope:** the automated checks below were rerun on the local
 > source tree. The new system-browser and MCP authentication paths are covered
-> offline, but real-account China and International MFA remain preview features
-> until their complete browser-to-refresh chains are manually verified.
+> offline. A real China-region MFA browser-to-session-and-read chain also passed
+> locally on 2026-08-29. International-region MFA, real refresh-token rotation,
+> and concrete MCP-client URL elicitation remain preview gaps.
 
 ## Snapshot
 
 | Item | Result |
 | --- | --- |
-| Test date | 2026-08-28 |
+| Test date | 2026-08-29 |
 | Package manifest | `0.1.5` + `Unreleased` changes |
-| Release readiness | **Automated gates passed** — real-account MFA E2E remains preview-only |
-| Local automated snapshot | **Passed** — 36 suites, 736 tests |
+| Release readiness | **Automated gates passed** — browser MFA remains experimental while International/refresh/client gaps remain |
+| Local automated snapshot | **Passed** — 36 suites, 774 tests |
 | TypeScript build | **Passed** |
-| npm package smoke test | **Passed** — 163 files; 281.6 kB packed; 1.1 MB unpacked |
+| npm package smoke test | **Passed** — 163 files; 284.7 kB packed; 1.1 MB unpacked |
 | Real Garmin integration | **Not rerun** — prior 2026-08-21 `global` read-only baseline was 8/8 |
-| Two-step verification | **Preview** — offline runtime/broker/MCP coverage passed; real CN/global E2E pending |
+| Two-step verification | **Preview** — real CN browser/session/profile/activity-read chain passed; International and real refresh pending |
 
 ## Automated verification
 
@@ -41,16 +42,16 @@ npm run pack:smoke
 | Metric | Result |
 | --- | ---: |
 | Test suites | 36 passed |
-| Tests | 736 passed |
-| Statements | 85.56% |
-| Branches | 79.32% |
-| Functions | 87.04% |
-| Lines | 88.45% |
+| Tests | 774 passed |
+| Statements | 85.64% |
+| Branches | 79.34% |
+| Functions | 87.16% |
+| Lines | 88.51% |
 
 `npm run build` completed successfully. `npm run pack:smoke` also completed
 successfully and inspected a tarball containing 163 files, including the new
 local-auth and MCP-auth runtime modules, changelog, and both test-report pages,
-with a packed size of 281.6 kB and an unpacked size of 1.1 MB.
+with a packed size of 284.7 kB and an unpacked size of 1.1 MB.
 
 The suite also covers an absolute, bounded, shell-free Windows PowerShell/.NET
 ACL boundary, a static encoded exact-DACL program, current-SID ownership,
@@ -81,6 +82,12 @@ replacement only by an account-bound session, and MCP stdin/signal shutdown
 that keeps termination handlers active until bounded credential cleanup ends.
 CLI browser, canary, and `serve` shutdown also gives the first signal a bounded
 graceful window and treats a second signal as an immediate force-exit request.
+The browser flow now has an exact 10-minute lifetime. Tests preserve a ticket's
+validated service through bridge message, server submission, flow management,
+and DI form encoding; only the region's fixed embed service or the current exact
+`http://127.0.0.1:<port>` bridge origin is accepted. Wrong regions, other hosts
+or ports, paths, queries, fragments, credentials, malformed variants, and
+service fallback/retry are rejected before a DI request.
 
 ## Real Garmin read-only integration
 
@@ -110,23 +117,28 @@ workouts or other Garmin data. Verbose output was explicitly disabled, so the
 run printed only status/count information rather than account identifiers,
 activity details, or health values.
 
-## China-region browser MFA / DI partial verification
+## China-region browser MFA / DI verification
 
-With the account owner's explicit consent, a visible Chrome session completed
-the Garmin-hosted China-region login and produced one short-lived service
-ticket on 2026-08-21. A guarded diagnostic separately exchanged a one-time
-ticket at the China-region DI endpoint and successfully probed the China-region
-profile API. Only fixed stage names were reported; no email, password, MFA code,
-cookie, ticket, token, profile data, or response body was printed.
+With the account owner's explicit consent, a visible browser completed the
+Garmin-hosted China-region password and MFA challenge on 2026-08-29. Garmin
+bound the one-time service ticket to that flow's exact ephemeral loopback
+origin. The shared local runtime preserved the ticket/service pair, completed
+the China-region DI exchange, displayed a sanitized profile for confirmation,
+and atomically persisted an account- and region-bound owner-only DI v2 session.
 
-This remains partial real-account evidence, not a passing end-to-end result for
-the new flow. The current implementation now has automated coverage for the
-shared loopback runtime, ticket exchange, explicit profile confirmation,
-owner-only session commit, shell-free system-browser launcher, terminal
-cleanup, typed missing/expired/rejected credential states, MCP URL elicitation,
-completion notification, concurrent-flow sharing, and same-process session
-replacement. Those tests use controlled fixtures and mocked Garmin DI HTTP;
-they do not replace a real CN and global MFA run.
+The saved file was verified as a regular, non-symlink file owned by the current
+user with mode `0600`, one link, schema version 2, CN region binding, unexpired
+access and refresh credentials, and successful acceptance by the private
+session reader. A fresh read-only Garmin client then consumed that file,
+verified the account identity, passed the profile probe, and read recent
+activities. Same-process hot loading without restart is covered by automated
+tests, not claimed as part of this real-account run.
+
+Only fixed stage/result names were reported. No email, password, MFA code,
+cookie, ticket, token, profile payload, activity details, response body, or
+local session path is included here. This proves the real China-region
+browser-to-session-and-read chain, but not International-region MFA, actual
+refresh-token rotation, or a concrete MCP client's URL-elicitation UI.
 
 ## FIT export verification
 
@@ -155,9 +167,10 @@ import of that file into a device or third-party application.
 The following scenarios were not validated end to end with real accounts or
 clients:
 
-- Running `garmin-connect-auth serve` end to end with real China-region and
-  International-region MFA accounts, then consuming and refreshing each saved
-  session through dsh and MCP.
+- Running the browser flow with a real International-region MFA account.
+- Exercising actual access/refresh-token rotation on a browser-created session;
+  refresh behavior is covered by automated fixtures but was not forced against
+  the real account.
 - Exercising MCP URL elicitation and completion/retry in Codex, Claude Code,
   and other concrete clients; capability fallback is covered only offline.
 - Running the new Windows ACL smoke test on a real `windows-latest` runner; the
@@ -174,12 +187,14 @@ These are documented limitations of this snapshot, not passing test results.
   and must not be committed or published.
 - No password, session token, MFA code, account identifier, local destination
   path, activity detail, or health value is included here.
-- No Garmin data write operation or real browser authentication was performed
-  for this 2026-08-28 snapshot. Session persistence was exercised only with
-  synthetic credentials in isolated temporary/test locations.
+- No Garmin data write operation was performed. The authorized real China-region
+  browser authentication wrote one private local session and was followed only
+  by profile and recent-activity reads; no private value or destination is
+  recorded in this report.
 - The package manifest remains `0.1.5`; the new authentication work is recorded
   under `Unreleased` and has not been published by this verification run.
 
-Future release candidates should rerun the automated commands above. Real MFA,
-FIT, and client smoke tests should be added only with the account owner's
-explicit consent and with the same privacy safeguards.
+Future release candidates should rerun the automated commands above.
+International MFA, real refresh rotation, FIT, and client smoke tests should be
+added only with the account owner's explicit consent and the same privacy
+safeguards.

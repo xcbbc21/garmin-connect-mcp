@@ -15,9 +15,10 @@ English | **[简体中文](README.zh-CN.md)** | **[Test Report](TEST_REPORT.md)*
 > **Unreleased experimental status:** local dsh Web, the
 > `garmin-connect-auth serve` system-browser flow, and MCP URL elicitation can
 > now bootstrap the same owner-only session. Garmin two-step verification is
-> still a preview: real-account MFA end-to-end coverage for both China and
-> International regions remains pending, and browser policy may still block a
-> flow. The older `login --browser` command is retained only as a diagnostic.
+> still a preview: a real China-region MFA browser-to-session-and-read chain
+> passed locally on 2026-08-29, while International-region MFA and refresh-token
+> rotation remain pending and browser policy may still block a flow. The older
+> `login --browser` command is retained only as a diagnostic.
 
 ---
 
@@ -189,8 +190,8 @@ current directory. The plugin loads the workspace `.env` automatically.
 > or `GARMIN_SESSION_TOKEN_FILE`. The experimental local Web, `auth:serve`, and
 > standalone MCP flows may start without one and create the implicit account
 > session file. A protected file is safer than an inline token,
-> especially when isolating multiple processes; this does not make the unfinished
-> MFA bootstrap a supported workflow. If more than one is configured, the inline token takes
+> especially when isolating multiple processes; this does not make the experimental
+> MFA bootstrap a release-supported workflow. If more than one is configured, the inline token takes
 > precedence over the file until Garmin explicitly rejects it; a newly written,
 > account-matching session file can then take over on retry. A valid session
 > takes precedence over password login.
@@ -217,7 +218,11 @@ inside the Garmin iframe.
 Garmin sends its short-lived service ticket only to the isolated loopback bridge.
 The bridge validates the expected region, message origin, iframe source, service,
 and ticket, then immediately hands it to the plugin Host for the region-bound DI
-token exchange. The Host probes the Garmin profile, shows a sanitized profile to
+token exchange. Garmin China may bind an MFA ticket to the exact current
+`http://127.0.0.1:<port>` bridge instead of the fixed Garmin embed URL; the
+plugin preserves that ticket/service pair unchanged and rejects every other
+loopback host, port, path, query, or region before contacting DI. It never
+rewrites or retries the one-time ticket with a fallback service. The Host probes the Garmin profile, shows a sanitized profile to
 the user, and asks them to confirm that it corresponds to the configured email.
 Only then does it atomically save an owner-only session bound to the configured
 account and region. The outer dsh page receives only
@@ -242,9 +247,12 @@ tool call reads the new file without requiring a dsh restart.
 
 This Web flow is intentionally limited to the loopback dsh Web UI. It is not a
 remote, hosted, or tunneled login endpoint. Browser third-party-cookie and iframe
-policies can prevent Garmin GAuth from completing, and final end-to-end testing
-with a real MFA account has not yet been completed. Treat it as experimental,
-not as a completed authentication capability.
+policies can prevent Garmin GAuth from completing. A real China-region MFA run
+passed the browser, DI exchange, profile confirmation, owner-only persistence,
+and read-only session-consumption chain locally on 2026-08-29; International
+MFA and refresh-token rotation remain unverified. Treat the flow as experimental,
+not as a production recovery guarantee. Login, MFA, and profile confirmation
+must finish within the bridge's 10-minute lifetime.
 
 #### Local system-browser authentication — preview
 
@@ -272,7 +280,8 @@ supplied through flags, environment variables, MCP tool arguments, or model
 input. The bridge receives only the short-lived service ticket and hands it to
 the local runtime for the region-bound DI exchange. The page then displays a
 sanitized profile for confirmation before the runtime writes the owner-only
-session.
+session. Login, MFA, and profile confirmation must finish within 10 minutes;
+after that, start a new flow.
 
 When `GARMIN_SESSION_TOKEN_FILE` is omitted, the output path is derived from
 `GARMIN_ACCOUNT`/`--account`:
@@ -287,9 +296,9 @@ GARMIN_REGION=global
 GARMIN_FIT_DOWNLOAD_DIR=/absolute/path/to/garmin-fit-parent
 ```
 
-This browser bootstrap remains a preview. Real-account MFA end-to-end testing
-for both China and International regions is still pending, so do not treat it
-as a production recovery guarantee.
+This browser bootstrap remains a preview. The real China-region chain passed
+locally on 2026-08-29, but International-region MFA and refresh-token rotation
+are still pending, so do not treat it as a production recovery guarantee.
 
 #### Legacy browser diagnostics
 
@@ -338,6 +347,11 @@ parent, existing destination, and no-follow temporary-file handle before the
 atomic replacement. On macOS, granting extended ACL entries are rejected on
 every checked ancestor, parent, existing file, and empty temporary file; a
 private-looking `0700`/`0600` mode does not override that result.
+If the normal configuration root or one of its ancestors is group/world-writable,
+preflight intentionally refuses to start authentication. Repair that directory's
+permissions yourself or set `GARMIN_SESSION_TOKEN_FILE`/`--output` to a fresh
+owner-private application directory; the plugin will not silently `chmod` a
+shared or broadly writable configuration tree.
 
 On Windows, the implicit account path prefers the current user's local
 `LOCALAPPDATA` root over redirected roaming `APPDATA`. Keep any explicit
@@ -358,7 +372,8 @@ The supported runtime model is one account per process and one independently
 initialized session per process. Give each dsh, Codex, Claude Code, or other MCP
 process its own `GARMIN_USERNAME`, `GARMIN_REGION`, and `GARMIN_ACCOUNT` (or an
 explicit `GARMIN_SESSION_TOKEN_FILE`). Each process can lazily use its implicit
-account session path, but real-account MFA bootstrap remains a preview.
+account session path; browser MFA bootstrap remains a preview, with only the
+China-region real-account chain verified so far.
 
 Do not copy one session file to another process, and do not let simultaneous
 processes share one file. Garmin refresh tokens may rotate; concurrent writers
@@ -499,8 +514,8 @@ explicitly want normalized details in your local terminal output.
 | Environment-variable and secret-marked configuration are supported | ✅ |
 | `.env` is in `.gitignore` | ✅ |
 | Account identifier and credentials marked with `role('secret')` in Cordis schema | ✅ |
-| Local dsh Web MFA bridge | ⚠️ Experimental; loopback only, real-account MFA E2E still pending |
-| CLI `serve` and MCP URL elicitation | ⚠️ Experimental; offline-covered, real-account MFA E2E still pending |
+| Local dsh Web MFA bridge | ⚠️ Experimental; loopback only; real China-region MFA chain passed locally, International pending |
+| CLI `serve` and MCP URL elicitation | ⚠️ Experimental; shared runtime verified with real China-region MFA, concrete MCP-client and International runs pending |
 | Legacy CLI `login --browser` / `canary` | ⚠️ Playwright diagnostics only; not an authentication fallback |
 | DI v2 sessions bind username, region, and `profileIdHash`; legacy two-field sessions remain compatible | ✅ |
 | Independently initialized per-process session files support isolated multi-account setups | ✅ |
@@ -592,7 +607,8 @@ MFA code. Protect the resulting session file and FIT directory because they can
 grant account access or contain precise location and health data. Each
 simultaneously running client process needs its own alias/session; do not copy
 or concurrently share one file across Codex, Claude Code, dsh, or another
-client. Real-account MFA E2E remains a preview as noted above.
+client. Browser MFA remains a preview as noted above; only the China-region
+real-account chain has been verified so far.
 
 ### OpenAI Codex (app, CLI, and IDE extension)
 
@@ -968,7 +984,7 @@ Distribution notes:
 - [x] **Workout Creation** — safely preview and create structured workout-library entries
 - [x] **MCP Server** — use with Codex, Claude Code/Desktop, Cursor, Windsurf, WorkBuddy, ZCode
 - [x] **Running Coach** — 8 workout types, 4 training philosophies, and mandatory personalized intake
-- [ ] **Browser MFA Bootstrap** — the loopback dsh bridge now embeds official Garmin GAuth and keeps credentials/tickets out of dsh and AI surfaces; finish real-MFA, DI v2 persistence, restart/refresh, third-party-cookie, and CN/Global end-to-end verification
+- [ ] **Browser MFA Bootstrap** — China-region real MFA, DI v2 persistence, fresh-client session consumption, profile, and activity read passed locally; same-process hot loading is automated-covered; finish International MFA, refresh rotation, concrete MCP clients, and broader browser-policy verification
 - [x] **Process-isolated Accounts** — one independently initialized session file per dsh/MCP process; concurrent file sharing is unsupported
 - [x] **FIT Download** — safely extract one FIT from the original archive into an automatic region-and-normalized-email subdirectory under a user-selected parent
 - [ ] **Training Status** — VO2 Max, training load, recovery time
