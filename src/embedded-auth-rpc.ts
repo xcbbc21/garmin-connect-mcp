@@ -3,26 +3,20 @@ import type {
   ConnectionRpcHandler,
   HostConnectionHandle,
 } from '@deepseek-ai/dsh-client-connection'
-import { defaultAccountSessionPath } from './auth-cli'
 import {
-  runCapturedServiceTicketDiAuthSetup,
-  type CapturedServiceTicketDiAuthSetupOptions,
-} from './browser-auth-canary'
-import { createAxiosCanaryHttpAdapter } from './browser-auth-canary-runtime'
+  ACCOUNT_ALIAS_PATTERN,
+  defaultAccountSessionPath,
+} from './account-session'
 import type { Config, GarminRegion } from './config'
 import {
-  EmbeddedAuthController,
   type EmbeddedAuthBeginResult,
   type EmbeddedAuthCancelResult,
   type EmbeddedAuthStatusResult,
 } from './embedded-auth-controller'
-import { EmbeddedAuthFlowManager } from './embedded-auth-flow'
-import { EmbeddedAuthServer } from './embedded-auth-server'
-import { writeSessionTokenFile } from './session-store'
+import { createEmbeddedAuthController } from './embedded-auth-runtime'
 
 const RPC_CHANNEL = '/garmin-auth'
 const RPC_EFFECT_LABEL = 'garmin-connect: embedded auth rpc'
-const ACCOUNT_ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/
 
 type Environment = Readonly<Record<string, string | undefined>>
 
@@ -107,10 +101,13 @@ export function registerEmbeddedAuthRpc(
     ? { createController: options }
     : options
   const createController = registration.createController
-    ?? ((value: Config) => createDefaultController(
-      value,
-      registration.replaceSession,
-    ))
+    ?? ((value: Config) => createEmbeddedAuthController({
+      username: value.username,
+      region: value.region,
+      sessionTokenFile: value.sessionTokenFile ?? '',
+    }, {
+      replaceSession: registration.replaceSession,
+    }))
   ctx.inject(['connection'], (connectionCtx) => {
     const controller = createController(config)
     const connection = connectionCtx.connection as HostConnectionHandle
@@ -193,38 +190,6 @@ function createRpcHandler(
       return unavailable()
     }
   }
-}
-
-function createDefaultController(
-  config: Config,
-  replaceSession?: (writeSession: () => Promise<void>) => Promise<void>,
-): EmbeddedAuthRpcController {
-  const http = createAxiosCanaryHttpAdapter()
-  const flows = new EmbeddedAuthFlowManager({
-    authenticate: async (input) => {
-      await runCapturedServiceTicketDiAuthSetup(
-        {
-          ...input,
-          serviceTarget: 'sso-embed',
-        } satisfies CapturedServiceTicketDiAuthSetupOptions,
-        {
-          http,
-          writeSession: (path, session) => {
-            const writeSession = () => writeSessionTokenFile(path, session)
-            return replaceSession ? replaceSession(writeSession) : writeSession()
-          },
-        },
-      )
-    },
-  })
-  const server = new EmbeddedAuthServer(flows)
-  return new EmbeddedAuthController({
-    username: config.username,
-    region: config.region,
-    sessionTokenFile: config.sessionTokenFile ?? '',
-    flows,
-    server,
-  })
 }
 
 function exactBeginRegion(value: unknown): GarminRegion | undefined {

@@ -60,6 +60,8 @@
     "auth:setup": "node lib/auth-cli.js login",
     "preauth:canary": "npm run build",
     "auth:canary": "node lib/auth-cli.js canary",
+    "preauth:serve": "npm run build",
+    "auth:serve": "node lib/auth-cli.js serve --open",
     "pack:smoke": "npm pack --dry-run",
     "prepublishOnly": "npm run build",
     "prepare": "npm run build"

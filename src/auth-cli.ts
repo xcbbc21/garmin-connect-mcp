@@ -6,6 +6,10 @@ import readline from 'node:readline/promises'
 import type { Readable, Writable } from 'node:stream'
 import type { GarminAuthOptions, GarminAuthResult } from './auth'
 import {
+  assertAccountAlias,
+  defaultAccountSessionPath,
+} from './account-session'
+import {
   BrowserCanaryControlError,
   isBrowserDiAuthCanaryStage,
   runBrowserDiAuthSetup,
@@ -21,6 +25,11 @@ import {
   createPlaywrightBrowserAdapter,
 } from './browser-auth-canary-runtime'
 import type { GarminRegion } from './config'
+import {
+  LocalAuthBroker,
+  type LocalAuthBrokerController,
+  type LocalAuthSuccessResult,
+} from './local-auth-broker'
 import {
   bindSessionTokensToAccount,
   writeSessionTokenFile,
@@ -74,6 +83,29 @@ export interface BrowserAuthSetupResult {
   sessionTokenFile: string
 }
 
+export interface AuthServeCliDependencies {
+  authenticate(options: {
+    username: string
+    region: GarminRegion
+    sessionTokenFile: string
+    signal?: AbortSignal
+  }): Promise<LocalAuthSuccessResult>
+}
+
+export interface AuthServeInput {
+  argv: string[]
+  env: Record<string, string | undefined>
+  io: AuthCliIO
+  signal?: AbortSignal
+  dependencies?: AuthServeCliDependencies
+}
+
+export interface AuthServeResult {
+  account: string
+  region: GarminRegion
+  sessionTokenFile: string
+}
+
 export interface AuthCanaryInput {
   argv: string[]
   io: AuthCliIO
@@ -105,6 +137,27 @@ const defaultBrowserDependencies: BrowserAuthCliDependencies = {
   }),
 }
 
+const defaultServeDependencies: AuthServeCliDependencies = {
+  authenticate: async (options) => {
+    const runtime = require('./embedded-auth-runtime') as {
+      createEmbeddedAuthController(config: {
+        username: string
+        region: GarminRegion
+        sessionTokenFile: string
+      }): LocalAuthBrokerController
+    }
+    const controller = runtime.createEmbeddedAuthController({
+      username: options.username,
+      region: options.region,
+      sessionTokenFile: options.sessionTokenFile,
+    })
+    return new LocalAuthBroker({ controller }).authenticateInSystemBrowser(
+      options.region,
+      options.signal,
+    )
+  },
+}
+
 const MAX_DISPLAYED_SESSION_PATH_BYTES = 1024
 
 const AUTH_CLI_HELP = `Garmin Connect authentication
@@ -112,12 +165,19 @@ const AUTH_CLI_HELP = `Garmin Connect authentication
 Usage:
   garmin-connect-auth login [options]
   garmin-connect-auth login --browser --region <global|cn> [options]
+  garmin-connect-auth serve --region <global|cn> --open [options]
   garmin-connect-auth canary --region <global|cn>
 
 Login options:
   --browser               Unfinished preview: use Garmin's page for credentials
   --account <alias>       Account alias (default: default)
   --region <global|cn>    Region (default: global; required with --browser)
+  --output <path>         OAuth session file path
+
+Serve options:
+  --open                  Open the loopback sign-in page in the system browser
+  --account <alias>       Account alias (default: default)
+  --region <global|cn>    Required; never inferred from environment
   --output <path>         OAuth session file path
 
 Canary options:
@@ -130,9 +190,9 @@ General options:
 Passwords and MFA codes are requested interactively with terminal echo disabled.
 Never pass either secret as a command-line option, environment variable, or model input.
 
-Two-step verification is an unfinished developer preview and is not supported
-for the 0.1.5 release. The canary provides partial diagnostics only and saves no
-session; a successful probe is not a supported authentication workflow.
+The serve command keeps password, verification code, CAPTCHA, and MFA inside
+Garmin's page. It writes only the resulting long-lived session to the selected
+local account file. The canary remains a non-persisting diagnostic command.
 `
 
 const AUTH_CLI_VERSION = (require('../package.json') as { version: string }).version
@@ -142,11 +202,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
   const parsed = parseArgs(input.argv)
   const dependencies = input.dependencies ?? defaultDependencies
   const account = parsed.account ?? input.env.GARMIN_ACCOUNT?.trim() ?? 'default'
-  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(account)) {
-    throw new PublicToolError(
-      'Invalid account alias; use lowercase letters, numbers, underscores, or hyphens',
-    )
-  }
+  assertAccountAlias(account)
 
   const regionValue = parsed.region ?? input.env.GARMIN_REGION?.trim() ?? 'global'
   if (regionValue !== 'global' && regionValue !== 'cn') {
@@ -213,11 +269,7 @@ export async function runBrowserAuthSetup(
   const parsed = parseBrowserLoginArgs(input.argv)
   const dependencies = input.dependencies ?? defaultBrowserDependencies
   const account = parsed.account ?? input.env.GARMIN_ACCOUNT?.trim() ?? 'default'
-  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(account)) {
-    throw new PublicToolError(
-      'Invalid account alias; use lowercase letters, numbers, underscores, or hyphens',
-    )
-  }
+  assertAccountAlias(account)
 
   if (parsed.region !== 'global' && parsed.region !== 'cn') {
     throw new PublicToolError(
@@ -272,6 +324,59 @@ export async function runBrowserAuthSetup(
   return { account, region, sessionTokenFile }
 }
 
+/** Serve the loopback bridge and open Garmin authentication in the OS browser. */
+export async function runAuthServe(
+  input: AuthServeInput,
+): Promise<AuthServeResult> {
+  const parsed = parseServeArgs(input.argv)
+  const dependencies = input.dependencies ?? defaultServeDependencies
+  const account = parsed.account ?? input.env.GARMIN_ACCOUNT?.trim() ?? 'default'
+  assertAccountAlias(account)
+  if (!parsed.open) {
+    throw new PublicToolError('Serve authentication requires --open')
+  }
+  if (parsed.region !== 'global' && parsed.region !== 'cn') {
+    throw new PublicToolError(
+      parsed.region === undefined
+        ? 'Serve region is required; use global or cn'
+        : 'Invalid serve region; expected global or cn',
+    )
+  }
+  const region: GarminRegion = parsed.region
+  const configuredPath = parsed.output ?? input.env.GARMIN_SESSION_TOKEN_FILE?.trim()
+  const sessionTokenFile = configuredPath
+    ? path.resolve(expandHome(configuredPath))
+    : defaultAccountSessionPath(account, input.env)
+  const username = input.env.GARMIN_USERNAME?.trim()
+    || (await input.io.prompt('Garmin email: ', false)).trim()
+  if (!username) throw new PublicToolError('Garmin username is required')
+
+  input.io.write(
+    'Opening Garmin authentication in your system browser. Enter password, ' +
+    'verification code, CAPTCHA, or MFA only on Garmin\'s page.\n',
+  )
+  const result = await dependencies.authenticate({
+    username,
+    region,
+    sessionTokenFile,
+    signal: input.signal,
+  })
+  if (!result.success || result.region !== region) {
+    throw new PublicToolError('Garmin browser authentication returned an invalid result')
+  }
+
+  input.io.write('authentication_status=passed\n')
+  input.io.write(`region=${region}\n`)
+  input.io.write('browser=system-default\n')
+  input.io.write('di_auth=passed\n')
+  input.io.write('session_persisted=yes\n')
+  input.io.write(
+    `Session saved securely to: ${sessionPathForTerminal(sessionTokenFile)}\n`,
+  )
+  input.io.write('credentials_collected_by_cli=username-only\n')
+  return { account, region, sessionTokenFile }
+}
+
 /** Run the non-persisting browser/DI probe without reading CLI credentials. */
 export async function runAuthCanary(
   input: AuthCanaryInput,
@@ -306,20 +411,7 @@ export async function runAuthCanary(
   return { ok: true, region, persisted: false }
 }
 
-export function defaultAccountSessionPath(
-  account: string,
-  env: Record<string, string | undefined> = process.env,
-): string {
-  const configRoot = env.XDG_CONFIG_HOME?.trim()
-    || env.APPDATA?.trim()
-    || path.join(env.HOME?.trim() || homedir(), '.config')
-  return path.resolve(
-    configRoot,
-    'dsh-plugin-garmin-connect',
-    'accounts',
-    `${account}.session.json`,
-  )
-}
+export { defaultAccountSessionPath } from './account-session'
 
 interface ParsedArgs {
   account?: string
@@ -329,6 +421,10 @@ interface ParsedArgs {
 
 interface ParsedBrowserLoginArgs extends ParsedArgs {
   browser: true
+}
+
+interface ParsedServeArgs extends ParsedArgs {
+  open: boolean
 }
 
 function parseBrowserLoginArgs(argv: string[]): ParsedBrowserLoginArgs {
@@ -380,6 +476,33 @@ function parseArgs(argv: string[]): ParsedArgs {
     throw new PublicToolError('Unknown authentication option')
   }
   return parsed
+}
+
+function parseServeArgs(argv: string[]): ParsedServeArgs {
+  const args = [...argv]
+  if (args[0] === 'serve') args.shift()
+  rejectSensitiveArgs(args)
+  let open = false
+  const parsed: ParsedArgs = {}
+  while (args.length > 0) {
+    const flag = args.shift()
+    if (flag === '--open' && !open) {
+      open = true
+      continue
+    }
+    if (flag === '--account' || flag === '--region' || flag === '--output') {
+      const value = args.shift()
+      if (!value || value.startsWith('--')) {
+        throw new PublicToolError(`Missing value for ${flag}`)
+      }
+      if (flag === '--account') parsed.account = value
+      else if (flag === '--region') parsed.region = value
+      else parsed.output = value
+      continue
+    }
+    throw new PublicToolError('Unknown serve authentication option')
+  }
+  return { ...parsed, open }
 }
 
 function parseCanaryRegion(argv: string[]): GarminRegion {
@@ -570,7 +693,7 @@ async function main(): Promise<void> {
       argv.length === 1 && (argv[0] === '--help' || argv[0] === '-h')
     ) || (
       argv.length === 2
-      && (argv[0] === 'login' || argv[0] === 'canary')
+      && (argv[0] === 'login' || argv[0] === 'canary' || argv[0] === 'serve')
       && (argv[1] === '--help' || argv[1] === '-h')
     ) || (
       argv.length === 3
@@ -586,7 +709,7 @@ async function main(): Promise<void> {
       argv.length === 1 && (argv[0] === '--version' || argv[0] === '-V')
     ) || (
       argv.length === 2
-      && (argv[0] === 'login' || argv[0] === 'canary')
+      && (argv[0] === 'login' || argv[0] === 'canary' || argv[0] === 'serve')
       && (argv[1] === '--version' || argv[1] === '-V')
     ) || (
       argv.length === 3
@@ -599,7 +722,8 @@ async function main(): Promise<void> {
       return
     }
     const browserLoginRequested = argv[0] === 'login' && argv.includes('--browser')
-    if (argv[0] === 'canary' || browserLoginRequested) {
+    const serveRequested = argv[0] === 'serve'
+    if (argv[0] === 'canary' || browserLoginRequested || serveRequested) {
       const controller = new AbortController()
       const cancelFromSigint = (): void => {
         terminationSignal ??= 'SIGINT'
@@ -619,6 +743,13 @@ async function main(): Promise<void> {
       try {
         if (browserLoginRequested) {
           await runBrowserAuthSetup({
+            argv,
+            env: process.env,
+            io: terminalIO(),
+            signal: controller.signal,
+          })
+        } else if (serveRequested) {
+          await runAuthServe({
             argv,
             env: process.env,
             io: terminalIO(),
