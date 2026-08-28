@@ -10,7 +10,10 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
-import { PublicToolError } from './utils/errors'
+import {
+  GARMIN_BROWSER_AUTH_COMMAND,
+  PublicToolError,
+} from './utils/errors'
 
 const MAX_SESSION_FILE_BYTES = 1024 * 1024
 export const GARMIN_DI_CLIENT_ID = 'GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2'
@@ -52,8 +55,26 @@ export interface GarminDiSessionFile {
 
 export type GarminSessionFile = GarminLegacySessionFile | GarminDiSessionFile
 
+/** The configured session path is absent and may be created by browser auth. */
+export class GarminSessionTokenFileMissingError extends PublicToolError {
+  override name = 'GarminSessionTokenFileMissingError'
+
+  constructor() {
+    super('Garmin session token file does not exist')
+  }
+}
+
+/** The file exists but does not contain a supported Garmin session shape. */
+export class GarminSessionTokenFileInvalidError extends PublicToolError {
+  override name = 'GarminSessionTokenFileInvalidError'
+
+  constructor(message = 'Garmin session token file is invalid') {
+    super(message)
+  }
+}
+
 /** Base class for a file that selected DI auth but cannot be used safely. */
-export class GarminDiSessionFileError extends PublicToolError {
+export class GarminDiSessionFileError extends GarminSessionTokenFileInvalidError {
   override name = 'GarminDiSessionFileError'
 
   constructor(message = 'Garmin session token file is invalid') {
@@ -66,7 +87,9 @@ export class ObsoleteGarminDiSessionError extends GarminDiSessionFileError {
   override name = 'ObsoleteGarminDiSessionError'
 
   constructor() {
-    super('Garmin DI session format is obsolete; run browser authentication again')
+    super(
+      `Garmin DI session format is obsolete; run ${GARMIN_BROWSER_AUTH_COMMAND}`,
+    )
   }
 }
 
@@ -91,6 +114,9 @@ export async function readSessionTokenFile(path: string): Promise<GarminSessionF
     source = await file.readFile('utf8')
   } catch (error) {
     if (error instanceof PublicToolError) throw error
+    if (isRecord(error) && error.code === 'ENOENT') {
+      throw new GarminSessionTokenFileMissingError()
+    }
     throw new PublicToolError('Garmin session token file could not be read')
   } finally {
     await file?.close().catch(() => undefined)
@@ -105,7 +131,7 @@ export async function readSessionTokenFile(path: string): Promise<GarminSessionF
     return parsed
   } catch (error) {
     if (error instanceof GarminDiSessionFileError) throw error
-    throw new PublicToolError('Garmin session token file is invalid')
+    throw new GarminSessionTokenFileInvalidError()
   }
 }
 

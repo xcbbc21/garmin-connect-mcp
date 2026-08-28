@@ -3,6 +3,41 @@ export class PublicToolError extends Error {
   override name = 'PublicToolError'
 }
 
+export type GarminAuthenticationRequiredReason =
+  | 'missing'
+  | 'expired'
+  | 'rejected'
+
+export const GARMIN_BROWSER_AUTH_COMMAND =
+  'garmin-connect-auth serve --region <global|cn> --open'
+
+/**
+ * A credential state that may be recovered through an explicit Garmin
+ * browser-authentication flow. Callers can branch on `reason` without parsing
+ * human-facing error text.
+ */
+export class GarminAuthenticationRequiredError extends PublicToolError {
+  override name = 'GarminAuthenticationRequiredError'
+
+  constructor(
+    readonly reason: GarminAuthenticationRequiredReason,
+    message = defaultGarminAuthenticationRequiredMessage(reason),
+  ) {
+    super(message)
+  }
+}
+
+function defaultGarminAuthenticationRequiredMessage(
+  reason: GarminAuthenticationRequiredReason,
+): string {
+  const state = reason === 'missing'
+    ? 'is required'
+    : reason === 'expired'
+      ? 'has expired'
+      : 'was rejected'
+  return `Garmin authentication ${state}; run ${GARMIN_BROWSER_AUTH_COMMAND}`
+}
+
 /**
  * Return only errors that are intentionally safe and actionable for an AI
  * tool caller. Unexpected SDK/network messages can contain URLs, response

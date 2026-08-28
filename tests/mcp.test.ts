@@ -1,6 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js'
 import { createMcpServer, standaloneConfig } from '../src/mcp'
+import { GarminAuthenticationRequiredError } from '../src/utils/errors'
 
 describe('MCP adapter', () => {
   it('exposes the same ten non-secret Garmin tools as the plugin', async () => {
@@ -246,6 +248,50 @@ describe('MCP adapter', () => {
     }
   })
 
+  it('passes URL authentication elicitation through and never replays the tool', async () => {
+    const service = serviceStub()
+    service.getProfile.mockRejectedValue(
+      new GarminAuthenticationRequiredError('missing'),
+    )
+    const requireAuthentication = jest.fn(async () => {
+      throw new UrlElicitationRequiredError([{
+        mode: 'url',
+        message: 'Open Garmin authentication',
+        url: 'http://127.0.0.1:54321/garmin-auth/bridge/' + 'a'.repeat(64),
+        elicitationId: 'auth-id-1',
+      }])
+    })
+    const server = createMcpServer(service as any, {
+      createAuthentication: () => ({ requireAuthentication }),
+    })
+    const client = new Client(
+      { name: 'url-elicitation-client', version: '1.0.0' },
+      { capabilities: { elicitation: { url: {} } } },
+    )
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ])
+
+    try {
+      const operation = client.callTool({
+        name: 'get_garmin_profile',
+        arguments: {},
+      })
+      await expect(operation).rejects.toBeInstanceOf(UrlElicitationRequiredError)
+      await expect(operation).rejects.toMatchObject({
+        elicitations: [expect.objectContaining({ elicitationId: 'auth-id-1' })],
+      })
+      expect(requireAuthentication).toHaveBeenCalledTimes(1)
+      expect(service.getProfile).toHaveBeenCalledTimes(1)
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('accepts omitted arguments for zero-argument and all-optional read tools', async () => {
     const service = serviceStub()
     const server = createMcpServer(service as any)
@@ -395,15 +441,42 @@ describe('standalone MCP config', () => {
     })
   })
 
-  it('requires a password, inline token, or token file after trimming whitespace', () => {
+  it('starts without a password and assigns the default account session path', () => {
     process.env.GARMIN_USERNAME = 'fixture@example.test'
     process.env.GARMIN_PASSWORD = '   '
     process.env.GARMIN_SESSION_TOKEN = ''
     process.env.GARMIN_SESSION_TOKEN_FILE = '\t'
+    process.env.GARMIN_ACCOUNT = 'default'
+    process.env.XDG_CONFIG_HOME = '/private/config'
 
-    expect(() => standaloneConfig()).toThrow(
-      'GARMIN_PASSWORD, GARMIN_SESSION_TOKEN, or GARMIN_SESSION_TOKEN_FILE is required',
+    expect(standaloneConfig()).toMatchObject({
+      username: 'fixture@example.test',
+      password: '   ',
+      sessionToken: '',
+      sessionTokenFile:
+        '/private/config/dsh-plugin-garmin-connect/accounts/default.session.json',
+    })
+  })
+
+  it('isolates the implicit MCP session by account alias', () => {
+    process.env.GARMIN_USERNAME = 'fixture@example.test'
+    delete process.env.GARMIN_PASSWORD
+    delete process.env.GARMIN_SESSION_TOKEN
+    delete process.env.GARMIN_SESSION_TOKEN_FILE
+    process.env.GARMIN_ACCOUNT = 'international'
+    process.env.XDG_CONFIG_HOME = '/private/config'
+
+    expect(standaloneConfig().sessionTokenFile).toBe(
+      '/private/config/dsh-plugin-garmin-connect/accounts/international.session.json',
     )
+  })
+
+  it('rejects an MCP account alias that could escape the account directory', () => {
+    process.env.GARMIN_USERNAME = 'fixture@example.test'
+    process.env.GARMIN_ACCOUNT = '../other-user'
+    delete process.env.GARMIN_SESSION_TOKEN_FILE
+
+    expect(() => standaloneConfig()).toThrow('Invalid account alias')
   })
 })
 

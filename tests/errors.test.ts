@@ -1,10 +1,27 @@
 import {
+  GarminAuthenticationRequiredError,
   PublicToolError,
   publicErrorMessage,
   safeUpstreamLogLine,
 } from '../src/utils/errors'
 
 describe('error disclosure boundaries', () => {
+  it.each([
+    ['missing', 'is required'],
+    ['expired', 'has expired'],
+    ['rejected', 'was rejected'],
+  ] as const)('keeps the %s authentication reason machine-readable', (reason, phrase) => {
+    const error = new GarminAuthenticationRequiredError(reason)
+
+    expect(error).toBeInstanceOf(PublicToolError)
+    expect(error.name).toBe('GarminAuthenticationRequiredError')
+    expect(error.reason).toBe(reason)
+    expect(error.message).toContain(`Garmin authentication ${phrase}`)
+    expect(error.message).toContain(
+      'garmin-connect-auth serve --region <global|cn> --open',
+    )
+  })
+
   it('does not trust arbitrary upstream messages with a plausible prefix', () => {
     expect(publicErrorMessage(
       new Error('Garmin request failed with session_token=SENSITIVE for runner@example.test'),

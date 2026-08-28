@@ -11,6 +11,10 @@ import {
   GARMIN_DI_CLIENT_ID,
 } from '../src/session-store'
 import { MAX_ZIP_BYTES } from '../src/fit-export'
+import {
+  GarminAuthenticationRequiredError,
+  PublicToolError,
+} from '../src/utils/errors'
 
 jest.mock('garmin-connect', () => ({
   GarminConnect: jest.fn().mockImplementation(() => {
@@ -171,8 +175,13 @@ describe('GarminClient', () => {
       sessionTokenFile: '',
     }, { allowUnconfigured: true })
 
-    await expect(client.connect()).rejects.toThrow(
-      'Garmin authentication is required; use Garmin Login or configure a session',
+    const operation = client.connect()
+    await expect(operation).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'missing',
+    })
+    await expect(operation).rejects.toThrow(
+      'garmin-connect-auth serve --region <global|cn> --open',
     )
   })
 
@@ -196,9 +205,9 @@ describe('GarminClient', () => {
       sessionTokenFile,
     })
 
-    await expect(client.connect()).rejects.toThrow(
-      'Garmin session token file could not be read',
-    )
+    const missing = client.connect()
+    await expect(missing).rejects.toBeInstanceOf(GarminAuthenticationRequiredError)
+    await expect(missing).rejects.toMatchObject({ reason: 'missing' })
     latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
 
     await client.replacePersistedSession(() => writeFile(
@@ -332,7 +341,8 @@ describe('GarminClient', () => {
     )
 
     await expect(client.getActivities()).rejects.toThrow(
-      'Garmin DI session was rejected; run garmin-connect-auth login --browser again',
+      'Garmin DI session was rejected; run ' +
+        'garmin-connect-auth serve --region <global|cn> --open',
     )
     expect(client.getAuthenticatedAccount()).toBeUndefined()
     expect(latestGarmin().login).not.toHaveBeenCalled()
@@ -351,8 +361,11 @@ describe('GarminClient', () => {
       sessionTokenFile,
     })
 
-    await expect(client.connect()).rejects.toThrow(
-      'Garmin DI session format is obsolete; run browser authentication again',
+    const operation = client.connect()
+    await expect(operation).rejects.toMatchObject({ reason: 'rejected' })
+    await expect(operation).rejects.toThrow(
+      'Garmin DI session format is obsolete; run ' +
+        'garmin-connect-auth serve --region <global|cn> --open',
     )
     expect(latestGarmin().login).not.toHaveBeenCalled()
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
@@ -373,9 +386,29 @@ describe('GarminClient', () => {
       sessionTokenFile,
     })
 
-    await expect(client.connect()).rejects.toThrow('Garmin session token file is invalid')
+    const operation = client.connect()
+    await expect(operation).rejects.toBeInstanceOf(GarminAuthenticationRequiredError)
+    await expect(operation).rejects.toMatchObject({ reason: 'rejected' })
+    await expect(operation).rejects.toThrow('Garmin session token file is invalid')
     expect(latestGarmin().login).not.toHaveBeenCalled()
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
+  })
+
+  it('requests browser authentication for a malformed legacy file without a password', async () => {
+    const sessionTokenFile = await createSessionFile('{"oauth1":{},"broken":"marker"}')
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionTokenFile,
+    })
+
+    const operation = client.connect()
+    await expect(operation).rejects.toBeInstanceOf(GarminAuthenticationRequiredError)
+    await expect(operation).rejects.toMatchObject({ reason: 'rejected' })
+    await expect(operation).rejects.toThrow(
+      'garmin-connect-auth serve --region <global|cn> --open',
+    )
+    expect(latestGarmin().login).not.toHaveBeenCalled()
   })
 
   it('does not refresh, reject, or password-fallback a DI session after HTTP 403', async () => {
@@ -410,8 +443,13 @@ describe('GarminClient', () => {
       sessionTokenFile,
     })
 
-    await expect(client.connect()).rejects.toThrow(
+    const operation = client.connect()
+    await expect(operation).rejects.toThrow(
       'Garmin session token file does not match the configured account or region',
+    )
+    await expect(operation).rejects.toBeInstanceOf(PublicToolError)
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
     )
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
   })
@@ -691,8 +729,13 @@ describe('GarminClient', () => {
       Object.assign(new Error('unauthorized'), { status: 401 }),
     )
 
-    await expect(client.getSleep('2026-08-20')).rejects.toThrow(
-      'Garmin session token was rejected; provide a new token or password',
+    const operation = client.getSleep('2026-08-20')
+    await expect(operation).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'rejected',
+    })
+    await expect(operation).rejects.toThrow(
+      'garmin-connect-auth serve --region <global|cn> --open',
     )
     expect(latestGarmin().getSleepData).toHaveBeenCalledTimes(1)
     expect(latestGarmin().login).not.toHaveBeenCalled()

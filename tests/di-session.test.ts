@@ -11,6 +11,10 @@ import {
   GARMIN_DI_CLIENT_ID,
   type GarminDiSessionFile,
 } from '../src/session-store'
+import {
+  GarminAuthenticationRequiredError,
+  PublicToolError,
+} from '../src/utils/errors'
 
 const NOW_MS = 1_800_000_000_000
 
@@ -634,12 +638,16 @@ describe('GarminDiSessionRuntime', () => {
     runtime.install(client)
 
     const first = client.get('https://connectapi.garmin.com/first')
+    await expect(first).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'expired',
+    })
     await expect(first).rejects.toThrow(
-      'Garmin DI session has expired; run garmin-connect-auth login --browser again',
+      'garmin-connect-auth serve --region <global|cn> --open',
     )
     await expect(first).rejects.not.toThrow('PRIVATE_REFRESH_TOKEN_FRAGMENT')
     await expect(client.get('https://connectapi.garmin.com/second')).rejects.toThrow(
-      'Garmin DI session has expired; run garmin-connect-auth login --browser again',
+      'Garmin DI session has expired',
     )
     expect(refresh).toHaveBeenCalledTimes(1)
   })
@@ -672,10 +680,14 @@ describe('GarminDiSessionRuntime', () => {
     runtime.install(client)
 
     const first = client.get('https://connectapi.garmin.com/first')
+    await expect(first).rejects.toBeInstanceOf(GarminAuthenticationRequiredError)
+    await expect(first).rejects.toMatchObject({
+      reason: error === 'invalid_token' ? 'expired' : 'rejected',
+    })
     await expect(first).rejects.toThrow(
       error === 'invalid_token'
-        ? 'Garmin DI session has expired; run garmin-connect-auth login --browser again'
-        : 'Garmin DI session was rejected; run garmin-connect-auth login --browser again',
+        ? 'Garmin DI session has expired'
+        : 'Garmin DI session was rejected',
     )
     await expect(first).rejects.not.toThrow('PRIVATE_REJECTION_BODY')
     await expect(client.get('https://connectapi.garmin.com/second')).rejects.toThrow(
@@ -784,7 +796,11 @@ describe('GarminDiSessionRuntime', () => {
     finishRefresh()
 
     await expect(request).rejects.toThrow(
-      'Garmin DI session was rejected; run garmin-connect-auth login --browser again',
+      'Garmin authentication changed while the request was in flight; retry the request',
+    )
+    await expect(request).rejects.toBeInstanceOf(PublicToolError)
+    await expect(request).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
     )
     expect(probeProfile).toHaveBeenCalledTimes(1)
     expect(writeSession).toHaveBeenCalledWith(
@@ -861,7 +877,7 @@ describe('GarminDiSessionRuntime', () => {
     await replacement
     expect(replacementWriter).toHaveBeenCalledTimes(1)
     await expect(oldRequest).rejects.toThrow(
-      'Garmin DI session was rejected; run garmin-connect-auth login --browser again',
+      'Garmin authentication changed while the request was in flight; retry the request',
     )
 
     let replacementAuthorization: string | undefined
@@ -956,7 +972,7 @@ describe('GarminDiSessionRuntime', () => {
     finishRequest()
 
     await expect(request).rejects.toThrow(
-      'Garmin DI session was rejected; run garmin-connect-auth login --browser again',
+      'Garmin authentication changed while the request was in flight; retry the request',
     )
     await expect(request).rejects.not.toThrow('PRIVATE_SUCCESS_BODY')
   })

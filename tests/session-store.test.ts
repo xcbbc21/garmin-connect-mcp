@@ -12,6 +12,8 @@ import {
   bindDiSessionTokensToAccount,
   bindSessionTokensToAccount,
   GarminDiSessionFileError,
+  GarminSessionTokenFileInvalidError,
+  GarminSessionTokenFileMissingError,
   readSessionTokenFile,
   sessionFileMatchesAccount,
   sessionFileMatchesProfile,
@@ -147,7 +149,8 @@ describe('session token file store', () => {
     const path = await sessionPath(JSON.stringify({ ...current, schemaVersion: 1 }))
 
     await expect(readSessionTokenFile(path)).rejects.toThrow(
-      'Garmin DI session format is obsolete; run browser authentication again',
+      'Garmin DI session format is obsolete; run ' +
+        'garmin-connect-auth serve --region <global|cn> --open',
     )
   })
 
@@ -189,9 +192,10 @@ describe('session token file store', () => {
     }
 
     expect(thrown).toEqual(expect.objectContaining({
-      name: 'PublicToolError',
+      name: 'GarminSessionTokenFileInvalidError',
       message: 'Garmin session token file is invalid',
     }))
+    expect(thrown).toBeInstanceOf(GarminSessionTokenFileInvalidError)
     expect(String(thrown)).not.toContain('TOP_SECRET_FRAGMENT')
   })
 
@@ -205,8 +209,10 @@ describe('session token file store', () => {
     }
 
     expect(thrown).toEqual(expect.objectContaining({
-      message: 'Garmin session token file could not be read',
+      name: 'GarminSessionTokenFileMissingError',
+      message: 'Garmin session token file does not exist',
     }))
+    expect(thrown).toBeInstanceOf(GarminSessionTokenFileMissingError)
     expect(String(thrown)).not.toContain(marker)
   })
 
@@ -221,8 +227,12 @@ describe('session token file store', () => {
     if (process.platform === 'win32') return
     const path = await sessionPath(JSON.stringify({ oauth1: {}, oauth2: {} }), 0o644)
 
-    await expect(readSessionTokenFile(path))
+    const operation = readSessionTokenFile(path)
+    await expect(operation)
       .rejects.toThrow('Garmin session token file permissions are unsafe')
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminSessionTokenFileMissingError,
+    )
   })
 
   it('does not follow a symlink token path', async () => {

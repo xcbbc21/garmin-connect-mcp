@@ -9,7 +9,11 @@ import {
   type GarminDiSessionFile,
   writeSessionTokenFile,
 } from './session-store'
-import { PublicToolError } from './utils/errors'
+import {
+  GARMIN_BROWSER_AUTH_COMMAND,
+  GarminAuthenticationRequiredError,
+  PublicToolError,
+} from './utils/errors'
 
 const ACCESS_REFRESH_WINDOW_MS = 60_000
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
@@ -17,9 +21,11 @@ const MAX_REFRESH_RESPONSE_BYTES = 64 * 1024
 const MAX_PROFILE_RESPONSE_BYTES = 256 * 1024
 const DI_REFRESH_FAILED_MESSAGE = 'Garmin DI session could not be refreshed'
 const DI_SESSION_EXPIRED_MESSAGE =
-  'Garmin DI session has expired; run garmin-connect-auth login --browser again'
+  `Garmin DI session has expired; run ${GARMIN_BROWSER_AUTH_COMMAND}`
 const DI_SESSION_REJECTED_MESSAGE =
-  'Garmin DI session was rejected; run garmin-connect-auth login --browser again'
+  `Garmin DI session was rejected; run ${GARMIN_BROWSER_AUTH_COMMAND}`
+const DI_SESSION_INVALIDATED_MESSAGE =
+  'Garmin authentication changed while the request was in flight; retry the request'
 const DI_PERSIST_FAILED_MESSAGE = 'Garmin DI session could not be persisted'
 
 interface SharedSessionState {
@@ -314,7 +320,7 @@ export class GarminDiSessionRuntime {
 
   private assertActive(): void {
     if (this.invalidated || this.shared.retired) {
-      throw new PublicToolError(DI_SESSION_REJECTED_MESSAGE)
+      throw new PublicToolError(DI_SESSION_INVALIDATED_MESSAGE)
     }
   }
 
@@ -323,7 +329,7 @@ export class GarminDiSessionRuntime {
     const refreshExpiry = current.tokens.refreshExpiresAtMs
     if (refreshExpiry !== null && refreshExpiry <= nowMs) {
       this.shared.terminal = 'expired'
-      throw new PublicToolError(DI_SESSION_EXPIRED_MESSAGE)
+      throw terminalSessionError('expired')
     }
 
     const refreshToken = current.tokens.refreshToken
@@ -535,8 +541,11 @@ function terminalRefreshFailure(error: unknown): 'rejected' | undefined {
   return status === 401 || status === 403 ? 'rejected' : undefined
 }
 
-function terminalSessionError(kind: 'expired' | 'rejected'): PublicToolError {
-  return new PublicToolError(
+function terminalSessionError(
+  kind: 'expired' | 'rejected',
+): GarminAuthenticationRequiredError {
+  return new GarminAuthenticationRequiredError(
+    kind,
     kind === 'expired' ? DI_SESSION_EXPIRED_MESSAGE : DI_SESSION_REJECTED_MESSAGE,
   )
 }

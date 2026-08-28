@@ -10,13 +10,19 @@ import {
 import { MAX_ZIP_BYTES } from './fit-export'
 import {
   GarminDiSessionFileError,
+  GarminSessionTokenFileInvalidError,
+  GarminSessionTokenFileMissingError,
   isDiSessionFile,
   readSessionTokenFile,
   sessionFileMatchesAccount,
 } from './session-store'
 import { MemoryCache } from './utils/cache'
 import { parseLocalDate } from './utils/date'
-import { PublicToolError } from './utils/errors'
+import {
+  GARMIN_BROWSER_AUTH_COMMAND,
+  GarminAuthenticationRequiredError,
+  PublicToolError,
+} from './utils/errors'
 
 type LogLevel = Config['logLevel']
 
@@ -28,7 +34,9 @@ const LOG_LEVEL_RANK: Record<LogLevel, number> = {
 }
 
 const DI_SESSION_REJECTED_MESSAGE =
-  'Garmin DI session was rejected; run garmin-connect-auth login --browser again'
+  `Garmin DI session was rejected; run ${GARMIN_BROWSER_AUTH_COMMAND}`
+const SESSION_TOKEN_REJECTED_MESSAGE =
+  `Garmin session token was rejected; run ${GARMIN_BROWSER_AUTH_COMMAND}`
 
 export interface GarminClientOptions {
   /** Let the local dsh UI load before its out-of-band authentication finishes. */
@@ -142,15 +150,16 @@ export class GarminClient {
           identityVerified = restored === 'verified'
         }
       } else if (this.diSessionSelected) {
-        throw new PublicToolError(DI_SESSION_REJECTED_MESSAGE)
+        throw new GarminAuthenticationRequiredError(
+          'rejected',
+          DI_SESSION_REJECTED_MESSAGE,
+        )
       } else if (this.config.password?.trim()) {
         this.log('info', '[garmin] Logging in with username/password…')
         await this.withRequestTimeout(() => this.gc.login())
         identityVerified = true
       } else {
-        throw new PublicToolError(
-          'Garmin authentication is required; use Garmin Login or configure a session',
-        )
+        throw new GarminAuthenticationRequiredError('missing')
       }
       this.connected = true
       if (identityVerified) this.markAuthenticatedAccount()
@@ -158,13 +167,16 @@ export class GarminClient {
     } catch (err) {
       this.connected = false
       const status = getHttpStatus(err)
-      const reason = err instanceof PublicToolError
-        ? err.message
+      const normalizedError = status === 401 && !(err instanceof PublicToolError)
+        ? new GarminAuthenticationRequiredError('rejected')
+        : err
+      const reason = normalizedError instanceof PublicToolError
+        ? normalizedError.message
         : status
           ? `Garmin connection failed (HTTP ${status})`
           : 'Garmin connection failed'
       this.log('error', `[garmin] ❌ ${reason}`)
-      throw err
+      throw normalizedError
     }
   }
 
@@ -228,13 +240,35 @@ export class GarminClient {
       }
       this.rejectConfiguredSessionToken()
       if (this.diSessionSelected) {
+        if (error instanceof GarminAuthenticationRequiredError) throw error
+        if (error instanceof GarminSessionTokenFileInvalidError) {
+          throw new GarminAuthenticationRequiredError(
+            'rejected',
+            error.message.includes(GARMIN_BROWSER_AUTH_COMMAND)
+              ? error.message
+              : `${error.message}; run ${GARMIN_BROWSER_AUTH_COMMAND}`,
+          )
+        }
         if (error instanceof PublicToolError) throw error
-        throw new PublicToolError(DI_SESSION_REJECTED_MESSAGE)
+        throw new GarminAuthenticationRequiredError(
+          'rejected',
+          DI_SESSION_REJECTED_MESSAGE,
+        )
       }
       if (!this.config.password?.trim()) {
+        if (error instanceof GarminSessionTokenFileMissingError) {
+          throw new GarminAuthenticationRequiredError('missing')
+        }
+        if (error instanceof GarminSessionTokenFileInvalidError) {
+          throw new GarminAuthenticationRequiredError(
+            'rejected',
+            `${error.message}; run ${GARMIN_BROWSER_AUTH_COMMAND}`,
+          )
+        }
         if (!inlineToken && error instanceof PublicToolError) throw error
-        throw new PublicToolError(
-          'Garmin session token is invalid; provide a valid token or password',
+        throw new GarminAuthenticationRequiredError(
+          'rejected',
+          `Garmin session token is invalid; run ${GARMIN_BROWSER_AUTH_COMMAND}`,
         )
       }
       return false
@@ -374,7 +408,10 @@ export class GarminClient {
           if (this.diSessionSelected) {
             if (status === 401) {
               this.rejectConfiguredSessionToken()
-              throw new PublicToolError(DI_SESSION_REJECTED_MESSAGE)
+              throw new GarminAuthenticationRequiredError(
+                'rejected',
+                DI_SESSION_REJECTED_MESSAGE,
+              )
             }
             throw err
           }
@@ -383,8 +420,9 @@ export class GarminClient {
             // accounts. Never carry health data across that identity boundary.
             this.rejectConfiguredSessionToken()
             if (!this.config.password?.trim()) {
-              throw new PublicToolError(
-                'Garmin session token was rejected; provide a new token or password',
+              throw new GarminAuthenticationRequiredError(
+                'rejected',
+                SESSION_TOKEN_REJECTED_MESSAGE,
               )
             }
           }

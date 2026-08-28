@@ -2,10 +2,16 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js'
 import { config as loadEnv } from 'dotenv'
 import { z } from 'zod'
+import {
+  assertAccountAlias,
+  defaultAccountSessionPath,
+} from './account-session'
 import { GarminClient } from './client'
 import type { Config } from './config'
+import { McpGarminAuthCoordinator } from './mcp-auth'
 import {
   GarminToolService,
   INTENSITY_GUIDANCE_PREFERENCES,
@@ -23,6 +29,7 @@ import type {
   RunningAdviceArgs,
 } from './tool-service'
 import {
+  GarminAuthenticationRequiredError,
   PublicToolError,
   publicErrorMessage,
   safeUpstreamLogLine,
@@ -89,12 +96,26 @@ const WRITE_ANNOTATIONS = {
 
 const MCP_SERVER_VERSION = (require('../package.json') as { version: string }).version
 
+export interface McpAuthenticationHandler {
+  requireAuthentication(error: unknown): Promise<never>
+  close?(): Promise<void>
+}
+
+export interface CreateMcpServerOptions {
+  createAuthentication?: (server: McpServer) => McpAuthenticationHandler
+}
+
 /** Build an MCP adapter around the same service used by the DSH plugin. */
-export function createMcpServer(service: ToolService): McpServer {
+export function createMcpServer(
+  service: ToolService,
+  options: CreateMcpServerOptions = {},
+): McpServer {
   const server = new McpServer({
     name: 'garmin-connect',
     version: MCP_SERVER_VERSION,
   })
+  const authentication = options.createAuthentication?.(server)
+  const invokeTool = (action: () => Promise<unknown>) => invoke(action, authentication)
 
   // Casting at this boundary keeps the SDK's recursive Zod overloads from
   // dominating TypeScript build time; every handler remains explicitly typed.
@@ -126,35 +147,35 @@ export function createMcpServer(service: ToolService): McpServer {
       offset: z.number().int().min(0).optional(),
       detail: z.enum(['compact', 'full']).optional(),
     },
-    (args: ActivityArgs) => invoke(() => service.getActivities(args)),
+    (args: ActivityArgs) => invokeTool(() => service.getActivities(args)),
   )
 
   register(
     'get_garmin_sleep',
     'Get sleep data for one date or an inclusive date range.',
     dateRangeSchema,
-    (args: DateRangeArgs) => invoke(() => service.getSleep(args)),
+    (args: DateRangeArgs) => invokeTool(() => service.getSleep(args)),
   )
 
   register(
     'get_garmin_steps',
     'Get step totals for one date or an inclusive date range; goal and distance may be unavailable.',
     dateRangeSchema,
-    (args: DateRangeArgs) => invoke(() => service.getSteps(args)),
+    (args: DateRangeArgs) => invokeTool(() => service.getSteps(args)),
   )
 
   register(
     'get_garmin_heart_rate',
     'Get heart-rate data for one date or an inclusive date range.',
     dateRangeSchema,
-    (args: DateRangeArgs) => invoke(() => service.getHeartRate(args)),
+    (args: DateRangeArgs) => invokeTool(() => service.getHeartRate(args)),
   )
 
   register(
     'get_garmin_weight',
     'Get body-composition data for one date or an inclusive date range.',
     dateRangeSchema,
-    (args: DateRangeArgs) => invoke(() => service.getWeight(args)),
+    (args: DateRangeArgs) => invokeTool(() => service.getWeight(args)),
   )
 
   register(
@@ -164,14 +185,14 @@ export function createMcpServer(service: ToolService): McpServer {
       limit: z.number().int().min(1).max(100).optional(),
       offset: z.number().int().min(0).optional(),
     },
-    (args: PaginationArgs) => invoke(() => service.getWorkouts(args)),
+    (args: PaginationArgs) => invokeTool(() => service.getWorkouts(args)),
   )
 
   register(
     'get_garmin_profile',
     'Get an allow-listed Garmin profile summary.',
     {},
-    () => invoke(() => service.getProfile()),
+    () => invokeTool(() => service.getProfile()),
   )
 
   register(
@@ -224,7 +245,7 @@ export function createMcpServer(service: ToolService): McpServer {
       intensityGuidancePreference: z.enum(INTENSITY_GUIDANCE_PREFERENCES).optional()
         .describe('Preferred intensity guidance: pace, heart rate, perceived effort, or mixed.'),
     },
-    (args: RunningAdviceArgs) => invoke(() => service.getRunningAdvice(args)),
+    (args: RunningAdviceArgs) => invokeTool(() => service.getRunningAdvice(args)),
   )
 
   register(
@@ -245,7 +266,7 @@ export function createMcpServer(service: ToolService): McpServer {
         'One-time ID returned by the matching preview call.',
       ),
     },
-    (args: CreateWorkoutArgs) => invoke(() => service.createWorkout(args)),
+    (args: CreateWorkoutArgs) => invokeTool(() => service.createWorkout(args)),
     WRITE_ANNOTATIONS,
     false,
   )
@@ -258,12 +279,33 @@ export function createMcpServer(service: ToolService): McpServer {
         'Positive Garmin activity ID returned by get_garmin_activities.',
       ),
     },
-    (args: DownloadActivityFitArgs) => invoke(() => service.downloadActivityFit(args)),
+    (args: DownloadActivityFitArgs) => invokeTool(() => service.downloadActivityFit(args)),
     // Existing FIT files are never overwritten. A repeated call returns
     // OUTPUT_EXISTS, so this intentionally shares the non-idempotent hint.
     WRITE_ANNOTATIONS,
     false,
   )
+
+  if (authentication?.close) {
+    const originalClose = server.close.bind(server)
+    let closingAuthentication: Promise<void> | undefined
+    const closeAuthentication = (): Promise<void> => {
+      closingAuthentication ??= Promise.resolve().then(() => authentication.close!())
+      return closingAuthentication
+    }
+    server.close = async (): Promise<void> => {
+      try {
+        await closeAuthentication()
+      } finally {
+        await originalClose()
+      }
+    }
+    const previousOnClose = server.server.onclose
+    server.server.onclose = (): void => {
+      previousOnClose?.()
+      void closeAuthentication().catch(() => undefined)
+    }
+  }
 
   return server
 }
@@ -291,10 +333,20 @@ function successResult(value: unknown) {
   }
 }
 
-async function invoke(action: () => Promise<unknown>): Promise<ReturnType<typeof successResult>> {
+async function invoke(
+  action: () => Promise<unknown>,
+  authentication?: McpAuthenticationHandler,
+): Promise<ReturnType<typeof successResult>> {
   try {
     return successResult(await action())
   } catch (error) {
+    if (error instanceof UrlElicitationRequiredError) throw error
+    if (
+      authentication
+      && error instanceof GarminAuthenticationRequiredError
+    ) {
+      return authentication.requireAuthentication(error)
+    }
     return {
       isError: true,
       content: [{
@@ -309,16 +361,13 @@ async function invoke(action: () => Promise<unknown>): Promise<ReturnType<typeof
 }
 
 export function standaloneConfig(): Config {
+  const account = standaloneAccountAlias()
   const username = process.env.GARMIN_USERNAME?.trim() ?? ''
   const password = process.env.GARMIN_PASSWORD
   const sessionToken = process.env.GARMIN_SESSION_TOKEN
-  const sessionTokenFile = process.env.GARMIN_SESSION_TOKEN_FILE
+  const sessionTokenFile = process.env.GARMIN_SESSION_TOKEN_FILE?.trim()
+    || defaultAccountSessionPath(account, process.env)
   if (!username) throw new PublicToolError('GARMIN_USERNAME is required')
-  if (!password?.trim() && !sessionToken?.trim() && !sessionTokenFile?.trim()) {
-    throw new PublicToolError(
-      'GARMIN_PASSWORD, GARMIN_SESSION_TOKEN, or GARMIN_SESSION_TOKEN_FILE is required',
-    )
-  }
 
   const region = process.env.GARMIN_REGION === 'cn' ? 'cn' : 'global'
   const activityDetail = process.env.GARMIN_ACTIVITY_DETAIL === 'full' ? 'full' : 'compact'
@@ -338,6 +387,14 @@ export function standaloneConfig(): Config {
       'info',
     ),
   }
+}
+
+export function standaloneAccountAlias(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const account = env.GARMIN_ACCOUNT?.trim() || 'default'
+  assertAccountAlias(account)
+  return account
 }
 
 function envNumber(name: string, fallback: number, allowZero: boolean): number {
@@ -400,14 +457,24 @@ async function main(): Promise<void> {
     config.sessionTokenFile,
     process.env.DOTENV_KEY,
   ]
-  const client = new GarminClient(stderrContext(), config)
+  const account = standaloneAccountAlias()
+  const client = new GarminClient(stderrContext(), config, { allowUnconfigured: true })
   const service = new GarminToolService(client, {
     activityDetail: config.activityDetail,
     fitDownloadDir: config.fitDownloadDir,
     accountUsername: config.username,
     accountRegion: config.region,
   })
-  const server = createMcpServer(service)
+  const server = createMcpServer(service, {
+    createAuthentication: mcpServer => new McpGarminAuthCoordinator({
+      protocol: mcpServer.server,
+      account,
+      username: config.username,
+      region: config.region,
+      sessionTokenFile: config.sessionTokenFile!,
+      replaceSession: writeSession => client.replacePersistedSession(writeSession),
+    }),
+  })
   await server.connect(new StdioServerTransport())
   console.error('[garmin-connect-mcp] Server started (stdio transport)')
 }
