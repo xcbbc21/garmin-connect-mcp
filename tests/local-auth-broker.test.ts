@@ -110,6 +110,28 @@ describe('local Garmin authentication broker', () => {
     expect(controller.close).toHaveBeenCalledTimes(1)
   })
 
+  it('does not open a browser when cancellation wins immediately after begin', async () => {
+    const controller = controllerFixture()
+    const abort = new AbortController()
+    controller.begin.mockImplementation(async () => {
+      abort.abort()
+      return {
+        success: true,
+        flowId: FLOW_ID,
+        bridgeUrl: BRIDGE_URL,
+        expiresAt: 1_900_000_000_000,
+      }
+    })
+    const openBrowser = jest.fn()
+    const broker = new LocalAuthBroker({ controller, openBrowser })
+
+    await expect(broker.authenticateInSystemBrowser('cn', abort.signal))
+      .rejects.toThrow('Garmin browser authentication was cancelled')
+    expect(openBrowser).not.toHaveBeenCalled()
+    expect(controller.cancel).toHaveBeenCalledWith({ flowId: FLOW_ID })
+    expect(controller.close).toHaveBeenCalledTimes(1)
+  })
+
   it('can start without opening a browser so MCP URL elicitation can own navigation', async () => {
     const controller = controllerFixture(['succeeded'])
     const openBrowser = jest.fn()
@@ -178,6 +200,17 @@ describe('system browser opener', () => {
       stdio: 'ignore',
     })
     expect(child.unref).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a late launcher error from becoming an unhandled process error', async () => {
+    const { child, spawn } = spawnFixture()
+
+    await openLoopbackAuthInSystemBrowser(BRIDGE_URL, {
+      platform: 'darwin',
+      spawn: spawn as never,
+    })
+
+    expect(() => child.emit('error', new Error('late launcher error'))).not.toThrow()
   })
 
   it('rejects non-loopback and malformed bridge URLs before spawning', async () => {

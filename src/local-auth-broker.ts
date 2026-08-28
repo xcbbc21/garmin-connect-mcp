@@ -101,6 +101,14 @@ export class LocalAuthBroker {
       ) {
         throw unavailableError()
       }
+      if (isAborted(signal)) {
+        try {
+          this.controller.cancel({ flowId: started.flowId })
+        } catch {
+          // Cancellation is best effort at this already-aborted boundary.
+        }
+        throw new BrowserCanaryControlError('CANCELLED')
+      }
       this.active = {
         flowId: started.flowId,
         url: started.bridgeUrl,
@@ -257,7 +265,6 @@ export async function openLoopbackAuthInSystemBrowser(
     }
     child.once('error', fail)
     child.once('spawn', () => {
-      child.off('error', fail)
       child.unref()
       resolve()
     })
