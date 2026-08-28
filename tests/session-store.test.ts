@@ -150,7 +150,7 @@ describe('session token file store', () => {
 
     await expect(readSessionTokenFile(path)).rejects.toThrow(
       'Garmin DI session format is obsolete; run ' +
-        'garmin-connect-auth serve --region <global|cn> --open',
+        'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
   })
 
@@ -245,6 +245,47 @@ describe('session token file store', () => {
 
     await expect(readSessionTokenFile(linked))
       .rejects.toThrow('Garmin session token file could not be read')
+  })
+
+  it('rejects a private file below a writable POSIX ancestor', async () => {
+    if (process.platform === 'win32') return
+    const root = await mkdtemp(join(tmpdir(), 'garmin-session-ancestor-test-'))
+    temporaryDirectories.push(root)
+    const unsafeAncestor = join(root, 'unsafe')
+    const parent = join(unsafeAncestor, 'account')
+    const path = join(parent, 'SECRET_ACCOUNT.json')
+    await mkdir(parent, { recursive: true, mode: 0o700 })
+    await chmod(unsafeAncestor, 0o777)
+    await chmod(parent, 0o700)
+    await writeFile(path, JSON.stringify({ oauth1: {}, oauth2: {} }), {
+      mode: 0o600,
+    })
+    await chmod(path, 0o600)
+
+    const operation = readSessionTokenFile(path)
+
+    await expect(operation)
+      .rejects.toThrow('Garmin session token file permissions are unsafe')
+    await expect(operation).rejects.not.toThrow('SECRET_ACCOUNT')
+  })
+
+  it('canonicalizes a private parent symlink before reading', async () => {
+    if (process.platform === 'win32') return
+    const root = await mkdtemp(join(tmpdir(), 'garmin-session-parent-link-test-'))
+    temporaryDirectories.push(root)
+    const actual = join(root, 'actual')
+    const linked = join(root, 'linked')
+    const tokens = { oauth1: { id: 1 }, oauth2: { id: 2 } }
+    await mkdir(actual, { mode: 0o700 })
+    await chmod(actual, 0o700)
+    await writeFile(join(actual, 'session.json'), JSON.stringify(tokens), {
+      mode: 0o600,
+    })
+    await chmod(join(actual, 'session.json'), 0o600)
+    await symlink(actual, linked, 'dir')
+
+    await expect(readSessionTokenFile(join(linked, 'session.json')))
+      .resolves.toEqual(tokens)
   })
 
   it('rejects directories and other non-regular sources', async () => {

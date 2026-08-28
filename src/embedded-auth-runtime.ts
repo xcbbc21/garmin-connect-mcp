@@ -9,6 +9,7 @@ import { EmbeddedAuthController } from './embedded-auth-controller'
 import { EmbeddedAuthFlowManager } from './embedded-auth-flow'
 import { EmbeddedAuthServer } from './embedded-auth-server'
 import {
+  prepareSessionTokenWriteDestination,
   writeSessionTokenFile,
   type GarminDiSessionFile,
 } from './session-store'
@@ -26,6 +27,7 @@ export interface EmbeddedAuthRuntimeOptions {
     session: GarminDiSessionFile,
   ) => Promise<void>
   replaceSession?: (writeSession: () => Promise<void>) => Promise<void>
+  prepareDestination?: (path: string) => Promise<void>
 }
 
 /**
@@ -41,6 +43,8 @@ export function createEmbeddedAuthController(
 ): EmbeddedAuthController {
   const http = options.http ?? createAxiosCanaryHttpAdapter()
   const persistSession = options.writeSession ?? writeSessionTokenFile
+  const prepareDestination = options.prepareDestination
+    ?? prepareSessionTokenWriteDestination
   const flows = new EmbeddedAuthFlowManager({
     authenticate: async (input) => {
       await runCapturedServiceTicketDiAuthSetup(
@@ -65,5 +69,6 @@ export function createEmbeddedAuthController(
     ...config,
     flows,
     server,
+    prepareDestination,
   })
 }

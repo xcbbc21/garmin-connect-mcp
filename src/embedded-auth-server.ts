@@ -858,6 +858,7 @@ function bridgeScript(config: string): string {
           break
         case 'saving':
           frame.hidden = true
+          cancelButton.hidden = true
           setStatus('正在安全保存会话…')
           break
         case 'succeeded':
@@ -895,6 +896,7 @@ function bridgeScript(config: string): string {
     confirmButton.disabled = true
     rejectButton.disabled = true
     confirmation.hidden = true
+    cancelButton.hidden = true
     setStatus('正在安全保存会话…')
     void post('confirm', { accepted: true }).then(poll, failClosed)
   })

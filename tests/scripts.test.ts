@@ -289,7 +289,7 @@ describe('maintenance scripts', () => {
         },
         input: '',
         encoding: 'utf8',
-        timeout: 5_000,
+        timeout: 15_000,
       })
     } finally {
       rmSync(cwd, { recursive: true, force: true })

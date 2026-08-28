@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminConnect } from 'garmin-connect'
@@ -181,8 +181,27 @@ describe('GarminClient', () => {
       reason: 'missing',
     })
     await expect(operation).rejects.toThrow(
-      'garmin-connect-auth serve --region <global|cn> --open',
+      'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
+  })
+
+  it('turns the pinned SDK MFA/ticket failure into browser-recoverable authentication', async () => {
+    const sessionTokenFile = await createEmptySessionPath()
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      sessionTokenFile,
+    }, { allowUnconfigured: true })
+    latestGarmin().login.mockRejectedValue(new Error(
+      'login failed (Ticket not found or MFA), please check username and password',
+    ))
+
+    const operation = client.connect()
+    await expect(operation).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'rejected',
+    })
+    await expect(operation).rejects.toThrow('garmin-connect-auth serve')
+    expect(latestGarmin().login).toHaveBeenCalledTimes(1)
   })
 
   it('publishes the configured account only after password authentication succeeds', async () => {
@@ -221,6 +240,292 @@ describe('GarminClient', () => {
     })
     await expect(client.connect()).resolves.toBeUndefined()
     expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+  })
+
+  it('hot-loads a DI session written by a separate auth process after a missing-file failure', async () => {
+    const sessionTokenFile = await createEmptySessionPath()
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+
+    await expect(client.connect()).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'missing',
+    })
+    await writeFile(sessionTokenFile, JSON.stringify(createDiSession()), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
+
+    await expect(client.connect()).resolves.toBeUndefined()
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+    expect(client.getAuthenticatedAccount()).toEqual({
+      email: 'runner@example.test',
+      region: 'global',
+    })
+  })
+
+  it('hot-loads an atomically replaced DI session after the previous file is rejected', async () => {
+    const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile
+      .mockRejectedValueOnce(Object.assign(new Error('unauthorized'), { status: 401 }))
+      .mockResolvedValueOnce({ profileId: 123456789 })
+
+    await expect(client.connect()).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'rejected',
+    })
+    const replacementPath = `${sessionTokenFile}.replacement`
+    await writeFile(replacementPath, JSON.stringify(createDiSession()), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    await rename(replacementPath, sessionTokenFile)
+
+    await expect(client.connect()).resolves.toBeUndefined()
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(2)
+  })
+
+  it('loads the changed session snapshot even if the file is replaced again before restore', async () => {
+    const rejectedSession = createDiSession(
+      'runner@example.test',
+      'global',
+      111111111,
+    )
+    const replacementSession = createDiSession(
+      'runner@example.test',
+      'global',
+      222222222,
+    )
+    const sessionTokenFile = await createSessionFile(JSON.stringify(rejectedSession))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile
+      .mockRejectedValueOnce(Object.assign(new Error('unauthorized'), { status: 401 }))
+      .mockResolvedValueOnce({ profileId: 222222222 })
+
+    await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+    await writeFile(sessionTokenFile, JSON.stringify(replacementSession), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    const internals = client as unknown as {
+      acceptChangedSessionFile: () => Promise<void>
+    }
+    const acceptChangedSessionFile = internals.acceptChangedSessionFile.bind(client)
+    internals.acceptChangedSessionFile = async () => {
+      await acceptChangedSessionFile()
+      await writeFile(sessionTokenFile, JSON.stringify(rejectedSession), {
+        encoding: 'utf8',
+        mode: 0o600,
+      })
+    }
+
+    await expect(client.connect()).resolves.toBeUndefined()
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(2)
+  })
+
+  it('hot-loads an externally replaced file after a live DI session expires', async () => {
+    const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile
+      .mockResolvedValueOnce({ profileId: 123456789 })
+      .mockResolvedValueOnce({ profileId: 987654321 })
+    latestGarmin().getActivities
+      .mockRejectedValueOnce(new GarminAuthenticationRequiredError('expired'))
+      .mockResolvedValueOnce([{ activityId: 42 }])
+
+    await expect(client.getActivities()).rejects.toMatchObject({ reason: 'expired' })
+    await writeFile(sessionTokenFile, JSON.stringify(createDiSession(
+      'runner@example.test',
+      'global',
+      987654321,
+    )), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+
+    await expect(client.getActivities()).resolves.toEqual([{ activityId: 42 }])
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry an unchanged rejected DI session file', async () => {
+    const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile.mockRejectedValue(
+      Object.assign(new Error('unauthorized'), { status: 401 }),
+    )
+
+    await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+    await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['missing', 'malformed'] as const)(
+    'preserves the old rejection across an interim %s session file',
+    async interimState => {
+      const rejectedSession = createDiSession()
+      const sessionTokenFile = await createSessionFile(JSON.stringify(rejectedSession))
+      const client = new GarminClient(createContext(), {
+        ...baseConfig,
+        password: '',
+        sessionToken: '',
+        sessionTokenFile,
+      })
+      latestGarmin().getUserProfile.mockRejectedValue(
+        Object.assign(new Error('unauthorized'), { status: 401 }),
+      )
+
+      await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+      if (interimState === 'missing') await rm(sessionTokenFile)
+      else await writeFile(sessionTokenFile, '{"broken":true}', { encoding: 'utf8' })
+
+      await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+      await writeFile(sessionTokenFile, JSON.stringify(rejectedSession), {
+        encoding: 'utf8',
+        mode: 0o600,
+      })
+      await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+      expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it.each([
+    {
+      label: 'another account',
+      session: createDiSession('other@example.test'),
+    },
+    {
+      label: 'an expired refresh token',
+      session: {
+        ...createDiSession(),
+        tokens: {
+          ...createDiSession().tokens,
+          refreshExpiresAtMs: Date.now() - 1,
+        },
+      },
+    },
+  ])('preserves the old rejection across a locally unusable $label session', async ({
+    session,
+  }) => {
+    const rejectedSession = createDiSession()
+    const sessionTokenFile = await createSessionFile(JSON.stringify(rejectedSession))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile
+      .mockRejectedValueOnce(Object.assign(new Error('unauthorized'), { status: 401 }))
+      .mockResolvedValue({ profileId: 123456789 })
+
+    await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+    await writeFile(sessionTokenFile, JSON.stringify(session), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+
+    await writeFile(sessionTokenFile, JSON.stringify(rejectedSession), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    await expect(client.connect()).rejects.toMatchObject({ reason: 'rejected' })
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+  })
+
+  it('hot-loads a newly written session file after an inline token is rejected', async () => {
+    const sessionTokenFile = await createEmptySessionPath()
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: JSON.stringify({ oauth1: {}, oauth2: {} }),
+      sessionTokenFile,
+    })
+    latestGarmin().getSleepData.mockRejectedValueOnce(
+      Object.assign(new Error('unauthorized'), { status: 401 }),
+    )
+
+    await expect(client.getSleep('2026-08-20')).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'rejected',
+    })
+    await writeFile(sessionTokenFile, JSON.stringify({
+      oauth1: { other: 'unbound-account' },
+      oauth2: {},
+    }), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    await expect(client.connect()).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'rejected',
+    })
+    expect(latestGarmin().loadToken).toHaveBeenCalledTimes(1)
+    expect(latestGarmin().getUserProfile).not.toHaveBeenCalled()
+
+    await writeFile(sessionTokenFile, JSON.stringify(createDiSession()), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
+
+    await expect(client.connect()).resolves.toBeUndefined()
+    expect(latestGarmin().loadToken).toHaveBeenCalledTimes(1)
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
+    expect(client.getAuthenticatedAccount()).toEqual({
+      email: 'runner@example.test',
+      region: 'global',
+    })
+  })
+
+  it('rejects an unsafe missing-session destination before requesting browser auth', async () => {
+    if (process.platform === 'win32') return
+    const parent = await mkdtemp(join(tmpdir(), 'garmin-session-test-'))
+    temporaryDirectories.push(parent)
+    await chmod(parent, 0o755)
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile: join(parent, 'session.json'),
+    })
+
+    const operation = client.connect()
+    await expect(operation).rejects.toBeInstanceOf(PublicToolError)
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
+    )
+    await expect(operation).rejects.toThrow(
+      'Garmin session token destination could not be prepared',
+    )
+    expect(latestGarmin().getUserProfile).not.toHaveBeenCalled()
+    expect(latestGarmin().login).not.toHaveBeenCalled()
   })
 
   it('blocks new Garmin work until a replacement session commit finishes', async () => {
@@ -312,6 +617,60 @@ describe('GarminClient', () => {
     expect(latestGarmin().login).not.toHaveBeenCalled()
   })
 
+  it('rejects a DI session with an expired refresh token before probing the profile', async () => {
+    const current = createDiSession()
+    const expiredRefreshSession = {
+      ...current,
+      tokens: {
+        ...current.tokens,
+        accessExpiresAtMs: Date.now() + 3_600_000,
+        refreshExpiresAtMs: Date.now() - 1,
+      },
+    }
+    const sessionTokenFile = await createSessionFile(JSON.stringify(expiredRefreshSession))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile.mockResolvedValue({ profileId: 123456789 })
+
+    await expect(client.connect()).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'expired',
+    })
+    expect(latestGarmin().getUserProfile).not.toHaveBeenCalled()
+    expect(latestGarmin().login).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['HTTP 500', Object.assign(new Error('private server response'), { status: 500 })],
+    ['a network failure', new Error('private network detail')],
+  ])('does not reject a valid DI session after %s during its profile probe', async (
+    _case,
+    transientError,
+  ) => {
+    const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile
+      .mockRejectedValueOnce(transientError)
+      .mockResolvedValueOnce({ profileId: 123456789 })
+
+    const first = client.connect()
+    await expect(first).rejects.toBe(transientError)
+    await expect(first).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
+    )
+    await expect(client.connect()).resolves.toBeUndefined()
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(2)
+    expect(latestGarmin().login).not.toHaveBeenCalled()
+  })
+
   it('does not apply one outer timeout across the DI refresh and profile chain', async () => {
     const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
     const client = new GarminClient(createContext(), {
@@ -342,7 +701,7 @@ describe('GarminClient', () => {
 
     await expect(client.getActivities()).rejects.toThrow(
       'Garmin DI session was rejected; run ' +
-        'garmin-connect-auth serve --region <global|cn> --open',
+        'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
     expect(client.getAuthenticatedAccount()).toBeUndefined()
     expect(latestGarmin().login).not.toHaveBeenCalled()
@@ -362,10 +721,13 @@ describe('GarminClient', () => {
     })
 
     const operation = client.connect()
-    await expect(operation).rejects.toMatchObject({ reason: 'rejected' })
+    await expect(operation).rejects.toBeInstanceOf(PublicToolError)
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
+    )
     await expect(operation).rejects.toThrow(
       'Garmin DI session format is obsolete; run ' +
-        'garmin-connect-auth serve --region <global|cn> --open',
+        'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
     expect(latestGarmin().login).not.toHaveBeenCalled()
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
@@ -387,14 +749,16 @@ describe('GarminClient', () => {
     })
 
     const operation = client.connect()
-    await expect(operation).rejects.toBeInstanceOf(GarminAuthenticationRequiredError)
-    await expect(operation).rejects.toMatchObject({ reason: 'rejected' })
+    await expect(operation).rejects.toBeInstanceOf(PublicToolError)
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
+    )
     await expect(operation).rejects.toThrow('Garmin session token file is invalid')
     expect(latestGarmin().login).not.toHaveBeenCalled()
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
   })
 
-  it('requests browser authentication for a malformed legacy file without a password', async () => {
+  it('keeps a malformed legacy file as a local configuration error', async () => {
     const sessionTokenFile = await createSessionFile('{"oauth1":{},"broken":"marker"}')
     const client = new GarminClient(createContext(), {
       ...baseConfig,
@@ -403,11 +767,34 @@ describe('GarminClient', () => {
     })
 
     const operation = client.connect()
-    await expect(operation).rejects.toBeInstanceOf(GarminAuthenticationRequiredError)
-    await expect(operation).rejects.toMatchObject({ reason: 'rejected' })
-    await expect(operation).rejects.toThrow(
-      'garmin-connect-auth serve --region <global|cn> --open',
+    await expect(operation).rejects.toBeInstanceOf(PublicToolError)
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
     )
+    await expect(operation).rejects.toThrow('Garmin session token file is invalid')
+    const retry = client.connect()
+    await expect(retry).rejects.toBeInstanceOf(PublicToolError)
+    await expect(retry).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
+    )
+    expect(latestGarmin().login).not.toHaveBeenCalled()
+    expect(latestGarmin().loadToken).not.toHaveBeenCalled()
+  })
+
+  it('keeps a malformed inline session as a local configuration error', async () => {
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '{"oauth1":{},"broken":"marker"}',
+      sessionTokenFile: '',
+    })
+
+    const operation = client.connect()
+    await expect(operation).rejects.toBeInstanceOf(PublicToolError)
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
+    )
+    await expect(operation).rejects.toThrow('Garmin inline session token is invalid')
     expect(latestGarmin().login).not.toHaveBeenCalled()
   })
 
@@ -735,7 +1122,7 @@ describe('GarminClient', () => {
       reason: 'rejected',
     })
     await expect(operation).rejects.toThrow(
-      'garmin-connect-auth serve --region <global|cn> --open',
+      'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
     expect(latestGarmin().getSleepData).toHaveBeenCalledTimes(1)
     expect(latestGarmin().login).not.toHaveBeenCalled()
@@ -746,6 +1133,7 @@ describe('GarminClient', () => {
       ...baseConfig,
       requestTimeoutMs: 10,
     })
+    await client.connect()
     latestGarmin().getActivities.mockReturnValue(new Promise(() => {}))
 
     const request = client.getActivities()
@@ -871,6 +1259,39 @@ describe('GarminClient', () => {
     expect(latestGarmin().loadToken).toHaveBeenCalledTimes(1)
     expect(latestGarmin().login).toHaveBeenCalledTimes(1)
     expect(latestGarmin().addWorkout).toHaveBeenCalledTimes(1)
+  })
+
+  it('requires an explicit workout retry after hot-loading an externally replaced DI session', async () => {
+    const sessionTokenFile = await createSessionFile(JSON.stringify(createDiSession()))
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      password: '',
+      sessionToken: '',
+      sessionTokenFile,
+    })
+    latestGarmin().getUserProfile
+      .mockResolvedValueOnce({ profileId: 123456789 })
+      .mockResolvedValueOnce({ profileId: 987654321 })
+    latestGarmin().addWorkout
+      .mockRejectedValueOnce(new GarminAuthenticationRequiredError('expired'))
+      .mockResolvedValueOnce({ workoutId: 42 })
+
+    await expect(client.addWorkout({ workoutName: 'Explicit retry' }))
+      .rejects.toMatchObject({ reason: 'expired' })
+    expect(latestGarmin().addWorkout).toHaveBeenCalledTimes(1)
+    await writeFile(sessionTokenFile, JSON.stringify(createDiSession(
+      'runner@example.test',
+      'global',
+      987654321,
+    )), {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+
+    await expect(client.addWorkout({ workoutName: 'Explicit retry' }))
+      .resolves.toEqual({ workoutId: 42 })
+    expect(latestGarmin().addWorkout).toHaveBeenCalledTimes(2)
+    expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(2)
   })
 
   it('does not retry a workout creation that times out', async () => {

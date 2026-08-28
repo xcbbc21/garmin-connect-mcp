@@ -643,7 +643,7 @@ describe('GarminDiSessionRuntime', () => {
       reason: 'expired',
     })
     await expect(first).rejects.toThrow(
-      'garmin-connect-auth serve --region <global|cn> --open',
+      'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
     await expect(first).rejects.not.toThrow('PRIVATE_REFRESH_TOKEN_FRAGMENT')
     await expect(client.get('https://connectapi.garmin.com/second')).rejects.toThrow(

@@ -36,6 +36,7 @@ function createFlows(): jest.Mocked<EmbeddedAuthControllerFlowPort> {
       serviceUrl: 'https://sso.garmin.cn/sso/embed',
     }),
     cancel: jest.fn(),
+    waitForTerminal: jest.fn().mockResolvedValue({ state: 'cancelled' }),
   }
 }
 
@@ -55,6 +56,8 @@ function createController(overrides: {
   sessionTokenFile?: unknown
   flows?: EmbeddedAuthControllerFlowPort
   server?: EmbeddedAuthControllerServerPort
+  prepareDestination?: (path: string) => Promise<void>
+  commitDrainTimeoutMs?: number
 } = {}) {
   const flows = overrides.flows ?? createFlows()
   const server = overrides.server ?? createServer()
@@ -66,6 +69,9 @@ function createController(overrides: {
     ) as string,
     flows,
     server,
+    prepareDestination: overrides.prepareDestination
+      ?? jest.fn().mockResolvedValue(undefined),
+    commitDrainTimeoutMs: overrides.commitDrainTimeoutMs,
   })
   return {
     controller,
@@ -95,6 +101,39 @@ describe('EmbeddedAuthController', () => {
       expiresAt: 50_000,
     })
     expect(JSON.stringify(result)).not.toMatch(/runner|private|session|csrf/i)
+  })
+
+  it('preflights the private destination before starting a bridge or flow', async () => {
+    const prepareDestination = jest.fn().mockRejectedValue(
+      new Error('/private/account/session.json is not writable'),
+    )
+    const { controller, flows, server } = createController({ prepareDestination })
+
+    await expect(controller.begin()).resolves.toEqual({
+      success: false,
+      code: 'unavailable',
+    })
+    expect(prepareDestination).toHaveBeenCalledWith('/private/account/session.json')
+    expect(server.start).not.toHaveBeenCalled()
+    expect(flows.start).not.toHaveBeenCalled()
+  })
+
+  it('does not start a bridge when cancellation happens during destination preflight', async () => {
+    const preflight = deferred<void>()
+    const prepareDestination = jest.fn().mockReturnValue(preflight.promise)
+    const { controller, flows, server } = createController({ prepareDestination })
+    const abort = new AbortController()
+
+    const result = controller.begin(abort.signal)
+    abort.abort()
+    preflight.resolve()
+
+    await expect(result).resolves.toEqual({
+      success: false,
+      code: 'unavailable',
+    })
+    expect(server.start).not.toHaveBeenCalled()
+    expect(flows.start).not.toHaveBeenCalled()
   })
 
   it('rejects a requested login region that differs from GARMIN_REGION', async () => {
@@ -316,6 +355,48 @@ describe('EmbeddedAuthController', () => {
 
     await expect(controller.close()).resolves.toBeUndefined()
     expect(flows.cancel).toHaveBeenCalledTimes(1)
+    expect(server.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for an irrevocable credential save before closing the server', async () => {
+    const terminal = deferred<{ state: 'succeeded' }>()
+    const flows = createFlows()
+    flows.cancel.mockImplementation(() => {
+      throw new Error('saving cannot be cancelled')
+    })
+    flows.waitForTerminal.mockReturnValue(terminal.promise)
+    const { controller, server } = createController({ flows })
+    await controller.begin()
+
+    const closing = controller.close()
+    await Promise.resolve()
+
+    expect(flows.waitForTerminal).toHaveBeenCalledWith(FLOW_ONE)
+    expect(server.close).not.toHaveBeenCalled()
+
+    terminal.resolve({ state: 'succeeded' })
+    await expect(closing).resolves.toBeUndefined()
+    expect(server.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds a stalled credential-save drain and makes close idempotent', async () => {
+    const flows = createFlows()
+    flows.cancel.mockImplementation(() => {
+      throw new Error('saving cannot be cancelled')
+    })
+    flows.waitForTerminal.mockReturnValue(new Promise(() => undefined))
+    const { controller, server } = createController({
+      flows,
+      commitDrainTimeoutMs: 10,
+    })
+    await controller.begin()
+
+    const first = controller.close()
+    const second = controller.close()
+
+    expect(second).toBe(first)
+    await expect(first).resolves.toBeUndefined()
+    expect(flows.waitForTerminal).toHaveBeenCalledTimes(1)
     expect(server.close).toHaveBeenCalledTimes(1)
   })
 

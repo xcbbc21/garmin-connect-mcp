@@ -1,10 +1,13 @@
-import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BrowserCanaryControlError } from '../src/browser-auth-canary'
 import {
   authCliExitCode,
   defaultAccountSessionPath,
+  installAuthCliTermination,
   runAuthCanary,
   runBrowserAuthSetup,
   runAuthServe,
@@ -13,6 +16,7 @@ import {
   type AuthCanaryCliDependencies,
   type AuthCliDependencies,
   type AuthCliIO,
+  type AuthCliSignalSource,
   type AuthServeCliDependencies,
 } from '../src/auth-cli'
 
@@ -35,7 +39,65 @@ function fixture(answers: string[]) {
   return { io, prompt, write, authenticate, writeSession, dependencies }
 }
 
+function serveDependencies(authenticate: jest.Mock): AuthServeCliDependencies {
+  return {
+    authenticate,
+    prepareDestination: jest.fn().mockResolvedValue(undefined),
+  }
+}
+
+function browserDependencies(setup: jest.Mock): BrowserAuthCliDependencies {
+  return {
+    setup,
+    prepareDestination: jest.fn().mockResolvedValue(undefined),
+  }
+}
+
 describe('Garmin interactive auth CLI', () => {
+  it('gracefully aborts once and force-exits on a second signal', () => {
+    const source = new EventEmitter()
+    const forceExit = jest.fn()
+    const termination = installAuthCliTermination({
+      source: source as unknown as AuthCliSignalSource,
+      forceExit,
+      graceMs: 100,
+    })
+
+    source.emit('SIGTERM')
+
+    expect(termination.signal.aborted).toBe(true)
+    expect(termination.receivedSignal()).toBe('SIGTERM')
+    expect(forceExit).not.toHaveBeenCalled()
+
+    source.emit('SIGINT')
+    expect(forceExit).toHaveBeenCalledWith(130)
+
+    termination.dispose()
+  })
+
+  it('force-exits after the graceful signal deadline', async () => {
+    jest.useFakeTimers()
+    const source = new EventEmitter()
+    const forceExit = jest.fn()
+    const termination = installAuthCliTermination({
+      source: source as unknown as AuthCliSignalSource,
+      forceExit,
+      graceMs: 100,
+    })
+
+    try {
+      source.emit('SIGHUP')
+      await jest.advanceTimersByTimeAsync(99)
+      expect(forceExit).not.toHaveBeenCalled()
+
+      await jest.advanceTimersByTimeAsync(1)
+      expect(forceExit).toHaveBeenCalledWith(129)
+    } finally {
+      termination.dispose()
+      jest.useRealTimers()
+    }
+  })
+
   it('publishes the stable garmin-connect-auth executable name', () => {
     const manifest = JSON.parse(readFileSync(
       path.resolve(__dirname, '../package.json'),
@@ -69,7 +131,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('garmin-connect-auth login [options]')
     expect(result.stdout).toContain(
-      'garmin-connect-auth serve --region <global|cn> --open [options]',
+      'garmin-connect-auth serve --account <alias> --region <global|cn> --open [options]',
     )
     expect(result.stdout).toContain('garmin-connect-auth canary --region <global|cn>')
     expect(result.stdout).toContain('--account <alias>')
@@ -224,7 +286,7 @@ describe('Garmin interactive auth CLI', () => {
 
     expect(help.status).toBe(0)
     expect(help.stdout).toContain(
-      'garmin-connect-auth serve --region <global|cn> --open [options]',
+      'garmin-connect-auth serve --account <alias> --region <global|cn> --open [options]',
     )
     expect(help.stdout).toContain('--open')
     expect(help.stderr).toBe('')
@@ -367,6 +429,15 @@ describe('Garmin interactive auth CLI', () => {
     })).toBe('/private/config/dsh-plugin-garmin-connect/accounts/work.session.json')
   })
 
+  it('prefers local Windows app data over redirected roaming app data', () => {
+    expect(defaultAccountSessionPath('work', {
+      LOCALAPPDATA: '/local/appdata',
+      APPDATA: '//server/redirected/roaming',
+    })).toBe(
+      '/local/appdata/dsh-plugin-garmin-connect/accounts/work.session.json',
+    )
+  })
+
   it('serves browser authentication in the system browser for an explicit region', async () => {
     const prompt = jest.fn()
     const write = jest.fn()
@@ -375,7 +446,7 @@ describe('Garmin interactive auth CLI', () => {
       success: true,
       region: 'cn',
     })
-    const dependencies: AuthServeCliDependencies = { authenticate }
+    const dependencies = serveDependencies(authenticate)
     const signal = new AbortController().signal
 
     await expect(runAuthServe({
@@ -420,6 +491,32 @@ describe('Garmin interactive auth CLI', () => {
     )
   })
 
+  it('prepares the session destination before opening serve authentication', async () => {
+    const authenticate = jest.fn()
+    const prepareDestination = jest.fn().mockRejectedValue(
+      new Error('destination rejected'),
+    )
+    const io: AuthCliIO = { prompt: jest.fn(), write: jest.fn() }
+
+    await expect(runAuthServe({
+      argv: [
+        'serve',
+        '--open',
+        '--account',
+        'personal',
+        '--region',
+        'global',
+      ],
+      env: { GARMIN_USERNAME: 'runner@example.test' },
+      io,
+      dependencies: { authenticate, prepareDestination },
+    })).rejects.toThrow('destination rejected')
+
+    expect(prepareDestination).toHaveBeenCalledTimes(1)
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(io.prompt).not.toHaveBeenCalled()
+  })
+
   it('prompts only for a missing username and uses an account-isolated serve path', async () => {
     const prompt = jest.fn().mockResolvedValue('runner@example.test')
     const io: AuthCliIO = { prompt, write: jest.fn() }
@@ -435,7 +532,7 @@ describe('Garmin interactive auth CLI', () => {
         GARMIN_PASSWORD: 'PASSWORD_MARKER',
       },
       io,
-      dependencies: { authenticate },
+      dependencies: serveDependencies(authenticate),
     })).resolves.toEqual({
       account: 'work',
       region: 'global',
@@ -448,21 +545,60 @@ describe('Garmin interactive auth CLI', () => {
     expect(JSON.stringify(authenticate.mock.calls)).not.toContain('PASSWORD_MARKER')
   })
 
-  it('requires an explicit serve region and explicit system-browser opening', async () => {
+  it('forwards cancellation to the pending serve username prompt', async () => {
+    const controller = new AbortController()
+    let markPromptStarted!: () => void
+    const promptStarted = new Promise<void>(resolve => { markPromptStarted = resolve })
+    const prompt = jest.fn((_label: string, _secret: boolean, signal?: AbortSignal) => (
+      new Promise<string>((_resolve, reject) => {
+        expect(signal).toBe(controller.signal)
+        signal?.addEventListener('abort', () => {
+          reject(new BrowserCanaryControlError('CANCELLED'))
+        }, { once: true })
+        markPromptStarted()
+      })
+    ))
+    const authenticate = jest.fn()
+    const operation = runAuthServe({
+      argv: ['serve', '--open', '--account', 'work', '--region', 'global'],
+      env: { XDG_CONFIG_HOME: '/private/config' },
+      io: { prompt, write: jest.fn() },
+      signal: controller.signal,
+      dependencies: serveDependencies(authenticate),
+    })
+    await promptStarted
+
+    controller.abort()
+
+    await expect(operation).rejects.toMatchObject({ code: 'CANCELLED' })
+    expect(authenticate).not.toHaveBeenCalled()
+  })
+
+  it('requires an explicit serve account, region, and system-browser opening', async () => {
     const io: AuthCliIO = { prompt: jest.fn(), write: jest.fn() }
     const authenticate = jest.fn()
 
     await expect(runAuthServe({
       argv: ['serve', '--open'],
+      env: {
+        GARMIN_ACCOUNT: 'must-not-be-inferred',
+        GARMIN_REGION: 'cn',
+        GARMIN_USERNAME: 'runner@example.test',
+      },
+      io,
+      dependencies: serveDependencies(authenticate),
+    })).rejects.toThrow('Serve account is required; use --account <alias>')
+    await expect(runAuthServe({
+      argv: ['serve', '--open', '--account', 'personal-cn'],
       env: { GARMIN_REGION: 'cn', GARMIN_USERNAME: 'runner@example.test' },
       io,
-      dependencies: { authenticate },
+      dependencies: serveDependencies(authenticate),
     })).rejects.toThrow('Serve region is required; use global or cn')
     await expect(runAuthServe({
-      argv: ['serve', '--region', 'cn'],
+      argv: ['serve', '--account', 'personal-cn', '--region', 'cn'],
       env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
-      dependencies: { authenticate },
+      dependencies: serveDependencies(authenticate),
     })).rejects.toThrow('Serve authentication requires --open')
 
     expect(authenticate).not.toHaveBeenCalled()
@@ -481,7 +617,7 @@ describe('Garmin interactive auth CLI', () => {
       argv: ['serve', '--open', '--region', 'cn', ...flag],
       env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
-      dependencies: { authenticate },
+      dependencies: serveDependencies(authenticate),
     })).rejects.toThrow('Passwords and MFA codes must be entered interactively')
 
     expect(authenticate).not.toHaveBeenCalled()
@@ -508,7 +644,7 @@ describe('Garmin interactive auth CLI', () => {
         profileId: 123456789,
       }
     })
-    const dependencies: BrowserAuthCliDependencies = { setup }
+    const dependencies = browserDependencies(setup)
     const signal = new AbortController().signal
 
     await expect(runBrowserAuthSetup({
@@ -546,7 +682,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(prompt).toHaveBeenCalledTimes(1)
     expect(prompt).toHaveBeenCalledWith(expect.stringMatching(
       /Private Runner.*private-runner.*personal.*runner@example\.test.*type yes/i,
-    ), false)
+    ), false, signal)
     const output = write.mock.calls.flat().join('')
     expect(output).toContain('authentication_status=passed')
     expect(output).toContain('region=cn')
@@ -580,7 +716,7 @@ describe('Garmin interactive auth CLI', () => {
       argv: ['login', '--browser', '--region', 'cn', '--account', 'personal'],
       env: { GARMIN_USERNAME: 'expected@example.test' },
       io,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })).rejects.toThrow('Garmin browser account confirmation was declined')
 
     expect(prompt).toHaveBeenCalledWith(expect.stringMatching(
@@ -603,7 +739,7 @@ describe('Garmin interactive auth CLI', () => {
         GARMIN_USERNAME: 'runner@example.test',
       },
       io,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })).rejects.toThrow('Browser login region is required; use global or cn')
 
     expect(prompt).not.toHaveBeenCalled()
@@ -627,7 +763,7 @@ describe('Garmin interactive auth CLI', () => {
         GARMIN_PASSWORD: 'PASSWORD_MARKER',
       },
       io,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })).resolves.toEqual({
       account: 'work',
       region: 'global',
@@ -662,7 +798,7 @@ describe('Garmin interactive auth CLI', () => {
       argv: ['login', '--browser', '--region', 'cn', ...flag],
       env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })).rejects.toThrow('Passwords and MFA codes must be entered interactively')
 
     expect(setup).not.toHaveBeenCalled()
@@ -679,7 +815,7 @@ describe('Garmin interactive auth CLI', () => {
       argv: ['login', '--browser', '--region', 'cn'],
       env: { GARMIN_USERNAME: marker },
       io,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })
 
     await expect(operation).rejects.toThrow(
@@ -702,7 +838,7 @@ describe('Garmin interactive auth CLI', () => {
       env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
       signal: controller.signal,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })).resolves.toEqual({
       account: 'default',
       region: 'cn',
@@ -726,7 +862,7 @@ describe('Garmin interactive auth CLI', () => {
       argv: ['login', '--browser', '--region', 'cn', '--output', injectedPath],
       env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })
 
     expect(setup).toHaveBeenCalledWith(expect.objectContaining({
@@ -753,7 +889,7 @@ describe('Garmin interactive auth CLI', () => {
       argv: ['login', '--browser', '--region', 'cn', '--output', longPath],
       env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
-      dependencies: { setup },
+      dependencies: browserDependencies(setup),
     })
 
     expect(setup).toHaveBeenCalledWith(expect.objectContaining({
@@ -841,4 +977,70 @@ describe('Garmin interactive auth CLI', () => {
     expect(authCliExitCode(timedOut)).toBe(1)
     expect(authCliExitCode(new Error('unexpected'))).toBe(1)
   })
+
+  it('exits on SIGTERM while the real visible username prompt is pending', async () => {
+    if (process.platform === 'win32') return
+    const directory = mkdtempSync(path.join(tmpdir(), 'garmin-auth-signal-test-'))
+    const entrypoint = path.resolve(__dirname, '../src/auth-cli.ts')
+    const fakeTtyModule = `data:text/javascript,${encodeURIComponent(
+      'Object.defineProperty(process.stdin,"isTTY",{value:true})',
+    )}`
+    const child = spawn(process.execPath, [
+      '--import',
+      fakeTtyModule,
+      '--import',
+      require.resolve('tsx'),
+      entrypoint,
+      'serve',
+      '--open',
+      '--account',
+      'signal-test',
+      '--region',
+      'global',
+      '--output',
+      path.join(directory, 'session.json'),
+    ], {
+      env: {
+        ...process.env,
+        GARMIN_USERNAME: '',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+    let signalSent = false
+
+    try {
+      const result = await new Promise<{
+        code: number | null
+        signal: NodeJS.Signals | null
+      }>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`auth CLI did not exit after SIGTERM: ${stderr}`))
+        }, 10_000)
+        child.once('error', (error) => {
+          clearTimeout(timer)
+          reject(error)
+        })
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString('utf8')
+          if (!signalSent && stderr.includes('Garmin email:')) {
+            signalSent = true
+            child.kill('SIGTERM')
+          }
+        })
+        child.once('close', (code, signal) => {
+          clearTimeout(timer)
+          resolve({ code, signal })
+        })
+      })
+
+      expect(signalSent).toBe(true)
+      expect(result).toEqual({ code: 143, signal: null })
+      expect(stderr).toContain('Garmin email:')
+      expect(stderr).not.toContain('authentication_status=passed')
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }, 15_000)
 })

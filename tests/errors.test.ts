@@ -18,7 +18,7 @@ describe('error disclosure boundaries', () => {
     expect(error.reason).toBe(reason)
     expect(error.message).toContain(`Garmin authentication ${phrase}`)
     expect(error.message).toContain(
-      'garmin-connect-auth serve --region <global|cn> --open',
+      'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
   })
 

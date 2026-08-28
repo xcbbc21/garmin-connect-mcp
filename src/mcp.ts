@@ -12,6 +12,7 @@ import {
 import { GarminClient } from './client'
 import type { Config } from './config'
 import { McpGarminAuthCoordinator } from './mcp-auth'
+import { installMcpShutdownHooks } from './mcp-shutdown'
 import {
   GarminToolService,
   INTENSITY_GUIDANCE_PREFERENCES,
@@ -105,16 +106,52 @@ export interface CreateMcpServerOptions {
   createAuthentication?: (server: McpServer) => McpAuthenticationHandler
 }
 
+/** Own MCP/auth cleanup without replacing SDK methods on an instance. */
+class GarminMcpServer extends McpServer {
+  private closeAuthentication?: () => Promise<void>
+  private closingAuthentication?: Promise<void>
+
+  constructor() {
+    super({
+      name: 'garmin-connect',
+      version: MCP_SERVER_VERSION,
+    })
+    const previousOnClose = this.server.onclose
+    this.server.onclose = (): void => {
+      previousOnClose?.()
+      void this.closeAuthenticationOnce().catch(() => undefined)
+    }
+  }
+
+  attachAuthenticationCleanup(cleanup: (() => Promise<void>) | undefined): void {
+    this.closeAuthentication = cleanup
+  }
+
+  override async close(): Promise<void> {
+    try {
+      await this.closeAuthenticationOnce()
+    } finally {
+      await super.close()
+    }
+  }
+
+  private closeAuthenticationOnce(): Promise<void> {
+    if (!this.closeAuthentication) return Promise.resolve()
+    this.closingAuthentication ??= Promise.resolve().then(this.closeAuthentication)
+    return this.closingAuthentication
+  }
+}
+
 /** Build an MCP adapter around the same service used by the DSH plugin. */
 export function createMcpServer(
   service: ToolService,
   options: CreateMcpServerOptions = {},
 ): McpServer {
-  const server = new McpServer({
-    name: 'garmin-connect',
-    version: MCP_SERVER_VERSION,
-  })
+  const server = new GarminMcpServer()
   const authentication = options.createAuthentication?.(server)
+  server.attachAuthenticationCleanup(
+    authentication?.close?.bind(authentication),
+  )
   const invokeTool = (action: () => Promise<unknown>) => invoke(action, authentication)
 
   // Casting at this boundary keeps the SDK's recursive Zod overloads from
@@ -286,27 +323,6 @@ export function createMcpServer(
     false,
   )
 
-  if (authentication?.close) {
-    const originalClose = server.close.bind(server)
-    let closingAuthentication: Promise<void> | undefined
-    const closeAuthentication = (): Promise<void> => {
-      closingAuthentication ??= Promise.resolve().then(() => authentication.close!())
-      return closingAuthentication
-    }
-    server.close = async (): Promise<void> => {
-      try {
-        await closeAuthentication()
-      } finally {
-        await originalClose()
-      }
-    }
-    const previousOnClose = server.server.onclose
-    server.server.onclose = (): void => {
-      previousOnClose?.()
-      void closeAuthentication().catch(() => undefined)
-    }
-  }
-
   return server
 }
 
@@ -369,7 +385,15 @@ export function standaloneConfig(): Config {
     || defaultAccountSessionPath(account, process.env)
   if (!username) throw new PublicToolError('GARMIN_USERNAME is required')
 
-  const region = process.env.GARMIN_REGION === 'cn' ? 'cn' : 'global'
+  const configuredRegion = process.env.GARMIN_REGION
+  if (
+    configuredRegion !== undefined
+    && configuredRegion !== 'global'
+    && configuredRegion !== 'cn'
+  ) {
+    throw new PublicToolError('GARMIN_REGION must be exactly global or cn')
+  }
+  const region = configuredRegion ?? 'global'
   const activityDetail = process.env.GARMIN_ACTIVITY_DETAIL === 'full' ? 'full' : 'compact'
   return {
     username,
@@ -476,6 +500,10 @@ async function main(): Promise<void> {
     }),
   })
   await server.connect(new StdioServerTransport())
+  const shutdown = installMcpShutdownHooks(server)
+  if (process.stdin.readableEnded || process.stdin.destroyed) {
+    void shutdown.shutdown(0)
+  }
   console.error('[garmin-connect-mcp] Server started (stdio transport)')
 }
 

@@ -85,6 +85,26 @@ describe('MCP Garmin browser authentication coordinator', () => {
     },
   )
 
+  it('closes the listener and coordinator when completion notification is backpressured', async () => {
+    const fixture = coordinatorFixture({ notificationTimeoutMs: 10 })
+    fixture.notify.mockImplementation(() => new Promise<void>(() => undefined))
+    await fixture.coordinator.requireAuthentication(
+      new GarminAuthenticationRequiredError('expired'),
+    ).catch(() => undefined)
+
+    fixture.finish('failed')
+    await flushPromises()
+
+    expect(fixture.closeBroker).toHaveBeenCalledTimes(1)
+    const closeResult = await Promise.race([
+      fixture.coordinator.close().then(() => 'closed'),
+      new Promise<'timed-out'>(resolve => {
+        setTimeout(() => resolve('timed-out'), 250)
+      }),
+    ])
+    expect(closeResult).toBe('closed')
+  })
+
   it('does not start a loopback listener for clients without URL elicitation', async () => {
     const fixture = coordinatorFixture({ urlElicitation: false })
 
@@ -96,6 +116,12 @@ describe('MCP Garmin browser authentication coordinator', () => {
     await expect(operation).rejects.toThrow(
       'garmin-connect-auth serve --account default --region cn --open',
     )
+    await expect(operation).rejects.toThrow('GARMIN_SESSION_TOKEN_FILE')
+    await expect(operation).rejects.toThrow('--output')
+    await expect(operation).rejects.toThrow(
+      'replace an explicitly rejected GARMIN_SESSION_TOKEN',
+    )
+    await expect(operation).rejects.not.toThrow('/private/default.session.json')
     expect(fixture.begin).not.toHaveBeenCalled()
   })
 
@@ -109,7 +135,10 @@ describe('MCP Garmin browser authentication coordinator', () => {
   })
 })
 
-function coordinatorFixture(options: { urlElicitation?: boolean } = {}) {
+function coordinatorFixture(options: {
+  urlElicitation?: boolean
+  notificationTimeoutMs?: number
+} = {}) {
   type Terminal = Awaited<ReturnType<McpAuthBroker['wait']>>
   let finish!: (state: Terminal) => void
   const wait = jest.fn(() => new Promise<Terminal>((resolve) => {
@@ -142,6 +171,7 @@ function coordinatorFixture(options: { urlElicitation?: boolean } = {}) {
     createBroker: () => broker,
     createElicitationId: () => 'auth-id-1',
     sleep,
+    notificationTimeoutMs: options.notificationTimeoutMs,
   })
 
   return {

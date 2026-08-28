@@ -1,4 +1,5 @@
 import type { GarminRegion } from './config'
+import type { EmbeddedAuthRuntimeConfig } from './embedded-auth-runtime'
 import type {
   EmbeddedAuthFlowManager,
   EmbeddedAuthPublicState,
@@ -10,10 +11,12 @@ const MAX_SESSION_TOKEN_PATH_LENGTH = 4 * 1024
 const FLOW_ID_PATTERN = /^[a-f0-9]{64}$/
 const CSRF_PATTERN = /^[A-Za-z0-9_-]{32,128}$/
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
+const DEFAULT_COMMIT_DRAIN_TIMEOUT_MS = 30_000
+const MAX_COMMIT_DRAIN_TIMEOUT_MS = 2 * 60 * 1000
 
 export type EmbeddedAuthControllerFlowPort = Pick<
   EmbeddedAuthFlowManager,
-  'start' | 'publicStatus' | 'bridgeBootstrap' | 'cancel'
+  'start' | 'publicStatus' | 'bridgeBootstrap' | 'cancel' | 'waitForTerminal'
 >
 
 export type EmbeddedAuthControllerServerPort = Pick<
@@ -21,12 +24,12 @@ export type EmbeddedAuthControllerServerPort = Pick<
   'start' | 'bridgeUrl' | 'close'
 >
 
-export interface EmbeddedAuthControllerOptions {
-  username: string
-  region: GarminRegion
-  sessionTokenFile: string
+export interface EmbeddedAuthControllerOptions extends EmbeddedAuthRuntimeConfig {
   flows: EmbeddedAuthControllerFlowPort
   server: EmbeddedAuthControllerServerPort
+  prepareDestination: (path: string) => Promise<void>
+  /** Internal test seam; production uses a bounded 30-second commit drain. */
+  commitDrainTimeoutMs?: number
 }
 
 export type EmbeddedAuthBeginResult =
@@ -49,11 +52,7 @@ export type EmbeddedAuthCancelResult =
   | { success: true }
   | { success: false; code: 'invalid' | 'unavailable' }
 
-interface NormalizedConfiguration {
-  username: string
-  region: GarminRegion
-  sessionTokenFile: string
-}
+type NormalizedConfiguration = EmbeddedAuthRuntimeConfig
 
 /**
  * Host-side facade used by a DSH route (or another trusted local caller).
@@ -68,10 +67,13 @@ export class EmbeddedAuthController {
   private readonly sessionTokenFile: unknown
   private readonly flows?: EmbeddedAuthControllerFlowPort
   private readonly server?: EmbeddedAuthControllerServerPort
+  private readonly prepareDestination?: (path: string) => Promise<void>
+  private readonly commitDrainTimeoutMs: number
   private currentFlowId?: string
   private bridgeOrigin?: string
   private beginning = false
   private closed = false
+  private closeOperation?: Promise<void>
 
   constructor(options: EmbeddedAuthControllerOptions) {
     this.username = options?.username
@@ -79,6 +81,10 @@ export class EmbeddedAuthController {
     this.sessionTokenFile = options?.sessionTokenFile
     this.flows = options?.flows
     this.server = options?.server
+    this.prepareDestination = options?.prepareDestination
+    this.commitDrainTimeoutMs = normalizeCommitDrainTimeout(
+      options?.commitDrainTimeoutMs,
+    )
   }
 
   async begin(
@@ -99,7 +105,9 @@ export class EmbeddedAuthController {
     }
     if (this.closed || isAborted(signal)) return unavailableFailure()
     if (this.beginning) return busyFailure()
-    if (!this.flows || !this.server) return unavailableFailure()
+    if (!this.flows || !this.server || !this.prepareDestination) {
+      return unavailableFailure()
+    }
 
     if (this.currentFlowId) {
       const currentStatus = this.readPublicStatus(this.currentFlowId)
@@ -110,6 +118,9 @@ export class EmbeddedAuthController {
     this.beginning = true
     let orphanFlowId: string | undefined
     try {
+      await this.prepareDestination(configuration.sessionTokenFile)
+      if (this.closed || isAborted(signal)) return unavailableFailure()
+
       const bridgeOrigin = this.bridgeOrigin ?? await this.server.start()
       if (
         this.closed
@@ -178,9 +189,17 @@ export class EmbeddedAuthController {
     }
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
     this.closed = true
-    if (this.currentFlowId) this.cancelBestEffort(this.currentFlowId)
+    this.closeOperation ??= this.closeInternal()
+    return this.closeOperation
+  }
+
+  private async closeInternal(): Promise<void> {
+    const flowId = this.currentFlowId
+    if (flowId && !this.cancelBestEffort(flowId)) {
+      await this.drainFlowBestEffort(flowId)
+    }
     try {
       await this.server?.close()
     } catch {
@@ -198,16 +217,45 @@ export class EmbeddedAuthController {
     }
   }
 
-  private cancelBestEffort(flowId: string): void {
-    if (!this.flows) return
+  private cancelBestEffort(flowId: string): boolean {
+    if (!this.flows) return false
     try {
       const bootstrap = this.flows.bridgeBootstrap(flowId)
-      if (!isTrustedCsrf(bootstrap?.csrf)) return
+      if (!isTrustedCsrf(bootstrap?.csrf)) return false
       this.flows.cancel(flowId, bootstrap.csrf)
+      return true
     } catch {
       // Cleanup failures are intentionally collapsed at this trust boundary.
+      return false
     }
   }
+
+  private async drainFlowBestEffort(flowId: string): Promise<void> {
+    if (!this.flows) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.commitDrainTimeoutMs)
+      })
+      await Promise.race([
+        Promise.resolve(this.flows.waitForTerminal(flowId)).then(() => undefined),
+        timeout,
+      ])
+    } catch {
+      // A failed drain is indistinguishable from an unavailable flow here.
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+}
+
+function normalizeCommitDrainTimeout(value: unknown): number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && value <= MAX_COMMIT_DRAIN_TIMEOUT_MS
+    ? value
+    : DEFAULT_COMMIT_DRAIN_TIMEOUT_MS
 }
 
 function normalizeConfiguration(

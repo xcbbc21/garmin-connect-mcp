@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js'
 import { ACCOUNT_ALIAS_PATTERN } from './account-session'
 import type { GarminRegion } from './config'
-import { createEmbeddedAuthController } from './embedded-auth-runtime'
+import {
+  createEmbeddedAuthController,
+  type EmbeddedAuthRuntimeConfig,
+} from './embedded-auth-runtime'
 import type { EmbeddedAuthPublicState } from './embedded-auth-flow'
 import {
   LocalAuthBroker,
@@ -15,6 +18,7 @@ import {
 
 const ELICITATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
 const SUCCESS_GRACE_MS = 2_000
+const DEFAULT_NOTIFICATION_TIMEOUT_MS = 1_000
 
 export interface McpAuthProtocol {
   getClientCapabilities(): {
@@ -32,16 +36,14 @@ export interface McpAuthBroker {
   close(): Promise<void>
 }
 
-export interface McpGarminAuthCoordinatorOptions {
+export interface McpGarminAuthCoordinatorOptions extends EmbeddedAuthRuntimeConfig {
   protocol: McpAuthProtocol
   account: string
-  username: string
-  region: GarminRegion
-  sessionTokenFile: string
   replaceSession?: (writeSession: () => Promise<void>) => Promise<void>
   createBroker?: () => McpAuthBroker
   createElicitationId?: () => string
   sleep?: (milliseconds: number) => Promise<void>
+  notificationTimeoutMs?: number
 }
 
 interface ActiveElicitation {
@@ -63,6 +65,7 @@ export class McpGarminAuthCoordinator {
   private readonly createBroker: () => McpAuthBroker
   private readonly createElicitationId: () => string
   private readonly sleep: (milliseconds: number) => Promise<void>
+  private readonly notificationTimeoutMs: number
   private active?: ActiveElicitation
   private starting?: Promise<ActiveElicitation>
   private readonly finishing = new Set<McpAuthBroker>()
@@ -85,6 +88,9 @@ export class McpGarminAuthCoordinator {
     this.region = options.region
     this.createElicitationId = options.createElicitationId ?? randomUUID
     this.sleep = options.sleep ?? delay
+    this.notificationTimeoutMs = boundedNotificationTimeout(
+      options.notificationTimeoutMs,
+    )
     this.createBroker = options.createBroker ?? (() => {
       const controller = createEmbeddedAuthController({
         username: options.username,
@@ -188,27 +194,32 @@ export class McpGarminAuthCoordinator {
     if (this.active === active) this.active = undefined
     this.finishing.add(active.broker)
     try {
-      await active.notifyComplete()
-    } catch {
-      // The MCP transport may already be closed.
-    }
-    if (state === 'succeeded' && !this.closed) {
-      await this.sleep(SUCCESS_GRACE_MS).catch(() => undefined)
-    }
-    try {
-      await active.broker.close()
-    } catch {
-      // Cleanup stays local and must not become an unhandled background error.
+      if (state === 'succeeded' && !this.closed) {
+        await this.sleep(SUCCESS_GRACE_MS).catch(() => undefined)
+      }
     } finally {
-      this.finishing.delete(active.broker)
+      try {
+        await active.broker.close()
+      } catch {
+        // Cleanup stays local and must not become an unhandled background error.
+      } finally {
+        this.finishing.delete(active.broker)
+      }
     }
+    await notifyWithin(
+      active.notifyComplete,
+      this.notificationTimeoutMs,
+    )
   }
 
   private fallbackError(): PublicToolError {
     return new PublicToolError(
       'Garmin authentication is required. Run ' +
       `garmin-connect-auth serve --account ${this.account} ` +
-      `--region ${this.region} --open in a trusted local terminal, then retry.`,
+      `--region ${this.region} --open in a trusted local terminal. ` +
+      'If this MCP server sets GARMIN_SESSION_TOKEN_FILE, use the same ' +
+      'destination with --output; then retry. An account-matching file may ' +
+      'replace an explicitly rejected GARMIN_SESSION_TOKEN.',
     )
   }
 }
@@ -218,4 +229,28 @@ function delay(milliseconds: number): Promise<void> {
     const timer = setTimeout(resolve, milliseconds)
     timer.unref?.()
   })
+}
+
+async function notifyWithin(
+  notify: () => Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<void>(resolve => {
+    timer = setTimeout(resolve, timeoutMs)
+  })
+  const notification = Promise.resolve()
+    .then(notify)
+    .catch(() => undefined)
+  try {
+    await Promise.race([notification, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function boundedNotificationTimeout(value: number | undefined): number {
+  return Number.isSafeInteger(value) && value! >= 1 && value! <= 10_000
+    ? value!
+    : DEFAULT_NOTIFICATION_TIMEOUT_MS
 }

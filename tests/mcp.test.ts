@@ -292,6 +292,25 @@ describe('MCP adapter', () => {
     }
   })
 
+  it('closes authentication exactly once through the server lifecycle', async () => {
+    const service = serviceStub()
+    const closeAuthentication = jest.fn().mockResolvedValue(undefined)
+    const server = createMcpServer(service as any, {
+      createAuthentication: () => ({
+        requireAuthentication: jest.fn(),
+        close: closeAuthentication,
+      }),
+    })
+    const client = new Client({ name: 'lifecycle-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    await client.close()
+    await server.close()
+
+    expect(closeAuthentication).toHaveBeenCalledTimes(1)
+  })
+
   it('accepts omitted arguments for zero-argument and all-optional read tools', async () => {
     const service = serviceStub()
     const server = createMcpServer(service as any)
@@ -478,6 +497,18 @@ describe('standalone MCP config', () => {
 
     expect(() => standaloneConfig()).toThrow('Invalid account alias')
   })
+
+  it.each(['CN', 'cn ', 'mars', ''])(
+    'rejects an explicitly invalid GARMIN_REGION value (%j)',
+    region => {
+      process.env.GARMIN_USERNAME = 'fixture@example.test'
+      process.env.GARMIN_REGION = region
+
+      expect(() => standaloneConfig()).toThrow(
+        'GARMIN_REGION must be exactly global or cn',
+      )
+    },
+  )
 })
 
 function serviceStub() {

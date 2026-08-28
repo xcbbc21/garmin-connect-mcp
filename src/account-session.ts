@@ -18,6 +18,7 @@ export function defaultAccountSessionPath(
 ): string {
   assertAccountAlias(account)
   const configRoot = env.XDG_CONFIG_HOME?.trim()
+    || env.LOCALAPPDATA?.trim()
     || env.APPDATA?.trim()
     || path.join(env.HOME?.trim() || homedir(), '.config')
   return path.resolve(

@@ -25,6 +25,7 @@ import {
   createPlaywrightBrowserAdapter,
 } from './browser-auth-canary-runtime'
 import type { GarminRegion } from './config'
+import type { EmbeddedAuthRuntimeConfig } from './embedded-auth-runtime'
 import {
   LocalAuthBroker,
   type LocalAuthBrokerController,
@@ -32,13 +33,14 @@ import {
 } from './local-auth-broker'
 import {
   bindSessionTokensToAccount,
+  prepareSessionTokenWriteDestination,
   writeSessionTokenFile,
   type GarminSessionFile,
 } from './session-store'
 import { PublicToolError, publicErrorMessage } from './utils/errors'
 
 export interface AuthCliIO {
-  prompt(label: string, secret: boolean): Promise<string>
+  prompt(label: string, secret: boolean, signal?: AbortSignal): Promise<string>
   write(message: string): void
 }
 
@@ -67,6 +69,7 @@ export interface AuthCanaryCliDependencies {
 
 export interface BrowserAuthCliDependencies {
   setup(options: BrowserDiAuthSetupOptions): Promise<BrowserDiAuthSetupResult>
+  prepareDestination(path: string): Promise<void>
 }
 
 export interface BrowserAuthSetupInput {
@@ -84,12 +87,10 @@ export interface BrowserAuthSetupResult {
 }
 
 export interface AuthServeCliDependencies {
-  authenticate(options: {
-    username: string
-    region: GarminRegion
-    sessionTokenFile: string
+  authenticate(options: EmbeddedAuthRuntimeConfig & {
     signal?: AbortSignal
   }): Promise<LocalAuthSuccessResult>
+  prepareDestination(path: string): Promise<void>
 }
 
 export interface AuthServeInput {
@@ -135,16 +136,15 @@ const defaultBrowserDependencies: BrowserAuthCliDependencies = {
     http: createAxiosCanaryHttpAdapter(),
     writeSession: writeSessionTokenFile,
   }),
+  prepareDestination: prepareSessionTokenWriteDestination,
 }
 
 const defaultServeDependencies: AuthServeCliDependencies = {
   authenticate: async (options) => {
     const runtime = require('./embedded-auth-runtime') as {
-      createEmbeddedAuthController(config: {
-        username: string
-        region: GarminRegion
-        sessionTokenFile: string
-      }): LocalAuthBrokerController
+      createEmbeddedAuthController(
+        config: EmbeddedAuthRuntimeConfig,
+      ): LocalAuthBrokerController
     }
     const controller = runtime.createEmbeddedAuthController({
       username: options.username,
@@ -156,6 +156,7 @@ const defaultServeDependencies: AuthServeCliDependencies = {
       options.signal,
     )
   },
+  prepareDestination: prepareSessionTokenWriteDestination,
 }
 
 const MAX_DISPLAYED_SESSION_PATH_BYTES = 1024
@@ -165,7 +166,7 @@ const AUTH_CLI_HELP = `Garmin Connect authentication
 Usage:
   garmin-connect-auth login [options]
   garmin-connect-auth login --browser --region <global|cn> [options]
-  garmin-connect-auth serve --region <global|cn> --open [options]
+  garmin-connect-auth serve --account <alias> --region <global|cn> --open [options]
   garmin-connect-auth canary --region <global|cn>
 
 Login options:
@@ -176,7 +177,7 @@ Login options:
 
 Serve options:
   --open                  Open the loopback sign-in page in the system browser
-  --account <alias>       Account alias (default: default)
+  --account <alias>       Required; never inferred from environment
   --region <global|cn>    Required; never inferred from environment
   --output <path>         OAuth session file path
 
@@ -283,8 +284,9 @@ export async function runBrowserAuthSetup(
   const sessionTokenFile = configuredPath
     ? path.resolve(expandHome(configuredPath))
     : defaultAccountSessionPath(account, input.env)
+  await dependencies.prepareDestination(sessionTokenFile)
   const username = input.env.GARMIN_USERNAME?.trim()
-    || (await input.io.prompt('Garmin email: ', false)).trim()
+    || (await promptAuthCli(input.io, 'Garmin email: ', false, input.signal)).trim()
   if (!username) throw new PublicToolError('Garmin username is required')
 
   input.io.write(
@@ -297,9 +299,11 @@ export async function runBrowserAuthSetup(
     sessionTokenFile,
     signal: input.signal,
     confirmIdentity: async identity => (
-      (await input.io.prompt(
+      (await promptAuthCli(
+        input.io,
         browserIdentityConfirmationPrompt(identity, account, username),
         false,
+        input.signal,
       )).trim().toLowerCase() === 'yes'
     ),
     onStage: (stage) => {
@@ -330,7 +334,10 @@ export async function runAuthServe(
 ): Promise<AuthServeResult> {
   const parsed = parseServeArgs(input.argv)
   const dependencies = input.dependencies ?? defaultServeDependencies
-  const account = parsed.account ?? input.env.GARMIN_ACCOUNT?.trim() ?? 'default'
+  const account = parsed.account
+  if (!account) {
+    throw new PublicToolError('Serve account is required; use --account <alias>')
+  }
   assertAccountAlias(account)
   if (!parsed.open) {
     throw new PublicToolError('Serve authentication requires --open')
@@ -347,8 +354,9 @@ export async function runAuthServe(
   const sessionTokenFile = configuredPath
     ? path.resolve(expandHome(configuredPath))
     : defaultAccountSessionPath(account, input.env)
+  await dependencies.prepareDestination(sessionTokenFile)
   const username = input.env.GARMIN_USERNAME?.trim()
-    || (await input.io.prompt('Garmin email: ', false)).trim()
+    || (await promptAuthCli(input.io, 'Garmin email: ', false, input.signal)).trim()
   if (!username) throw new PublicToolError('Garmin username is required')
 
   input.io.write(
@@ -428,66 +436,52 @@ interface ParsedServeArgs extends ParsedArgs {
 }
 
 function parseBrowserLoginArgs(argv: string[]): ParsedBrowserLoginArgs {
-  const args = [...argv]
-  if (args[0] === 'login') args.shift()
-  rejectSensitiveArgs(args)
-  let browser = false
-  const parsed: ParsedArgs = {}
-  while (args.length > 0) {
-    const flag = args.shift()
-    if (flag === '--browser' && !browser) {
-      browser = true
-      continue
-    }
-    if (flag === '--account' || flag === '--region' || flag === '--output') {
-      const value = args.shift()
-      if (!value || value.startsWith('--')) {
-        throw new PublicToolError(`Missing value for ${flag}`)
-      }
-      if (flag === '--account') parsed.account = value
-      else if (flag === '--region') parsed.region = value
-      else parsed.output = value
-      continue
-    }
-    throw new PublicToolError('Unknown browser authentication option')
+  const result = parseAuthenticationOptions(argv, {
+    command: 'login',
+    booleanFlag: '--browser',
+    unknownOptionMessage: 'Unknown browser authentication option',
+  })
+  if (!result.booleanEnabled) {
+    throw new PublicToolError('Browser authentication requires --browser')
   }
-  if (!browser) throw new PublicToolError('Browser authentication requires --browser')
-  return { ...parsed, browser: true }
+  return { ...result.options, browser: true }
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const args = [...argv]
-  if (args[0] === 'login') args.shift()
-  rejectSensitiveArgs(args)
-
-  const parsed: ParsedArgs = {}
-  while (args.length > 0) {
-    const flag = args.shift()
-    if (flag === '--account' || flag === '--region' || flag === '--output') {
-      const value = args.shift()
-      if (!value || value.startsWith('--')) {
-        throw new PublicToolError(`Missing value for ${flag}`)
-      }
-      if (flag === '--account') parsed.account = value
-      else if (flag === '--region') parsed.region = value
-      else parsed.output = value
-      continue
-    }
-    throw new PublicToolError('Unknown authentication option')
-  }
-  return parsed
+  return parseAuthenticationOptions(argv, {
+    command: 'login',
+    unknownOptionMessage: 'Unknown authentication option',
+  }).options
 }
 
 function parseServeArgs(argv: string[]): ParsedServeArgs {
+  const result = parseAuthenticationOptions(argv, {
+    command: 'serve',
+    booleanFlag: '--open',
+    unknownOptionMessage: 'Unknown serve authentication option',
+  })
+  return { ...result.options, open: result.booleanEnabled }
+}
+
+interface AuthenticationOptionParserConfig {
+  command: 'login' | 'serve'
+  booleanFlag?: '--browser' | '--open'
+  unknownOptionMessage: string
+}
+
+function parseAuthenticationOptions(
+  argv: string[],
+  config: AuthenticationOptionParserConfig,
+): { options: ParsedArgs; booleanEnabled: boolean } {
   const args = [...argv]
-  if (args[0] === 'serve') args.shift()
+  if (args[0] === config.command) args.shift()
   rejectSensitiveArgs(args)
-  let open = false
-  const parsed: ParsedArgs = {}
+  let booleanEnabled = false
+  const options: ParsedArgs = {}
   while (args.length > 0) {
     const flag = args.shift()
-    if (flag === '--open' && !open) {
-      open = true
+    if (flag === config.booleanFlag && !booleanEnabled) {
+      booleanEnabled = true
       continue
     }
     if (flag === '--account' || flag === '--region' || flag === '--output') {
@@ -495,14 +489,14 @@ function parseServeArgs(argv: string[]): ParsedServeArgs {
       if (!value || value.startsWith('--')) {
         throw new PublicToolError(`Missing value for ${flag}`)
       }
-      if (flag === '--account') parsed.account = value
-      else if (flag === '--region') parsed.region = value
-      else parsed.output = value
+      if (flag === '--account') options.account = value
+      else if (flag === '--region') options.region = value
+      else options.output = value
       continue
     }
-    throw new PublicToolError('Unknown serve authentication option')
+    throw new PublicToolError(config.unknownOptionMessage)
   }
-  return { ...parsed, open }
+  return { options, booleanEnabled }
 }
 
 function parseCanaryRegion(argv: string[]): GarminRegion {
@@ -594,22 +588,40 @@ function safeMfaMethod(value: string): string {
 
 function terminalIO(): AuthCliIO {
   return {
-    prompt: (label, secret) => secret
-      ? promptHidden(process.stdin, process.stderr, label)
-      : promptVisible(process.stdin, process.stderr, label),
+    prompt: (label, secret, signal) => secret
+      ? promptHidden(process.stdin, process.stderr, label, signal)
+      : promptVisible(process.stdin, process.stderr, label, signal),
     write: message => process.stderr.write(message),
   }
+}
+
+function promptAuthCli(
+  io: AuthCliIO,
+  label: string,
+  secret: boolean,
+  signal?: AbortSignal,
+): Promise<string> {
+  return signal === undefined
+    ? io.prompt(label, secret)
+    : io.prompt(label, secret, signal)
 }
 
 async function promptVisible(
   input: NodeJS.ReadStream,
   output: NodeJS.WriteStream,
   label: string,
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
   requireTty(input)
   const rl = readline.createInterface({ input, output, terminal: true })
   try {
-    return await rl.question(label)
+    return await (signal === undefined
+      ? rl.question(label)
+      : rl.question(label, { signal }))
+  } catch (error) {
+    if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
+    throw error
   } finally {
     rl.close()
   }
@@ -619,7 +631,11 @@ function promptHidden(
   input: NodeJS.ReadStream,
   output: NodeJS.WriteStream,
   label: string,
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) {
+    return Promise.reject(new BrowserCanaryControlError('CANCELLED'))
+  }
   requireTty(input)
   output.write(label)
   const wasRaw = input.isRaw === true
@@ -634,6 +650,7 @@ function promptHidden(
       if (settled) return
       settled = true
       input.off('data', onData)
+      signal?.removeEventListener('abort', onAbort)
       input.setRawMode?.(wasRaw)
       input.pause()
       output.write('\n')
@@ -657,7 +674,12 @@ function promptHidden(
         }
       }
     }
+    const onAbort = (): void => {
+      finish(new BrowserCanaryControlError('CANCELLED'))
+    }
     input.on('data', onData)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
   })
 }
 
@@ -671,6 +693,78 @@ function requireTty(input: Readable & { isTTY?: boolean }): void {
 
 export type AuthCliTerminationSignal = 'SIGHUP' | 'SIGINT' | 'SIGTERM'
 
+const DEFAULT_AUTH_CLI_TERMINATION_GRACE_MS = 35_000
+const MAX_AUTH_CLI_TERMINATION_GRACE_MS = 2 * 60 * 1000
+
+export interface AuthCliSignalSource {
+  on(signal: AuthCliTerminationSignal, listener: () => void): unknown
+  off(signal: AuthCliTerminationSignal, listener: () => void): unknown
+}
+
+export interface AuthCliTerminationOptions {
+  source?: AuthCliSignalSource
+  forceExit?: (code: number) => void
+  /** Internal test seam; production uses a 35-second graceful deadline. */
+  graceMs?: number
+}
+
+export interface AuthCliTermination {
+  signal: AbortSignal
+  receivedSignal(): AuthCliTerminationSignal | undefined
+  dispose(): void
+}
+
+/**
+ * Give browser authentication one bounded graceful cancellation window.
+ * A second signal is an explicit force-exit request; the deadline also keeps a
+ * broken filesystem or browser dependency from trapping a terminated CLI.
+ */
+export function installAuthCliTermination(
+  options: AuthCliTerminationOptions = {},
+): AuthCliTermination {
+  const source = options.source ?? (process as AuthCliSignalSource)
+  const forceExit = options.forceExit ?? (code => process.exit(code))
+  const graceMs = boundedAuthCliTerminationGrace(options.graceMs)
+  const controller = new AbortController()
+  let received: AuthCliTerminationSignal | undefined
+  let forceTimer: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+
+  const handle = (signal: AuthCliTerminationSignal): void => {
+    if (received) {
+      forceExit(authCliSignalExitCode(signal))
+      return
+    }
+    received = signal
+    controller.abort()
+    forceTimer = setTimeout(() => {
+      forceExit(authCliSignalExitCode(signal))
+    }, graceMs)
+  }
+  const handlers: Record<AuthCliTerminationSignal, () => void> = {
+    SIGHUP: () => handle('SIGHUP'),
+    SIGINT: () => handle('SIGINT'),
+    SIGTERM: () => handle('SIGTERM'),
+  }
+
+  for (const signal of authCliTerminationSignals()) {
+    source.on(signal, handlers[signal])
+  }
+
+  return {
+    signal: controller.signal,
+    receivedSignal: () => received,
+    dispose() {
+      if (disposed) return
+      disposed = true
+      if (forceTimer) clearTimeout(forceTimer)
+      for (const signal of authCliTerminationSignals()) {
+        source.off(signal, handlers[signal])
+      }
+    },
+  }
+}
+
 export function authCliExitCode(
   error: unknown,
   signal?: AuthCliTerminationSignal,
@@ -679,8 +773,7 @@ export function authCliExitCode(
     error instanceof BrowserCanaryControlError
     && error.code === 'CANCELLED'
   ) {
-    if (signal === 'SIGHUP') return 129
-    return signal === 'SIGTERM' ? 143 : 130
+    return authCliSignalExitCode(signal ?? 'SIGINT')
   }
   return 1
 }
@@ -724,48 +817,32 @@ async function main(): Promise<void> {
     const browserLoginRequested = argv[0] === 'login' && argv.includes('--browser')
     const serveRequested = argv[0] === 'serve'
     if (argv[0] === 'canary' || browserLoginRequested || serveRequested) {
-      const controller = new AbortController()
-      const cancelFromSigint = (): void => {
-        terminationSignal ??= 'SIGINT'
-        controller.abort()
-      }
-      const cancelFromSigterm = (): void => {
-        terminationSignal ??= 'SIGTERM'
-        controller.abort()
-      }
-      const cancelFromSighup = (): void => {
-        terminationSignal ??= 'SIGHUP'
-        controller.abort()
-      }
-      process.once('SIGHUP', cancelFromSighup)
-      process.once('SIGINT', cancelFromSigint)
-      process.once('SIGTERM', cancelFromSigterm)
+      const termination = installAuthCliTermination()
       try {
         if (browserLoginRequested) {
           await runBrowserAuthSetup({
             argv,
             env: process.env,
             io: terminalIO(),
-            signal: controller.signal,
+            signal: termination.signal,
           })
         } else if (serveRequested) {
           await runAuthServe({
             argv,
             env: process.env,
             io: terminalIO(),
-            signal: controller.signal,
+            signal: termination.signal,
           })
         } else {
           await runAuthCanary({
             argv,
             io: terminalIO(),
-            signal: controller.signal,
+            signal: termination.signal,
           })
         }
       } finally {
-        process.off('SIGHUP', cancelFromSighup)
-        process.off('SIGINT', cancelFromSigint)
-        process.off('SIGTERM', cancelFromSigterm)
+        terminationSignal = termination.receivedSignal()
+        termination.dispose()
       }
       return
     }
@@ -777,3 +854,21 @@ async function main(): Promise<void> {
 }
 
 if (require.main === module) void main()
+
+function authCliSignalExitCode(signal: AuthCliTerminationSignal): number {
+  if (signal === 'SIGHUP') return 129
+  return signal === 'SIGTERM' ? 143 : 130
+}
+
+function boundedAuthCliTerminationGrace(value: unknown): number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && value <= MAX_AUTH_CLI_TERMINATION_GRACE_MS
+    ? value
+    : DEFAULT_AUTH_CLI_TERMINATION_GRACE_MS
+}
+
+function authCliTerminationSignals(): readonly AuthCliTerminationSignal[] {
+  return ['SIGHUP', 'SIGINT', 'SIGTERM']
+}

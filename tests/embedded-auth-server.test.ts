@@ -36,6 +36,7 @@ interface BridgeScriptHarness {
   ): void
   flushRequests(): Promise<void>
   frameHidden(): boolean
+  cancelHidden(): boolean
   statusRequestCount(): number
   statusText(): string
   ticketRequestCount(): number
@@ -206,6 +207,7 @@ function runBridgeScript(
       }
     },
     frameHidden: () => elements.get('garmin-auth-frame')?.hidden === true,
+    cancelHidden: () => elements.get('cancel')?.hidden === true,
     statusRequestCount: () => requestedPaths.filter(
       path => path.endsWith('/status'),
     ).length,
@@ -334,6 +336,18 @@ describe('EmbeddedAuthServer', () => {
 
     expect(response.status).toBe(200)
     expect(() => new Script(inlineScript)).not.toThrow()
+  })
+
+  it('hides cancellation after the session save reaches its commit point', async () => {
+    const adapter = createAdapter()
+    adapter.bridgeStatus.mockReturnValue({ state: 'saving' })
+    const { bridgeUrl, origin, response } = await openBridge(adapter)
+    const harness = runBridgeScript(response.body, bridgeUrl, origin)
+
+    await harness.flushRequests()
+
+    expect(harness.cancelHidden()).toBe(true)
+    expect(harness.statusText()).toBe('正在安全保存会话…')
   })
 
   it('routes Garmin GAuth SUCCESS messages through the local ticket endpoint', async () => {

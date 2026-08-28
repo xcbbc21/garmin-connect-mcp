@@ -114,6 +114,7 @@ interface EmbeddedAuthFlowRecord extends EmbeddedAuthStartInput {
   timer?: ReturnType<typeof setTimeout>
   identity?: EmbeddedAuthIdentity
   confirmation?: ConfirmationDeferred
+  completion?: Promise<void>
   identityRequested: boolean
   frameConfig: GarminEmbeddedAuthFrameConfig
 }
@@ -225,7 +226,7 @@ export class EmbeddedAuthFlowManager {
       this.failFlow(flow)
       return
     }
-    void operation.then(
+    flow.completion = operation.then(
       () => this.completeAuthentication(flow),
       () => this.failFlow(flow),
     )
@@ -241,6 +242,25 @@ export class EmbeddedAuthFlowManager {
   publicStatus(flowId: string): EmbeddedAuthPublicStatus {
     const flow = this.lookup(flowId)
     this.expireFlow(flow)
+    return { state: publicStateFor(flow.state) }
+  }
+
+  /**
+   * Wait for the authentication operation that owns an irrevocable save.
+   *
+   * Callers still receive only a coarse terminal state. This keeps shutdown
+   * code from abandoning an atomic credential commit without exposing the
+   * ticket, account, destination, or dependency error.
+   */
+  async waitForTerminal(flowId: string): Promise<EmbeddedAuthPublicStatus> {
+    const flow = this.lookup(flowId)
+    this.expireFlow(flow)
+    if (!isTerminal(flow.state)) {
+      const completion = flow.completion
+      if (!completion) throw rejection()
+      await completion
+    }
+    if (!isTerminal(flow.state)) throw rejection()
     return { state: publicStateFor(flow.state) }
   }
 

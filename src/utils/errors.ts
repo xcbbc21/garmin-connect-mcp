@@ -9,7 +9,7 @@ export type GarminAuthenticationRequiredReason =
   | 'rejected'
 
 export const GARMIN_BROWSER_AUTH_COMMAND =
-  'garmin-connect-auth serve --region <global|cn> --open'
+  'garmin-connect-auth serve --account <alias> --region <global|cn> --open'
 
 /**
  * A credential state that may be recovered through an explicit Garmin

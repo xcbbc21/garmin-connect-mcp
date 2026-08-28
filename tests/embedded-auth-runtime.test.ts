@@ -9,6 +9,16 @@ interface RequestResult {
   body: string
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function request(
   url: string,
   options: {
@@ -90,6 +100,7 @@ describe('embedded authentication runtime', () => {
       expect(writeSession).not.toHaveBeenCalled()
       await commit()
     })
+    const prepareDestination = jest.fn().mockResolvedValue(undefined)
     const controller = createEmbeddedAuthController({
       username: 'runner@example.test',
       region: 'cn',
@@ -98,10 +109,14 @@ describe('embedded authentication runtime', () => {
       http: httpPort,
       writeSession,
       replaceSession,
+      prepareDestination,
     })
 
     try {
       const begun = await controller.begin(undefined, 'cn')
+      expect(prepareDestination).toHaveBeenCalledWith(
+        '/private/account/session.json',
+      )
       expect(begun).toEqual(expect.objectContaining({ success: true }))
       if (!begun.success) throw new Error('expected authentication flow')
 
@@ -142,6 +157,90 @@ describe('embedded authentication runtime', () => {
       expect(httpPort.request).toHaveBeenCalledTimes(2)
     } finally {
       await controller.close()
+    }
+  })
+
+  it('keeps the bridge alive while close drains an irrevocable session write', async () => {
+    const httpPort: EmbeddedAuthRuntimeOptions['http'] = {
+      request: jest.fn()
+        .mockResolvedValueOnce({
+          status: 200,
+          contentType: 'application/json',
+          body: {
+            access_token: 'di-access-secret',
+            refresh_token: 'di-refresh-secret',
+            expires_in: 3_600,
+            refresh_token_expires_in: 86_400,
+          },
+        })
+        .mockResolvedValueOnce({
+          status: 200,
+          contentType: 'application/json',
+          body: {
+            displayName: 'Runtime Runner',
+            profileId: 123456789,
+          },
+        }),
+    }
+    const saveGate = deferred()
+    const writeSession = jest.fn(async () => {
+      await saveGate.promise
+    })
+    const controller = createEmbeddedAuthController({
+      username: 'runner@example.test',
+      region: 'cn',
+      sessionTokenFile: '/private/account/session.json',
+    }, {
+      http: httpPort,
+      writeSession,
+      prepareDestination: jest.fn().mockResolvedValue(undefined),
+    })
+    let closing: Promise<void> | undefined
+
+    try {
+      const begun = await controller.begin(undefined, 'cn')
+      if (!begun.success) throw new Error('expected authentication flow')
+      const bridge = await request(begun.bridgeUrl)
+      const csrf = /"csrf":"([A-Za-z0-9_-]+)"/.exec(bridge.body)?.[1]
+      if (!csrf) throw new Error('expected bridge csrf')
+      const origin = new URL(begun.bridgeUrl).origin
+      const headers = {
+        Origin: origin,
+        'Content-Type': 'application/json',
+        'X-Garmin-Auth-CSRF': csrf,
+      }
+
+      await request(`${begun.bridgeUrl}/ticket`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          serviceTicket: 'ST-runtime-drain',
+          serviceUrl: 'https://sso.garmin.cn/sso/embed',
+        }),
+      })
+      await waitForBridgeState(begun.bridgeUrl, csrf, 'waiting_confirmation')
+      await request(`${begun.bridgeUrl}/confirm`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ accepted: true }),
+      })
+      await waitForBridgeState(begun.bridgeUrl, csrf, 'saving')
+
+      closing = controller.close()
+      await new Promise<void>(resolve => setImmediate(resolve))
+
+      expect(writeSession).toHaveBeenCalledTimes(1)
+      await expect(request(`${begun.bridgeUrl}/status`, {
+        method: 'POST',
+        headers,
+        body: '{}',
+      })).resolves.toEqual(expect.objectContaining({ status: 200 }))
+
+      saveGate.resolve()
+      await expect(closing).resolves.toBeUndefined()
+    } finally {
+      saveGate.resolve()
+      await (closing ?? controller.close())
     }
   })
 })
