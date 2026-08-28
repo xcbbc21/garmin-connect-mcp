@@ -304,7 +304,10 @@ describe('local Garmin authentication broker', () => {
       const flowId = new URL(begun.url).pathname.split('/').pop()
       if (!flowId) throw new Error('expected flow id')
       const { csrf } = flows.bridgeBootstrap(flowId)
-      flows.submitTicket(flowId, csrf, 'ST-hung-save')
+      flows.submitTicket(flowId, csrf, {
+        serviceTicket: 'ST-hung-save',
+        serviceUrl: origin,
+      })
       await settle()
       flows.confirm(flowId, csrf, true)
 
@@ -360,7 +363,10 @@ describe('local Garmin authentication broker', () => {
         const flowId = new URL(url).pathname.split('/').pop()
         if (!flowId) throw new Error('expected flow id')
         const { csrf } = flows.bridgeBootstrap(flowId)
-        flows.submitTicket(flowId, csrf, 'ST-aborted-hung-save')
+        flows.submitTicket(flowId, csrf, {
+          serviceTicket: 'ST-aborted-hung-save',
+          serviceUrl: origin,
+        })
         await settle()
         flows.confirm(flowId, csrf, true)
         abort.abort()

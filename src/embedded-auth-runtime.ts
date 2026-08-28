@@ -49,8 +49,14 @@ export function createEmbeddedAuthController(
     authenticate: async (input) => {
       await runCapturedServiceTicketDiAuthSetup(
         {
-          ...input,
-          serviceTarget: 'sso-embed',
+          region: input.region,
+          username: input.username,
+          sessionTokenFile: input.sessionTokenFile,
+          serviceTicket: input.ticket.serviceTicket,
+          serviceUrl: input.ticket.serviceUrl,
+          loopbackOrigin: input.loopbackOrigin,
+          signal: input.signal,
+          confirmIdentity: input.confirmIdentity,
         } satisfies CapturedServiceTicketDiAuthSetupOptions,
         {
           http,

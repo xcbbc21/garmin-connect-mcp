@@ -7,6 +7,7 @@ import {
 } from './session-store'
 import { PublicToolError } from './utils/errors'
 import { isUsableGarminServiceTicket } from './service-ticket'
+import { isExactLoopbackOrigin } from './embedded-auth-url'
 
 const DI_GRANT_TYPE =
   'https://connectapi.garmin.com/di-oauth2-service/oauth/grant/service_ticket'
@@ -28,6 +29,8 @@ const IDENTITY_CONFIRMATION_FAILED_MESSAGE =
   'Garmin browser account confirmation could not be completed'
 const IDENTITY_CONFIRMATION_DECLINED_MESSAGE =
   'Garmin browser account confirmation was declined'
+const EMBEDDED_SERVICE_INVALID_MESSAGE =
+  'Garmin embedded authentication service is invalid'
 
 const BROWSER_DI_AUTH_CANARY_STAGES = [
   'browser_opened',
@@ -163,7 +166,10 @@ export type GarminTicketServiceTarget = 'connect-app' | 'sso-embed'
 
 export interface CapturedServiceTicketDiAuthSetupOptions
   extends CapturedServiceTicketDiCanaryOptions {
-  serviceTarget: 'sso-embed'
+  /** The exact CAS service for which Garmin minted this one-time ticket. */
+  serviceUrl: string
+  /** The current bridge origin, required when serviceUrl is loopback. */
+  loopbackOrigin?: string
   username: string
   sessionTokenFile: string
   confirmIdentity(identity: BrowserDiProfileIdentity): Promise<boolean>
@@ -277,9 +283,11 @@ export async function runCapturedServiceTicketDiAuthSetup(
   dependencies: CapturedServiceTicketDiAuthSetupDependencies,
 ): Promise<BrowserDiAuthSetupResult> {
   assertCanaryRegion(options.region)
-  if (options.serviceTarget !== 'sso-embed') {
-    throw new PublicToolError('Garmin embedded authentication service is invalid')
-  }
+  const serviceUrl = validatedCapturedTicketServiceUrl(
+    options.region,
+    options.serviceUrl,
+    options.loopbackOrigin,
+  )
   if (!isUsableGarminServiceTicket(options.serviceTicket)) {
     throw new PublicToolError(TICKET_MISSING_MESSAGE)
   }
@@ -296,7 +304,7 @@ export async function runCapturedServiceTicketDiAuthSetup(
   try {
     await authenticateCapturedServiceTicket(
       serviceTicket,
-      endpointsFor(options.region, options.serviceTarget),
+      { ...endpointsFor(options.region), serviceUrl },
       dependencies.http,
       options.signal,
       createStageReporter(options.onStage),
@@ -307,6 +315,26 @@ export async function runCapturedServiceTicketDiAuthSetup(
   } finally {
     serviceTicket = undefined
   }
+}
+
+/**
+ * Bind a captured ticket to the exact service that minted it. Garmin's fixed
+ * regional embed service is trusted directly. A loopback service is accepted
+ * only when the caller also supplies the same canonical origin for the current
+ * bridge, preventing a ticket from being replayed against another local port.
+ */
+function validatedCapturedTicketServiceUrl(
+  region: GarminRegion,
+  candidate: unknown,
+  loopbackOrigin: unknown,
+): string {
+  const regionalEmbedService = endpointsFor(region, 'sso-embed').serviceUrl
+  if (candidate === regionalEmbedService) return regionalEmbedService
+  if (
+    candidate === loopbackOrigin
+    && isExactLoopbackOrigin(candidate)
+  ) return candidate
+  throw new PublicToolError(EMBEDDED_SERVICE_INVALID_MESSAGE)
 }
 
 interface PersistSessionOptions {

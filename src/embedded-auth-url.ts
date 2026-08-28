@@ -33,7 +33,9 @@ export function createGarminEmbeddedAuthFrameConfig(
   return { frameUrl: frameUrl.toString(), ssoOrigin, serviceUrl }
 }
 
-function isExactLoopbackOrigin(candidate: string): boolean {
+/** Validate the canonical origin of the one loopback listener owned by a flow. */
+export function isExactLoopbackOrigin(candidate: unknown): candidate is string {
+  if (typeof candidate !== 'string' || candidate.length > 128) return false
   let parsed: URL
   try {
     parsed = new URL(candidate)

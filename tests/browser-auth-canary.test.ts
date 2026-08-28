@@ -79,7 +79,7 @@ describe('experimental browser DI authentication canary', () => {
     const result = await runCapturedServiceTicketDiAuthSetup(
       {
         region,
-        serviceTarget: 'sso-embed',
+        serviceUrl: expectedServiceUrl,
         serviceTicket: 'ST-embedded-widget-ticket',
         username: 'runner@example.test',
         sessionTokenFile: '/private/account/session.json',
@@ -101,25 +101,124 @@ describe('experimental browser DI authentication canary', () => {
     expect(writeSession).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects an arbitrary captured-ticket service before HTTP or persistence', async () => {
+  it('uses the exact trusted loopback service that minted the captured ticket', async () => {
     const { http } = successfulFixture('cn')
-    const writeSession = jest.fn()
+    const writeSession = jest.fn().mockResolvedValue(undefined)
+    const serviceUrl = 'http://127.0.0.1:51839'
 
     await expect(runCapturedServiceTicketDiAuthSetup(
       {
         region: 'cn',
-        serviceTarget: 'https://attacker.test/callback' as 'sso-embed',
-        serviceTicket: 'ST-valid-shape',
+        serviceUrl,
+        loopbackOrigin: serviceUrl,
+        serviceTicket: 'ST-loopback-service-ticket',
         username: 'runner@example.test',
         sessionTokenFile: '/private/account/session.json',
         confirmIdentity: jest.fn().mockResolvedValue(true),
       },
       { http, writeSession },
-    )).rejects.toThrow('Garmin embedded authentication service is invalid')
+    )).resolves.toEqual({ ok: true, region: 'cn', persisted: true })
 
-    expect(http.request).not.toHaveBeenCalled()
+    const exchangeBody = new URLSearchParams(http.request.mock.calls[0][0].body)
+    expect(exchangeBody.get('service_url')).toBe(serviceUrl)
+    expect(http.request.mock.calls[0][0].url).toBe(
+      'https://diauth.garmin.cn/di-oauth2-service/oauth/token',
+    )
+    expect(http.request.mock.calls[1][0].url).toBe(
+      'https://connectapi.garmin.cn/userprofile-service/socialProfile',
+    )
+    expect(writeSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry or fall back after a loopback-bound DI exchange fails', async () => {
+    const serviceUrl = 'http://127.0.0.1:51839'
+    const http = {
+      request: jest.fn().mockResolvedValue({
+        status: 400,
+        contentType: 'application/json',
+        body: { error: 'invalid_grant' },
+      }),
+    }
+    const writeSession = jest.fn()
+    const confirmIdentity = jest.fn()
+
+    await expect(runCapturedServiceTicketDiAuthSetup(
+      {
+        region: 'cn',
+        serviceUrl,
+        loopbackOrigin: serviceUrl,
+        serviceTicket: 'ST-one-time-loopback-ticket',
+        username: 'runner@example.test',
+        sessionTokenFile: '/private/account/session.json',
+        confirmIdentity,
+      },
+      { http, writeSession },
+    )).rejects.toThrow('Garmin DI token exchange canary failed')
+
+    expect(http.request).toHaveBeenCalledTimes(1)
+    expect(http.request.mock.calls[0][0].url).toBe(
+      'https://diauth.garmin.cn/di-oauth2-service/oauth/token',
+    )
+    const exchangeBody = new URLSearchParams(http.request.mock.calls[0][0].body)
+    expect(exchangeBody.get('service_url')).toBe(serviceUrl)
+    expect(confirmIdentity).not.toHaveBeenCalled()
     expect(writeSession).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['arbitrary URL', 'https://attacker.test/callback', undefined],
+    ['other-region embed', 'https://sso.garmin.com/sso/embed', undefined],
+    ['localhost alias', 'http://localhost:51839', 'http://localhost:51839'],
+    ['IPv6 loopback', 'http://[::1]:51839', 'http://[::1]:51839'],
+    [
+      'loopback path',
+      'http://127.0.0.1:51839/callback',
+      'http://127.0.0.1:51839/callback',
+    ],
+    [
+      'loopback query',
+      'http://127.0.0.1:51839?flow=secret',
+      'http://127.0.0.1:51839?flow=secret',
+    ],
+    [
+      'loopback fragment',
+      'http://127.0.0.1:51839#secret',
+      'http://127.0.0.1:51839#secret',
+    ],
+    [
+      'loopback userinfo',
+      'http://user@127.0.0.1:51839',
+      'http://user@127.0.0.1:51839',
+    ],
+    ['loopback without explicit port', 'http://127.0.0.1', 'http://127.0.0.1'],
+    [
+      'different current loopback origin',
+      'http://127.0.0.1:51839',
+      'http://127.0.0.1:51840',
+    ],
+  ] as const)(
+    'rejects a captured-ticket service with %s before HTTP or persistence',
+    async (_label, serviceUrl, loopbackOrigin) => {
+      const { http } = successfulFixture('cn')
+      const writeSession = jest.fn()
+
+      await expect(runCapturedServiceTicketDiAuthSetup(
+        {
+          region: 'cn',
+          serviceUrl,
+          ...(loopbackOrigin === undefined ? {} : { loopbackOrigin }),
+          serviceTicket: 'ST-valid-shape',
+          username: 'runner@example.test',
+          sessionTokenFile: '/private/account/session.json',
+          confirmIdentity: jest.fn().mockResolvedValue(true),
+        },
+        { http, writeSession },
+      )).rejects.toThrow('Garmin embedded authentication service is invalid')
+
+      expect(http.request).not.toHaveBeenCalled()
+      expect(writeSession).not.toHaveBeenCalled()
+    },
+  )
 
   it('persists a bounded account-bound DI session without returning secrets', async () => {
     const { dependencies } = successfulFixture('cn')

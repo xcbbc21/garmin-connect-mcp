@@ -6,11 +6,13 @@ import {
 
 const expectedOrigin = 'https://sso.garmin.cn'
 const expectedServiceUrl = 'https://sso.garmin.cn/sso/embed'
+const expectedBridgeOrigin = 'http://127.0.0.1:43123'
 const expectedContext = {
   observedOrigin: expectedOrigin,
   expectedOrigin,
   sourceMatches: true,
   expectedServiceUrl,
+  expectedBridgeOrigin,
 }
 
 function expectRejected(action: () => unknown, secret?: string): void {
@@ -41,6 +43,19 @@ describe('Garmin embedded authentication message parser', () => {
     )).toEqual({
       serviceTicket: 'ST-valid_ticket.123~safe',
       serviceUrl: expectedServiceUrl,
+    })
+  })
+
+  it('accepts the exact loopback bridge origin as Garmin service URL', () => {
+    expect(parseGarminEmbeddedAuthMessage(
+      {
+        serviceTicket: 'ST-loopback-service',
+        serviceUrl: expectedBridgeOrigin,
+      },
+      expectedContext,
+    )).toEqual({
+      serviceTicket: 'ST-loopback-service',
+      serviceUrl: expectedBridgeOrigin,
     })
   })
 
@@ -96,6 +111,39 @@ describe('Garmin embedded authentication message parser', () => {
       },
       expectedContext,
     ), ticket)
+  })
+
+  it.each([
+    ['another loopback origin', 'http://127.0.0.1:43124'],
+    ['a path on the bridge origin', `${expectedBridgeOrigin}/garmin-auth/bridge`],
+    ['a query on the bridge origin', `${expectedBridgeOrigin}?ticket=secret`],
+    ['a fragment on the bridge origin', `${expectedBridgeOrigin}#secret`],
+    ['credentials on the bridge URL', 'http://user:pass@127.0.0.1:43123'],
+    ['a trailing slash', `${expectedBridgeOrigin}/`],
+  ])('rejects %s instead of the exact bridge origin', (_label, serviceUrl) => {
+    expectRejected(() => parseGarminEmbeddedAuthMessage(
+      {
+        serviceTicket: 'ST-forged-loopback-service',
+        serviceUrl,
+      },
+      expectedContext,
+    ))
+  })
+
+  it.each([
+    ['a non-loopback origin', 'https://example.com'],
+    ['a bridge path', `${expectedBridgeOrigin}/path`],
+    ['a bridge query', `${expectedBridgeOrigin}?secret=1`],
+    ['a bridge fragment', `${expectedBridgeOrigin}#secret`],
+    ['bridge credentials', 'http://user:pass@127.0.0.1:43123'],
+  ])('rejects a parser context containing %s', (_label, expectedBridgeOrigin) => {
+    expectRejected(() => parseGarminEmbeddedAuthMessage(
+      {
+        serviceTicket: 'ST-untrusted-parser-context',
+        serviceUrl: expectedBridgeOrigin,
+      },
+      { ...expectedContext, expectedBridgeOrigin },
+    ))
   })
 
   it('rejects a service ticket containing unsafe characters', () => {

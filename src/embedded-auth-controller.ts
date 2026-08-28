@@ -5,6 +5,7 @@ import type {
   EmbeddedAuthPublicState,
 } from './embedded-auth-flow'
 import type { EmbeddedAuthServer } from './embedded-auth-server'
+import { isExactLoopbackOrigin } from './embedded-auth-url'
 
 const MAX_USERNAME_LENGTH = 320
 const MAX_SESSION_TOKEN_PATH_LENGTH = 4 * 1024
@@ -125,7 +126,7 @@ export class EmbeddedAuthController {
       if (
         this.closed
         || isAborted(signal)
-        || !isSafeLoopbackOrigin(bridgeOrigin)
+        || !isExactLoopbackOrigin(bridgeOrigin)
       ) {
         return unavailableFailure()
       }
@@ -349,24 +350,6 @@ function isAborted(signal: AbortSignal | undefined): boolean {
     return signal?.aborted === true
   } catch {
     return true
-  }
-}
-
-function isSafeLoopbackOrigin(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 128) return false
-  try {
-    const parsed = new URL(value)
-    return parsed.origin === value
-      && parsed.protocol === 'http:'
-      && parsed.hostname === '127.0.0.1'
-      && parsed.port.length > 0
-      && parsed.username === ''
-      && parsed.password === ''
-      && parsed.pathname === '/'
-      && parsed.search === ''
-      && parsed.hash === ''
-  } catch {
-    return false
   }
 }
 

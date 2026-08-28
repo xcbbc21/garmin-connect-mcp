@@ -29,11 +29,18 @@ function deterministicRandom(...values: number[]) {
   })
 }
 
+const BRIDGE_ORIGIN = 'http://127.0.0.1:43123'
+const FRAME_SERVICE_URL = 'https://sso.garmin.cn/sso/embed'
+
+function ticket(serviceTicket: string, serviceUrl = FRAME_SERVICE_URL) {
+  return { serviceTicket, serviceUrl }
+}
+
 const startInput = {
   region: 'cn' as GarminRegion,
   username: 'runner@example.com',
   sessionTokenFile: '/private/account/session.json',
-  bridgeOrigin: 'http://127.0.0.1:43123',
+  bridgeOrigin: BRIDGE_ORIGIN,
 }
 
 describe('EmbeddedAuthFlowManager', () => {
@@ -75,6 +82,27 @@ describe('EmbeddedAuthFlowManager', () => {
     )
   })
 
+  it('uses an exact 10-minute default authentication window', () => {
+    jest.useFakeTimers()
+    try {
+      jest.setSystemTime(1_000)
+      const manager = new EmbeddedAuthFlowManager({
+        authenticate: jest.fn(),
+        randomBytes: deterministicRandom(41, 42),
+      })
+
+      const started = manager.start(startInput)
+
+      expect(started.expiresAt).toBe(601_000)
+      jest.advanceTimersByTime(599_999)
+      expect(manager.publicStatus(started.flowId)).toEqual({ state: 'in_progress' })
+      jest.advanceTimersByTime(1)
+      expect(manager.publicStatus(started.flowId)).toEqual({ state: 'expired' })
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
   it('atomically accepts one service ticket and passes secrets only to authenticate', async () => {
     const gate = deferred()
     let captured: EmbeddedAuthAuthenticateInput | undefined
@@ -89,7 +117,11 @@ describe('EmbeddedAuthFlowManager', () => {
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
 
-    manager.submitTicket(started.flowId, csrf, 'ST-ticket-secret')
+    manager.submitTicket(
+      started.flowId,
+      csrf,
+      ticket('ST-ticket-secret'),
+    )
 
     expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({
       state: 'exchanging',
@@ -97,14 +129,18 @@ describe('EmbeddedAuthFlowManager', () => {
     expect(() => manager.submitTicket(
       started.flowId,
       csrf,
-      'ST-second-ticket',
+      ticket('ST-second-ticket'),
     )).toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
     expect(authenticate).toHaveBeenCalledTimes(1)
     expect(captured).toEqual(expect.objectContaining({
       region: 'cn',
       username: 'runner@example.com',
       sessionTokenFile: '/private/account/session.json',
-      serviceTicket: 'ST-ticket-secret',
+      ticket: {
+        serviceTicket: 'ST-ticket-secret',
+        serviceUrl: FRAME_SERVICE_URL,
+      },
+      loopbackOrigin: BRIDGE_ORIGIN,
       signal: expect.any(AbortSignal),
       confirmIdentity: expect.any(Function),
     }))
@@ -117,6 +153,59 @@ describe('EmbeddedAuthFlowManager', () => {
     expect(manager.publicStatus(started.flowId)).toEqual({ state: 'failed' })
   })
 
+  it('passes the exact loopback service URL and origin to authenticate', () => {
+    let captured: EmbeddedAuthAuthenticateInput | undefined
+    const manager = new EmbeddedAuthFlowManager({
+      authenticate: input => { captured = input },
+      randomBytes: deterministicRandom(43, 44),
+    })
+    const started = manager.start(startInput)
+    const { csrf } = manager.bridgeBootstrap(started.flowId)
+
+    manager.submitTicket(
+      started.flowId,
+      csrf,
+      ticket('ST-loopback-service', BRIDGE_ORIGIN),
+    )
+
+    expect(captured).toEqual(expect.objectContaining({
+      ticket: {
+        serviceTicket: 'ST-loopback-service',
+        serviceUrl: BRIDGE_ORIGIN,
+      },
+      loopbackOrigin: BRIDGE_ORIGIN,
+    }))
+  })
+
+  it.each([
+    ['another Garmin service', 'https://sso.garmin.com/sso/embed'],
+    ['a Garmin service query', `${FRAME_SERVICE_URL}?ticket=secret`],
+    ['another loopback origin', 'http://127.0.0.1:43124'],
+    ['a loopback path', `${BRIDGE_ORIGIN}/garmin-auth/bridge`],
+    ['a loopback query', `${BRIDGE_ORIGIN}?ticket=secret`],
+    ['a loopback fragment', `${BRIDGE_ORIGIN}#secret`],
+    ['loopback credentials', 'http://user:pass@127.0.0.1:43123'],
+    ['a trailing slash', `${BRIDGE_ORIGIN}/`],
+  ])('rejects %s as the ticket service URL', (_label, serviceUrl) => {
+    const authenticate = jest.fn()
+    const manager = new EmbeddedAuthFlowManager({
+      authenticate,
+      randomBytes: deterministicRandom(45, 46),
+    })
+    const started = manager.start(startInput)
+    const { csrf } = manager.bridgeBootstrap(started.flowId)
+
+    expect(() => manager.submitTicket(
+      started.flowId,
+      csrf,
+      ticket('ST-forged-service', serviceUrl),
+    )).toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({
+      state: 'awaiting_garmin',
+    })
+  })
+
   it('rejects a re-entrant ticket submission before authenticate can continue', async () => {
     let flowId = ''
     let csrf = ''
@@ -124,7 +213,11 @@ describe('EmbeddedAuthFlowManager', () => {
     let manager!: EmbeddedAuthFlowManager
     const authenticate = jest.fn(() => {
       try {
-        manager.submitTicket(flowId, csrf, 'ST-reentrant')
+        manager.submitTicket(
+          flowId,
+          csrf,
+          ticket('ST-reentrant'),
+        )
       } catch (error) {
         reentrantError = error
       }
@@ -137,7 +230,7 @@ describe('EmbeddedAuthFlowManager', () => {
     flowId = started.flowId
     csrf = manager.bridgeBootstrap(flowId).csrf
 
-    manager.submitTicket(flowId, csrf, 'ST-first')
+    manager.submitTicket(flowId, csrf, ticket('ST-first'))
     await settle()
 
     expect(authenticate).toHaveBeenCalledTimes(1)
@@ -164,7 +257,7 @@ describe('EmbeddedAuthFlowManager', () => {
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
 
-    manager.submitTicket(started.flowId, csrf, 'ST-confirm')
+    manager.submitTicket(started.flowId, csrf, ticket('ST-confirm'))
     await settle()
 
     const confirmation = manager.bridgeStatus(started.flowId, csrf)
@@ -204,7 +297,7 @@ describe('EmbeddedAuthFlowManager', () => {
     })
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
-    manager.submitTicket(started.flowId, csrf, 'ST-saving')
+    manager.submitTicket(started.flowId, csrf, ticket('ST-saving'))
     await settle()
     manager.confirm(started.flowId, csrf, true)
     now = 50_000
@@ -269,7 +362,7 @@ describe('EmbeddedAuthFlowManager', () => {
     })
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
-    manager.submitTicket(started.flowId, csrf, 'ST-reject')
+    manager.submitTicket(started.flowId, csrf, ticket('ST-reject'))
     await settle()
 
     manager.confirm(started.flowId, csrf, false)
@@ -297,7 +390,11 @@ describe('EmbeddedAuthFlowManager', () => {
     })
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
-    manager.submitTicket(started.flowId, csrf, 'ST-cancel-secret')
+    manager.submitTicket(
+      started.flowId,
+      csrf,
+      ticket('ST-cancel-secret'),
+    )
 
     manager.cancel(started.flowId, csrf)
 
@@ -321,7 +418,11 @@ describe('EmbeddedAuthFlowManager', () => {
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
 
-    manager.submitTicket(started.flowId, csrf, 'ST-failure-secret')
+    manager.submitTicket(
+      started.flowId,
+      csrf,
+      ticket('ST-failure-secret'),
+    )
     await settle()
 
     expect(manager.bridgeStatus(started.flowId, csrf)).toEqual({
@@ -346,7 +447,7 @@ describe('EmbeddedAuthFlowManager', () => {
     })
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
-    manager.submitTicket(started.flowId, csrf, 'ST-expiring')
+    manager.submitTicket(started.flowId, csrf, ticket('ST-expiring'))
     now = 11_000
 
     expect(manager.publicStatus(started.flowId)).toEqual({ state: 'expired' })
@@ -357,7 +458,7 @@ describe('EmbeddedAuthFlowManager', () => {
     expect(() => manager.submitTicket(
       started.flowId,
       csrf,
-      'ST-too-late',
+      ticket('ST-too-late'),
     )).toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
     expect(() => manager.confirm(started.flowId, csrf, true))
       .toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
@@ -382,7 +483,11 @@ describe('EmbeddedAuthFlowManager', () => {
     })
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
-    manager.submitTicket(started.flowId, csrf, 'ST-terminal-expiry')
+    manager.submitTicket(
+      started.flowId,
+      csrf,
+      ticket('ST-terminal-expiry'),
+    )
     await settle()
     manager.confirm(started.flowId, csrf, true)
     await settle()
@@ -411,7 +516,11 @@ describe('EmbeddedAuthFlowManager', () => {
     })
     const started = manager.start(startInput)
     const { csrf } = manager.bridgeBootstrap(started.flowId)
-    manager.submitTicket(started.flowId, csrf, 'ST-pending-expiry')
+    manager.submitTicket(
+      started.flowId,
+      csrf,
+      ticket('ST-pending-expiry'),
+    )
     await settle()
 
     now = 31_000
@@ -431,7 +540,11 @@ describe('EmbeddedAuthFlowManager', () => {
 
     for (const operation of [
       () => manager.bridgeStatus(started.flowId, 'wrong-csrf'),
-      () => manager.submitTicket(started.flowId, 'wrong-csrf', 'ST-ticket'),
+      () => manager.submitTicket(
+        started.flowId,
+        'wrong-csrf',
+        ticket('ST-ticket'),
+      ),
       () => manager.confirm(started.flowId, 'wrong-csrf', true),
       () => manager.cancel(started.flowId, 'wrong-csrf'),
       () => manager.publicStatus('unknown-flow'),
@@ -476,7 +589,7 @@ describe('EmbeddedAuthFlowManager', () => {
     expect(() => manager.submitTicket(
       malformedTicketFlow.flowId,
       malformedBootstrap.csrf,
-      'not-a-service-ticket TOP_SECRET',
+      ticket('not-a-service-ticket TOP_SECRET'),
     )).toThrow(GARMIN_EMBEDDED_AUTH_FLOW_REJECTED)
     expect(manager.bridgeStatus(
       malformedTicketFlow.flowId,
@@ -488,7 +601,7 @@ describe('EmbeddedAuthFlowManager', () => {
     manager.submitTicket(
       invalidIdentityFlow.flowId,
       invalidIdentityBootstrap.csrf,
-      'ST-valid',
+      ticket('ST-valid'),
     )
     await settle()
     expect(manager.bridgeStatus(

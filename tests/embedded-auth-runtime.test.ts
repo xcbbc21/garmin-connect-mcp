@@ -74,26 +74,27 @@ async function waitForBridgeState(
 
 describe('embedded authentication runtime', () => {
   it('builds the shared loopback controller and commits through replaceSession', async () => {
+    const httpRequest = jest.fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        contentType: 'application/json',
+        body: {
+          access_token: 'di-access-secret',
+          refresh_token: 'di-refresh-secret',
+          expires_in: 3_600,
+          refresh_token_expires_in: 86_400,
+        },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        contentType: 'application/json',
+        body: {
+          displayName: 'Runtime Runner',
+          profileId: 123456789,
+        },
+      })
     const httpPort: EmbeddedAuthRuntimeOptions['http'] = {
-      request: jest.fn()
-        .mockResolvedValueOnce({
-          status: 200,
-          contentType: 'application/json',
-          body: {
-            access_token: 'di-access-secret',
-            refresh_token: 'di-refresh-secret',
-            expires_in: 3_600,
-            refresh_token_expires_in: 86_400,
-          },
-        })
-        .mockResolvedValueOnce({
-          status: 200,
-          contentType: 'application/json',
-          body: {
-            displayName: 'Runtime Runner',
-            profileId: 123456789,
-          },
-        }),
+      request: httpRequest,
     }
     const writeSession = jest.fn().mockResolvedValue(undefined)
     const replaceSession = jest.fn(async (commit: () => Promise<void>) => {
@@ -137,7 +138,7 @@ describe('embedded authentication runtime', () => {
         headers,
         body: JSON.stringify({
           serviceTicket: 'ST-runtime-ticket',
-          serviceUrl: 'https://sso.garmin.cn/sso/embed',
+          serviceUrl: origin,
         }),
       })).resolves.toEqual(expect.objectContaining({ status: 202 }))
 
@@ -155,6 +156,8 @@ describe('embedded authentication runtime', () => {
         expect.objectContaining({ kind: 'di-oauth' }),
       )
       expect(httpPort.request).toHaveBeenCalledTimes(2)
+      const exchangeBody = new URLSearchParams(httpRequest.mock.calls[0][0].body)
+      expect(exchangeBody.get('service_url')).toBe(origin)
     } finally {
       await controller.close()
     }

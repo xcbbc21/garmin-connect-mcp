@@ -1,5 +1,6 @@
 import { PublicToolError } from './utils/errors'
 import { isUsableGarminServiceTicket } from './service-ticket'
+import { isExactLoopbackOrigin } from './embedded-auth-url'
 
 const MAX_EMBEDDED_AUTH_MESSAGE_BYTES = 4 * 1024
 
@@ -20,12 +21,16 @@ export interface GarminEmbeddedAuthMessageContext {
   expectedOrigin: string
   sourceMatches: boolean
   expectedServiceUrl: string
+  expectedBridgeOrigin: string
 }
 
-export interface GarminEmbeddedAuthMessage {
+/** The one-time ticket and exact CAS service that minted it. Keep them paired. */
+export interface GarminEmbeddedAuthTicket {
   serviceTicket: string
   serviceUrl: string
 }
+
+export type GarminEmbeddedAuthMessage = GarminEmbeddedAuthTicket
 
 /** Parse the public value emitted by Garmin's embedded SSO helper. */
 export function parseGarminEmbeddedAuthMessage(
@@ -46,6 +51,7 @@ function parseGarminEmbeddedAuthMessageUnchecked(
   if (
     context.observedOrigin !== context.expectedOrigin
     || context.sourceMatches !== true
+    || !isExactLoopbackOrigin(context.expectedBridgeOrigin)
   ) {
     throw new GarminEmbeddedAuthMessageError()
   }
@@ -61,7 +67,8 @@ function parseGarminEmbeddedAuthMessageUnchecked(
   }
   const message = decoded
   if (
-    message.serviceUrl !== context.expectedServiceUrl
+    (message.serviceUrl !== context.expectedServiceUrl
+      && message.serviceUrl !== context.expectedBridgeOrigin)
     || !isUsableGarminServiceTicket(message.serviceTicket)
     || exceedsUtf8ByteLimit(
       JSON.stringify(message),

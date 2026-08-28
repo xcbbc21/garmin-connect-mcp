@@ -5,7 +5,10 @@ import http, {
   type ServerResponse,
 } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { parseGarminEmbeddedAuthMessage } from './embedded-auth-message'
+import {
+  parseGarminEmbeddedAuthMessage,
+  type GarminEmbeddedAuthTicket,
+} from './embedded-auth-message'
 import { PublicToolError } from './utils/errors'
 
 const LOOPBACK_HOST = '127.0.0.1'
@@ -71,7 +74,7 @@ export interface EmbeddedAuthServerAdapter {
   submitTicket(
     flowId: string,
     csrf: string,
-    serviceTicket: string,
+    ticket: GarminEmbeddedAuthTicket,
   ): Awaitable<void>
   confirm(flowId: string, csrf: string, accepted: boolean): Awaitable<void>
   cancel(flowId: string, csrf: string): Awaitable<void>
@@ -204,7 +207,7 @@ export class EmbeddedAuthServer {
         await this.adapter.bridgeBootstrap(route.flowId),
         origin,
       )
-      sendBridgePage(response, bootstrap)
+      sendBridgePage(response, bootstrap, origin)
       return
     }
 
@@ -273,11 +276,12 @@ export class EmbeddedAuthServer {
           expectedOrigin: bootstrap.ssoOrigin,
           sourceMatches: true,
           expectedServiceUrl: bootstrap.serviceUrl,
+          expectedBridgeOrigin: origin,
         })
         await this.adapter.submitTicket(
           route.flowId,
           bootstrap.csrf,
-          message.serviceTicket,
+          message,
         )
         sendJson(response, 202, { ok: true })
         return
@@ -552,9 +556,10 @@ function isLoopbackAddress(value: unknown): value is AddressInfo {
 function sendBridgePage(
   response: ServerResponse,
   bootstrap: EmbeddedAuthBridgeBootstrap,
+  bridgeOrigin: string,
 ): void {
   const nonce = randomBytes(18).toString('base64')
-  const body = renderBridgePage(bootstrap, nonce)
+  const body = renderBridgePage(bootstrap, nonce, bridgeOrigin)
   applyCommonHeaders(response)
   response.statusCode = 200
   response.setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -614,11 +619,13 @@ function applyCommonHeaders(response: ServerResponse): void {
 function renderBridgePage(
   bootstrap: EmbeddedAuthBridgeBootstrap,
   nonce: string,
+  bridgeOrigin: string,
 ): string {
   const config = safeInlineJson({
     csrf: bootstrap.csrf,
     ssoOrigin: bootstrap.ssoOrigin,
     serviceUrl: bootstrap.serviceUrl,
+    bridgeOrigin,
   })
   const frameUrl = escapeHtmlAttribute(bootstrap.frameUrl)
   const script = bridgeScript(config)
@@ -769,6 +776,7 @@ function bridgeScript(config: string): string {
   const csrf = config.csrf
   const ssoOrigin = config.ssoOrigin
   const serviceUrl = config.serviceUrl
+  const bridgeOrigin = config.bridgeOrigin
   const frame = document.getElementById('garmin-auth-frame')
   const statusNode = document.getElementById('status')
   const confirmation = document.getElementById('confirmation')
@@ -825,7 +833,7 @@ function bridgeScript(config: string): string {
     ) return undefined
     if (decoded.status !== 'SUCCESS' || decoded.successDetails !== 'Login Successful') return undefined
     if (typeof decoded.serviceTicket !== 'string' || typeof decoded.serviceUrl !== 'string') return undefined
-    if (decoded.serviceUrl !== serviceUrl) return undefined
+    if (decoded.serviceUrl !== serviceUrl && decoded.serviceUrl !== bridgeOrigin) return undefined
     if (decoded.serviceTicket.length > 2048 || !/^ST-[A-Za-z0-9._~-]+$/.test(decoded.serviceTicket)) return undefined
     if (encoder.encode(JSON.stringify(decoded)).byteLength > 4096) return undefined
     return { serviceTicket: decoded.serviceTicket, serviceUrl: decoded.serviceUrl }

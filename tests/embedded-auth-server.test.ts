@@ -265,7 +265,11 @@ describe('EmbeddedAuthServer', () => {
         return { state: 'awaiting_garmin' as const }
       }
 
-      submitTicket(_flowId: string, _csrf: string, _ticket: string) {}
+      submitTicket(
+        _flowId: string,
+        _csrf: string,
+        _ticket: { serviceTicket: string; serviceUrl: string },
+      ) {}
       confirm(_flowId: string, _csrf: string, _accepted: boolean) {}
       cancel(_flowId: string, _csrf: string) {}
     }
@@ -372,12 +376,42 @@ describe('EmbeddedAuthServer', () => {
     expect(adapter.submitTicket).toHaveBeenCalledWith(
       FLOW_ID,
       CSRF,
-      'ST-real_gauth_ticket~1',
+      {
+        serviceTicket: 'ST-real_gauth_ticket~1',
+        serviceUrl: SERVICE_URL,
+      },
     )
     expect(harness.ticketRequestCount()).toBe(1)
     expect(harness.statusRequestCount()).toBeGreaterThanOrEqual(2)
     expect(harness.frameHidden()).toBe(true)
     expect(harness.statusText()).toBe('正在验证 Garmin 登录…')
+  })
+
+  it('routes Garmin SUCCESS with this exact loopback bridge origin', async () => {
+    const adapter = createAdapter()
+    adapter.submitTicket.mockImplementation(() => {
+      adapter.bridgeStatus.mockReturnValue({ state: 'exchanging' })
+    })
+    const { bridgeUrl, origin, response } = await openBridge(adapter)
+    const harness = runBridgeScript(response.body, bridgeUrl, origin)
+
+    harness.dispatchMessage(JSON.stringify({
+      status: 'SUCCESS',
+      successDetails: 'Login Successful',
+      serviceTicket: 'ST-loopback_service',
+      serviceUrl: origin,
+    }))
+    await harness.flushRequests()
+
+    expect(adapter.submitTicket).toHaveBeenCalledWith(
+      FLOW_ID,
+      CSRF,
+      {
+        serviceTicket: 'ST-loopback_service',
+        serviceUrl: origin,
+      },
+    )
+    expect(harness.ticketRequestCount()).toBe(1)
   })
 
   it('rejects untrusted or malformed Garmin GAuth messages before /ticket', async () => {
@@ -403,6 +437,22 @@ describe('EmbeddedAuthServer', () => {
     harness.dispatchMessage(JSON.stringify({
       ...success,
       serviceUrl: 'https://sso.garmin.com/sso/embed',
+    }))
+    harness.dispatchMessage(JSON.stringify({
+      ...success,
+      serviceUrl: `${origin}/garmin-auth/bridge`,
+    }))
+    harness.dispatchMessage(JSON.stringify({
+      ...success,
+      serviceUrl: `${origin}?ticket=secret`,
+    }))
+    harness.dispatchMessage(JSON.stringify({
+      ...success,
+      serviceUrl: `${origin}#secret`,
+    }))
+    harness.dispatchMessage(JSON.stringify({
+      ...success,
+      serviceUrl: origin.replace('http://', 'http://user:pass@'),
     }))
     harness.dispatchMessage(JSON.stringify({
       ...success,
@@ -491,7 +541,10 @@ describe('EmbeddedAuthServer', () => {
     expect(adapter.submitTicket).toHaveBeenCalledWith(
       FLOW_ID,
       CSRF,
-      'ST-valid_ticket~1',
+      {
+        serviceTicket: 'ST-valid_ticket~1',
+        serviceUrl: SERVICE_URL,
+      },
     )
     expect(status.status).toBe(200)
     expect(JSON.parse(status.body)).toEqual({
@@ -538,6 +591,38 @@ describe('EmbeddedAuthServer', () => {
       body: JSON.stringify({
         serviceTicket: 'ST-do-not-echo-me',
         serviceUrl: 'https://evil.example/sso/embed',
+      }),
+    })],
+    ['path on bridge service origin', (origin: string) => ({
+      urlSuffix: '/ticket',
+      headers: bridgeHeaders(origin),
+      body: JSON.stringify({
+        serviceTicket: 'ST-do-not-echo-me',
+        serviceUrl: `${origin}/garmin-auth/bridge`,
+      }),
+    })],
+    ['query on bridge service origin', (origin: string) => ({
+      urlSuffix: '/ticket',
+      headers: bridgeHeaders(origin),
+      body: JSON.stringify({
+        serviceTicket: 'ST-do-not-echo-me',
+        serviceUrl: `${origin}?ticket=secret`,
+      }),
+    })],
+    ['fragment on bridge service origin', (origin: string) => ({
+      urlSuffix: '/ticket',
+      headers: bridgeHeaders(origin),
+      body: JSON.stringify({
+        serviceTicket: 'ST-do-not-echo-me',
+        serviceUrl: `${origin}#secret`,
+      }),
+    })],
+    ['credentials on bridge service origin', (origin: string) => ({
+      urlSuffix: '/ticket',
+      headers: bridgeHeaders(origin),
+      body: JSON.stringify({
+        serviceTicket: 'ST-do-not-echo-me',
+        serviceUrl: origin.replace('http://', 'http://user:pass@'),
       }),
     })],
     ['extra ticket property', (origin: string) => ({

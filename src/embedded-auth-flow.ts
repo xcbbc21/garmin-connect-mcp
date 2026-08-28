@@ -10,9 +10,10 @@ import {
 } from './embedded-auth-url'
 import { isUsableGarminServiceTicket } from './service-ticket'
 import { PublicToolError } from './utils/errors'
+import type { GarminEmbeddedAuthTicket } from './embedded-auth-message'
 
 const RANDOM_TOKEN_BYTES = 32
-const DEFAULT_FLOW_TTL_MS = 5 * 60 * 1000
+const DEFAULT_FLOW_TTL_MS = 10 * 60 * 1000
 const MAX_FLOW_TTL_MS = 10 * 60 * 1000
 const MAX_USERNAME_LENGTH = 320
 const MAX_SESSION_TOKEN_PATH_LENGTH = 4 * 1024
@@ -70,7 +71,8 @@ export interface EmbeddedAuthAuthenticateInput {
   region: GarminRegion
   username: string
   sessionTokenFile: string
-  serviceTicket: string
+  ticket: GarminEmbeddedAuthTicket
+  loopbackOrigin: string
   signal: AbortSignal
   confirmIdentity(identity: EmbeddedAuthIdentity): Promise<boolean>
 }
@@ -198,11 +200,17 @@ export class EmbeddedAuthFlowManager {
     }
   }
 
-  submitTicket(flowId: string, csrf: string, serviceTicket: string): void {
+  submitTicket(
+    flowId: string,
+    csrf: string,
+    ticket: GarminEmbeddedAuthTicket,
+  ): void {
     const flow = this.authorize(flowId, csrf)
     if (
       flow.state !== 'awaiting_garmin'
-      || !isUsableGarminServiceTicket(serviceTicket)
+      || !isUsableGarminServiceTicket(ticket?.serviceTicket)
+      || (ticket?.serviceUrl !== flow.frameConfig.serviceUrl
+        && ticket?.serviceUrl !== flow.bridgeOrigin)
     ) {
       throw rejection()
     }
@@ -214,7 +222,11 @@ export class EmbeddedAuthFlowManager {
       region: flow.region,
       username: flow.username,
       sessionTokenFile: flow.sessionTokenFile,
-      serviceTicket,
+      ticket: {
+        serviceTicket: ticket.serviceTicket,
+        serviceUrl: ticket.serviceUrl,
+      },
+      loopbackOrigin: flow.bridgeOrigin,
       signal: flow.controller.signal,
       confirmIdentity: identity => this.requestIdentityConfirmation(flow, identity),
     }
