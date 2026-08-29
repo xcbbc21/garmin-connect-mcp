@@ -75,12 +75,12 @@ describe('maintenance scripts', () => {
     expect(bundle).not.toContain('React.createElement')
 
     let definition: ClientBundleDefinition | undefined
-    const intervalCallbacks: Array<() => void> = []
+    const timeoutCallbacks: Array<() => void> = []
     const windowListeners = new Map<string, () => void>()
-    const clearIntervalMock = jest.fn()
-    const setIntervalMock = jest.fn((callback: () => void, _delay: number) => {
-      intervalCallbacks.push(callback)
-      return intervalCallbacks.length
+    const clearTimeoutMock = jest.fn()
+    const setTimeoutMock = jest.fn((callback: () => void, _delay: number) => {
+      timeoutCallbacks.push(callback)
+      return timeoutCallbacks.length
     })
     const addEventListener = jest.fn((event: string, callback: () => void) => {
       windowListeners.set(event, callback)
@@ -90,8 +90,8 @@ describe('maintenance scripts', () => {
     })
     new Script(bundle).runInNewContext({
       AbortController,
-      clearInterval: clearIntervalMock,
-      setInterval: setIntervalMock,
+      clearTimeout: clearTimeoutMock,
+      setTimeout: setTimeoutMock,
       window: {
         __ModuleLoader__: {
           load(value: ClientBundleDefinition) {
@@ -136,9 +136,17 @@ describe('maintenance scripts', () => {
         slotFactory = render
       }),
     }
-    const rpcCall = jest.fn().mockResolvedValue({
-      ok: true,
-      value: { success: false, code: 'unavailable' },
+    let completeFirstAccountRequest: ((value: unknown) => void) | undefined
+    const rpcCall = jest.fn().mockImplementation((_channel, method) => {
+      if (method !== 'account') {
+        return Promise.resolve({
+          ok: true,
+          value: { success: false, code: 'unavailable' },
+        })
+      }
+      return new Promise(resolve => {
+        completeFirstAccountRequest = resolve
+      })
     })
     client.apply({
       connection: { isLoopback: true, rpc: { call: rpcCall } },
@@ -165,7 +173,6 @@ describe('maintenance scripts', () => {
       .map(effect => effect())
       .filter((cleanup): cleanup is () => void => typeof cleanup === 'function')
     await Promise.resolve()
-    await Promise.resolve()
 
     expect(rpcCall).toHaveBeenCalledWith(
       '/garmin-auth',
@@ -173,11 +180,24 @@ describe('maintenance scripts', () => {
       {},
       expect.any(AbortSignal),
     )
-    expect(setIntervalMock).toHaveBeenCalledWith(expect.any(Function), 1_000)
+    const firstAccountSignal = rpcCall.mock.calls[0][3] as AbortSignal
+
+    // A focus event while the first account request is slow must not create a
+    // second request or abort the in-flight one.
+    windowListeners.get('focus')?.()
+    await Promise.resolve()
+    expect(rpcCall).toHaveBeenCalledTimes(1)
+    expect(firstAccountSignal.aborted).toBe(false)
+
+    completeFirstAccountRequest!({
+      ok: true,
+      value: { success: false, authenticated: false },
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(setTimeoutMock).toHaveBeenCalledWith(expect.any(Function), 1_000)
 
     rpcCall.mockClear()
-    intervalCallbacks[0]()
-    await Promise.resolve()
+    timeoutCallbacks[0]()
     await Promise.resolve()
     expect(rpcCall).toHaveBeenCalledWith(
       '/garmin-auth',
@@ -186,16 +206,12 @@ describe('maintenance scripts', () => {
       expect.any(AbortSignal),
     )
 
+    const secondAccountSignal = rpcCall.mock.calls[0][3] as AbortSignal
     rpcCall.mockClear()
     windowListeners.get('focus')?.()
     await Promise.resolve()
-    await Promise.resolve()
-    expect(rpcCall).toHaveBeenCalledWith(
-      '/garmin-auth',
-      'account',
-      {},
-      expect.any(AbortSignal),
-    )
+    expect(rpcCall).not.toHaveBeenCalled()
+    expect(secondAccountSignal.aborted).toBe(false)
 
     const loginButtons = findButtons(rendered).filter(button => (
       typeof button.props['aria-label'] === 'string'
@@ -229,7 +245,7 @@ describe('maintenance scripts', () => {
     )
 
     cleanups.forEach(cleanup => cleanup())
-    expect(clearIntervalMock).toHaveBeenCalled()
+    expect(clearTimeoutMock).toHaveBeenCalled()
     expect(removeEventListener).toHaveBeenCalledWith('focus', expect.any(Function))
   })
 

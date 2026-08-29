@@ -151,67 +151,76 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
     if (active) void cancelFlow(active)
   }, [cancelFlow])
 
-  const refreshAuthenticatedAccount = useCallback(() => {
+  const refreshAuthenticatedAccount = useCallback(async (): Promise<void> => {
     if (!ctx.connection.isLoopback) {
       setAuthenticatedAccount(undefined)
       return
     }
-    accountRequest.current?.abort()
+    // Account polling is deliberately serialized. A slow loopback request must
+    // be allowed to finish; aborting it on the next timer tick can otherwise
+    // keep the UI permanently unauthenticated.
+    if (accountRequest.current) return
     const controller = new AbortController()
     accountRequest.current = controller
-    void (async () => {
-      try {
-        const result = parseGarminAuthAccountRpcResult(
-          await ctx.connection.rpc.call(
-            RPC_CHANNEL,
-            'account',
-            {},
-            controller.signal,
-          ),
+    try {
+      const result = parseGarminAuthAccountRpcResult(
+        await ctx.connection.rpc.call(
+          RPC_CHANNEL,
+          'account',
+          {},
+          controller.signal,
+        ),
+      )
+      if (controller.signal.aborted) return
+      if (result.success && result.authenticated) {
+        setAuthenticatedAccount({ email: result.email, region: result.region })
+        setAuthenticationRequirement(undefined)
+      } else {
+        setAuthenticatedAccount(undefined)
+        setAuthenticationRequirement(
+          result.success
+            && !result.authenticated
+            && 'authenticationRequired' in result
+            ? {
+                authenticationRequired: true,
+                reason: result.reason,
+                region: result.region,
+                revision: result.revision,
+              }
+            : undefined,
         )
-        if (controller.signal.aborted) return
-        if (result.success && result.authenticated) {
-          setAuthenticatedAccount({ email: result.email, region: result.region })
-          setAuthenticationRequirement(undefined)
-        } else {
-          setAuthenticatedAccount(undefined)
-          setAuthenticationRequirement(
-            result.success
-              && !result.authenticated
-              && 'authenticationRequired' in result
-              ? {
-                  authenticationRequired: true,
-                  reason: result.reason,
-                  region: result.region,
-                  revision: result.revision,
-                }
-              : undefined,
-          )
-        }
-      } catch {
-        if (!controller.signal.aborted) {
-          setAuthenticatedAccount(undefined)
-          setAuthenticationRequirement(undefined)
-        }
-      } finally {
-        if (accountRequest.current === controller) {
-          accountRequest.current = undefined
-        }
       }
-    })()
+    } catch {
+      if (!controller.signal.aborted) {
+        setAuthenticatedAccount(undefined)
+        setAuthenticationRequirement(undefined)
+      }
+    } finally {
+      if (accountRequest.current === controller) {
+        accountRequest.current = undefined
+      }
+    }
   }, [ctx])
 
   useEffect(() => {
-    refreshAuthenticatedAccount()
     if (!ctx.connection.isLoopback) return
-    const onFocus = (): void => refreshAuthenticatedAccount()
     const refreshMs = authenticatedAccount
       ? AUTHENTICATED_ACCOUNT_REFRESH_MS
       : UNAUTHENTICATED_ACCOUNT_REFRESH_MS
-    const timer = setInterval(refreshAuthenticatedAccount, refreshMs)
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const scheduleRefresh = async (): Promise<void> => {
+      await refreshAuthenticatedAccount()
+      if (!disposed) {
+        timer = setTimeout(() => void scheduleRefresh(), refreshMs)
+      }
+    }
+    const onFocus = (): void => { void refreshAuthenticatedAccount() }
+    void scheduleRefresh()
     window.addEventListener('focus', onFocus)
     return () => {
-      clearInterval(timer)
+      disposed = true
+      if (timer) clearTimeout(timer)
       window.removeEventListener('focus', onFocus)
       accountRequest.current?.abort()
     }
