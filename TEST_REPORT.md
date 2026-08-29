@@ -20,9 +20,9 @@ verification.
 | Test date | 2026-08-29 |
 | Package manifest | `0.1.5` + `Unreleased` changes |
 | Release readiness | **Automated gates passed** — browser MFA remains experimental while International/refresh/client gaps remain |
-| Local automated snapshot | **Passed** — 38 suites, 802 tests |
+| Local automated snapshot | **Passed** — 38 suites, 818 tests |
 | TypeScript build | **Passed** |
-| npm package smoke test | **Passed** — 169 files; 288.7 kB packed; 1.2 MB unpacked |
+| npm package smoke test | **Passed** — 179 files; 291.1 kB packed; 1.2 MB unpacked |
 | Real Garmin integration | **Not rerun** — prior 2026-08-21 `global` read-only baseline was 8/8 |
 | Two-step verification | **Preview** — real CN browser/session/profile/activity-read chain passed; International and real refresh pending |
 
@@ -42,16 +42,16 @@ npm run pack:smoke
 | Metric | Result |
 | --- | ---: |
 | Test suites | 38 passed |
-| Tests | 802 passed |
-| Statements | 85.79% |
-| Branches | 79.61% |
-| Functions | 87.36% |
-| Lines | 88.61% |
+| Tests | 818 passed |
+| Statements | 85.89% |
+| Branches | 79.66% |
+| Functions | 87.25% |
+| Lines | 88.72% |
 
 `npm run build` completed successfully. `npm run pack:smoke` also completed
-successfully and inspected a tarball containing 169 files, including the new
+successfully and inspected a tarball containing 179 files, including the new
 local-auth and MCP-auth runtime modules, changelog, and both test-report pages,
-with a packed size of 288.7 kB and an unpacked size of 1.2 MB.
+with a packed size of 291.1 kB and an unpacked size of 1.2 MB.
 
 The suite also covers an absolute, bounded, shell-free Windows PowerShell/.NET
 ACL boundary, a static encoded exact-DACL program, current-SID ownership,
@@ -74,18 +74,20 @@ system ACLs remain valid. A `macos-latest` CI job repeats these Darwin checks.
 Authentication coverage also includes shared destination preflight before any
 Web/CLI/MCP bridge starts, content-fingerprinted hot loading of a session written
 by another local process, positive MFA/CAPTCHA page classification without
-misclassifying ambiguous SDK no-ticket/password/network failures, abortable
-terminal prompts, non-zero system-browser launcher exits, bounded MCP completion
+misclassifying ambiguous SDK no-ticket/password/network failures, narrowly
+scoped Cloudflare managed-challenge detection, abortable terminal prompts,
+non-zero system-browser launcher exits, bounded MCP completion
 notifications, and commit-point draining so an in-progress atomic save is never
 misreported as cancelled. It also covers Web disposal during an irrevocable
 write, non-stacking broker/controller drain deadlines, rejected inline-token
 replacement only by an account-bound session, and MCP stdin/signal shutdown
 that keeps termination handlers active until bounded credential cleanup ends.
-CLI browser, canary, and `serve` shutdown also gives the first signal a bounded
+CLI browser, normal `login`, canary, and `serve` shutdown also gives the first signal a bounded
 graceful window and treats a second signal as an immediate force-exit request.
 The local dsh client also covers one-shot automatic opening per coarse Host
-requirement revision, while terminal login covers blank-password and explicit
-browser-challenge handoff to the shared system-browser broker.
+requirement revision and serialized account polling that does not starve slow
+RPCs, while terminal login covers blank-password and explicit browser-challenge
+handoff to the shared system-browser broker.
 The browser flow now has an exact 10-minute lifetime. Tests preserve a ticket's
 validated service through bridge message, server submission, flow management,
 and DI form encoding; only the region's fixed embed service or the current exact
