@@ -29,6 +29,7 @@ All notable changes to this project will be documented in this file.
 - All browser-auth entry points now run the same session-destination preflight before starting a loopback listener. Windows implicit paths prefer local `LOCALAPPDATA`; UNC/network session destinations remain unsupported.
 
 ### Fixed
+- Windows owner-only session setup now allows a bounded 30 seconds for a cold Windows PowerShell 5.1 ACL subprocess, avoiding false failures when first-launch endpoint scanning exceeds 10 seconds.
 - Synchronized the dependency lockfile with the current DeepSeek Harness development packages so a clean `npm ci` succeeds in release and CI environments.
 - China-region MFA tickets that Garmin binds to the current loopback bridge are now exchanged with that exact service instead of being incorrectly rewritten to the Garmin embed URL. Cross-region services, other loopback ports/hosts, paths, queries, fragments, credentials, and malformed variants are rejected before any DI request.
 - Retrying or closing the Web login no longer discards an active flow handle until the Host confirms cancellation or a terminal state.

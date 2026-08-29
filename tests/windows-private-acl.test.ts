@@ -42,7 +42,7 @@ describe('Windows exact owner-only session ACLs', () => {
         encoding: 'utf8',
         maxBuffer: 64 * 1024,
         shell: false,
-        timeout: 10_000,
+        timeout: 30_000,
         windowsHide: true,
       }))
       expect(call.options.env).toEqual(expect.objectContaining({
@@ -352,5 +352,5 @@ describe('Windows exact-private session host integration', () => {
     } finally {
       await rm(parent, { recursive: true, force: true })
     }
-  }, 60_000)
+  }, 120_000)
 })
