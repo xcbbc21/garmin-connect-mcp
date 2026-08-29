@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-29
+
+### Changed
+- Promoted browser-based MFA from preview to a supported capability for both China and International Garmin accounts across local dsh Web, the system-browser `garmin-connect-auth serve` flow, and MCP URL elicitation.
+- Repositioned the package as a Garmin Connect plugin and MCP server for mainstream AI agents instead of a DeepSeek Harness-only plugin.
+- Increased the bounded cold-start allowance for the Windows PowerShell 5.1 ACL helper from 30 to 60 seconds.
+
+### Verified
+- A real China-region account passed the complete browser MFA, exact ticket/service, DI exchange, profile confirmation, owner-only session persistence, fresh-client profile probe, and recent-activity read chain.
+- A real International-region account passed system-browser MFA, global DI exchange, profile confirmation, and owner-only `0600` session persistence. The saved session passed private-file validation and matched the configured normalized account and region without exposing credentials in logs or model context.
+
 ## [0.1.6-rc.1] - 2026-08-29
 
 ### Added

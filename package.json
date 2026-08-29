@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-garmin-connect",
-  "version": "0.1.6-rc.1",
-  "description": "A DeepSeek Harness plugin that exposes Garmin Connect fitness and health data as AI-callable tools",
+  "version": "0.1.6",
+  "description": "A Garmin Connect plugin and MCP server with browser-based MFA for AI-callable fitness and health data",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {

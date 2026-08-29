@@ -2,16 +2,18 @@
 
 [简体中文](./TEST_REPORT.zh-CN.md)
 
-This page is the static verification snapshot for the `0.1.6-rc.1` release
-candidate. It records what was tested,
+This page is the static verification snapshot for the `0.1.6` release. It
+records what was tested,
 what was deliberately excluded, and which gaps still require manual
 verification.
 
 > **Verification scope:** the automated checks below were rerun on the local
 > source tree. The new system-browser and MCP authentication paths are covered
 > offline. A real China-region MFA browser-to-session-and-read chain also passed
-> locally on 2026-08-29. International-region MFA, real refresh-token rotation,
-> and first-class MCP-client authentication UX remain preview gaps. Codex CLI
+> locally on 2026-08-29. A real International-region system-browser MFA, DI
+> exchange, profile confirmation, and private session write also passed. Real
+> refresh-token rotation and first-class MCP-client authentication UX remain
+> compatibility-test gaps. Codex CLI
 > `0.147.0` reached the URL-elicitation response in real stdio tool diagnostics;
 > it did not present that URL as a first-class authentication prompt.
 
@@ -20,14 +22,14 @@ verification.
 | Item | Result |
 | --- | --- |
 | Test date | 2026-08-29 |
-| Package manifest | `0.1.6-rc.1` |
-| Release readiness | **Automated gates passed** — browser MFA remains experimental while International/refresh/client gaps remain |
+| Package manifest | `0.1.6` |
+| Release readiness | **Automated gates passed** — browser MFA is supported for China and International accounts; refresh/client compatibility coverage continues |
 | Local automated snapshot | **Passed** — 38 suites, 824 tests |
 | TypeScript build | **Passed** |
-| npm package smoke test | **Passed** — 179 files; 294.8 kB packed; 1.2 MB unpacked |
+| npm package smoke test | **Passed** — 179 files; 299.5 kB packed; 1.2 MB unpacked |
 | Remote CI | Publication-gated — Linux Node 20/22, Windows ACL, and macOS ACL jobs must all pass for this commit |
 | Real Garmin integration | **Not rerun** — prior 2026-08-21 `global` read-only baseline was 8/8 |
-| Two-step verification | **Preview** — real CN browser/session/profile/activity-read chain passed; International and real refresh pending |
+| Two-step verification | **Supported** — real CN browser/session/profile/activity-read chain and real International system-browser MFA/DI/session persistence passed |
 
 ## Automated verification
 
@@ -54,14 +56,14 @@ npm run pack:smoke
 `npm run build` completed successfully. `npm run pack:smoke` also completed
 successfully and inspected a tarball containing 179 files, including the new
 local-auth and MCP-auth runtime modules, changelog, and both test-report pages,
-with a packed size of 294.8 kB and an unpacked size of 1.2 MB.
+with a packed size of 299.5 kB and an unpacked size of 1.2 MB.
 
 The suite also covers an absolute, bounded, shell-free Windows PowerShell/.NET
 ACL boundary, a static encoded exact-DACL program, current-SID ownership,
 full-chain reparse-point and untrusted-root rejection, per-component fail-closed
 directory verification/creation, and the requirement to secure the empty temporary file before
 writing credential bytes. A `windows-latest` CI job runs that suite against
-the real Windows ACL API, and RC publication is gated on that job passing for
+the real Windows ACL API, and publication is gated on that job passing for
 the release commit.
 
 POSIX coverage includes effective-UID ownership and owner write/execute checks,
@@ -147,8 +149,23 @@ tests, not claimed as part of this real-account run.
 Only fixed stage/result names were reported. No email, password, MFA code,
 cookie, ticket, token, profile payload, activity details, response body, or
 local session path is included here. This proves the real China-region
-browser-to-session-and-read chain, but not International-region MFA, actual
-refresh-token rotation, or a concrete MCP client's URL-elicitation UI.
+browser-to-session-and-read chain, but not actual refresh-token rotation or a
+concrete MCP client's URL-elicitation UI.
+
+## International-region browser MFA / DI verification
+
+With the account owner's explicit consent, the installed `0.1.6-rc.1` CLI opened
+Garmin's International-region authentication in the system browser on
+2026-08-29. The account completed Garmin-hosted password and MFA verification;
+the local runtime then completed the global DI exchange, confirmed the profile,
+and persisted the account- and region-bound session.
+
+The saved artifact was checked without printing its contents: it is a regular,
+non-symlink file owned by the current user with mode `0600`, passes the private
+session reader, carries the `global` region binding, and matches the configured
+normalized account identifier. No email, password, MFA code, ticket, token,
+profile payload, or private path is recorded here. Together with shared-runtime
+automated coverage, this validates supported browser MFA in both Garmin regions.
 
 ## FIT export verification
 
@@ -177,7 +194,6 @@ import of that file into a device or third-party application.
 The following scenarios were not validated end to end with real accounts or
 clients:
 
-- Running the browser flow with a real International-region MFA account.
 - Exercising actual access/refresh-token rotation on a browser-created session;
   refresh behavior is covered by automated fixtures but was not forced against
   the real account.
@@ -200,12 +216,11 @@ These are documented limitations of this snapshot, not passing test results.
   path, activity detail, or health value is included here.
 - No Garmin data write operation was performed. The authorized real China-region
   browser authentication wrote one private local session and was followed only
-  by profile and recent-activity reads; no private value or destination is
-  recorded in this report.
-- The package manifest is `0.1.6-rc.1`; this snapshot verifies the release
-  candidate without changing the npm `latest` tag.
+  by profile and recent-activity reads. The authorized International-region run
+  wrote a separate private session. No private value or destination is recorded
+  in this report.
+- The package manifest is `0.1.6`; this snapshot verifies the final release.
 
-Future release candidates should rerun the automated commands above.
-International MFA, real refresh rotation, FIT, and client smoke tests should be
-added only with the account owner's explicit consent and the same privacy
-safeguards.
+Future releases should rerun the automated commands above. Real
+refresh rotation, FIT, and client smoke tests should be added only with the
+account owner's explicit consent and the same privacy safeguards.

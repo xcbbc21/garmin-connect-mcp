@@ -2,13 +2,14 @@
 
 [English](./TEST_REPORT.md)
 
-本页面是 `0.1.6-rc.1` 候选版的静态验证快照，记录
+本页面是 `0.1.6` 正式版的静态验证快照，记录
 已经验证的范围、主动排除的操作，以及仍需人工验证的项目。
 
 > **验证范围：** 下列自动检查已在本机源码树重新执行。新的系统浏览器与 MCP 认证路径
 > 已有离线覆盖。2026-08-29 还在本机跑通了真实中国区 MFA 的浏览器、session 落盘与
-> 只读调用链路；国际区 MFA、真实 refresh token 轮换及具体 MCP 客户端的完整认证 UX
-> 仍是预览缺口。Codex CLI `0.147.0` 已在真实 stdio 工具调用中收到 URL elicitation，
+> 只读调用链路；国际区真实 MFA 也已通过系统浏览器挑战、DI 交换、profile 确认与私有
+> session 落盘。真实 refresh token 轮换及具体 MCP 客户端的完整认证 UX 仍是兼容性测试缺口。
+> Codex CLI `0.147.0` 已在真实 stdio 工具调用中收到 URL elicitation，
 > 但只在原始工具诊断里显示 URL，没有转成一级认证提示。
 
 ## 验证概览
@@ -16,14 +17,14 @@
 | 项目 | 结果 |
 | --- | --- |
 | 测试日期 | 2026-08-29 |
-| package manifest | `0.1.6-rc.1` |
-| 发布就绪度 | **自动门禁通过** — 国际区/refresh/具体客户端验证前，浏览器 MFA 仍属实验功能 |
+| package manifest | `0.1.6` |
+| 发布就绪度 | **自动门禁通过** — 浏览器 MFA 已正式支持中国区和国际区账号；refresh/具体客户端兼容性覆盖继续扩展 |
 | 本机自动测试 | **通过** — 38 个套件、824 项测试 |
 | TypeScript 构建 | **通过** |
-| npm 打包烟测 | **通过** — 179 个文件；压缩后 294.8 kB；解压后 1.2 MB |
+| npm 打包烟测 | **通过** — 179 个文件；压缩后 299.5 kB；解压后 1.2 MB |
 | 远程 CI | 发布门禁 — 本提交的 Linux Node 20/22、Windows ACL 与 macOS ACL 任务必须全部通过 |
 | 真实 Garmin 集成 | **本次未重跑** — 2026-08-21 的 `global` 只读基线为 8/8 |
-| 两步验证 | **预览** — 真实 CN 浏览器/session/profile/活动读取链路通过；国际区与真实 refresh 待验证 |
+| 两步验证 | **已支持** — 真实 CN 浏览器/session/profile/活动读取链路与真实国际区系统浏览器 MFA/DI/session 落盘均已通过 |
 
 ## 自动验证
 
@@ -49,12 +50,12 @@ npm run pack:smoke
 
 `npm run build` 已成功完成。`npm run pack:smoke` 也已通过，检查的 npm 包包含
 179 个文件（包含新的本地认证与 MCP 认证 runtime、更新日志及中英文测试报告页面），
-压缩后大小为 294.8 kB，解压后大小为 1.2 MB。
+压缩后大小为 299.5 kB，解压后大小为 1.2 MB。
 
 测试还覆盖了绝对路径、有界且无 shell 的 Windows PowerShell/.NET ACL 边界、静态编码的
 精确 DACL 程序、当前 SID owner、全链重解析点与不可信根目录拒绝、逐层目录 fail-closed
 验证/创建，以及在写入凭据字节前先保护空临时文件的顺序。`windows-latest` 任务会用真实
-Windows ACL API 运行该套件，本 RC 只会在发布提交的该任务通过后发布。
+Windows ACL API 运行该套件，本正式版只会在发布提交的该任务通过后发布。
 
 POSIX 覆盖还包括有效 UID owner 与 owner 写入/执行权限、不安全祖先拒绝、安全链接规范化、
 逐级 `0700` 预创建、no-follow 临时文件，以及原子替换前的父目录/文件再次验证。读取时也会
@@ -119,8 +120,19 @@ reader 校验。随后新建的只读 Garmin client 使用该文件，完成账�
 
 全程只输出固定阶段名与结果，不记录邮箱、密码、MFA 验证码、Cookie、ticket、Token、
 profile 内容、活动明细、响应正文或本地 session 路径。这证明了真实中国区浏览器到
-session 再到只读调用的链路，但不代表国际区 MFA、真实 refresh token 轮换或具体 MCP
-客户端的 URL elicitation UI 已通过。
+session 再到只读调用的链路，但不代表真实 refresh token 轮换或具体 MCP 客户端的
+URL elicitation UI 已通过。
+
+## 国际区浏览器 MFA／DI 验证
+
+经账号所有者明确同意，2026-08-29 使用已安装的 `0.1.6-rc.1` CLI 在系统浏览器中打开
+Garmin 国际区认证。账号完成了 Garmin 托管的密码与 MFA 验证；本地 runtime 随后完成
+global DI 交换、profile 确认，并落盘了绑定账号和区域的 session。
+
+不输出文件内容的本地检查确认：落盘结果是当前用户所有、mode 为 `0600` 的普通非符号链接
+文件，可通过私有 session reader，绑定 `global` 区域，且与规范化后的配置账号标识匹配。
+本报告不记录邮箱、密码、MFA 验证码、ticket、Token、profile 内容或私有路径。结合共享 runtime
+的自动测试覆盖，这证明了 Garmin 两个区域的浏览器 MFA 均已正式支持。
 
 ## FIT 导出验证
 
@@ -146,7 +158,6 @@ session 再到只读调用的链路，但不代表国际区 MFA、真实 refresh
 
 以下场景尚未使用真实账号或客户端完成端到端验证：
 
-- 使用真实国际区 MFA 账号运行浏览器认证流程。
 - 对浏览器生成的 session 实际触发 access/refresh token 轮换；自动 fixture 已覆盖刷新
   逻辑，但本次未强制真实账号刷新。
 - 在具体客户端中完成 MCP 浏览器认证、完成通知与重试。Codex CLI `0.147.0`
@@ -164,8 +175,9 @@ session 再到只读调用的链路，但不代表国际区 MFA、真实 refresh
 - 本报告不包含密码、session token、MFA 验证码、账号标识、本地目标路径、活动明细
   或健康数值。
 - 本次没有执行 Garmin 数据写操作。经授权的真实中国区浏览器认证写入了一份本机私有
-  session，随后只执行 profile 与最近活动读取；本报告不记录任何私密值或目标路径。
-- package manifest 为 `0.1.6-rc.1`；本快照验证该候选版，不会改动 npm `latest` 标签。
+  session，随后只执行 profile 与最近活动读取；经授权的国际区验证另行写入了一份私有
+  session。本报告不记录任何私密值或目标路径。
+- package manifest 为 `0.1.6`；本快照验证该正式版。
 
-后续每个候选版本都应重新运行上述自动检查。国际区 MFA、真实 refresh 轮换、FIT 及
-客户端烟测只能在账号所有者明确同意后执行，并继续使用同等的隐私保护措施。
+后续每个版本都应重新运行上述自动检查。真实 refresh 轮换、FIT 及客户端烟测只能在
+账号所有者明确同意后执行，并继续使用同等的隐私保护措施。
