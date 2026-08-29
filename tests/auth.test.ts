@@ -171,6 +171,42 @@ describe('interactive Garmin authentication', () => {
     expect(post).not.toHaveBeenCalled()
   })
 
+  it('keeps the real credential-submission timer alive until completion or cancellation', async () => {
+    const controller = new AbortController()
+    const { dependencies } = fixture(
+      '<a href="embed?ticket=ST-MUST-NOT-BE-USED">continue</a>',
+    )
+    delete dependencies.wait
+    const timerSpy = jest.spyOn(global, 'setTimeout')
+    let authentication: ReturnType<typeof authenticateGarminSession> | undefined
+
+    try {
+      authentication = authenticateGarminSession({
+        username: 'runner@example.test',
+        password: 'password-secret',
+        region: 'global',
+        promptMfa: async () => 'must-not-be-read',
+        signal: controller.signal,
+      }, dependencies)
+      await new Promise(resolve => setImmediate(resolve))
+
+      const timerIndex = timerSpy.mock.calls.findIndex(call => call[1] === 3_000)
+      expect(timerIndex).toBeGreaterThanOrEqual(0)
+      const timer = timerSpy.mock.results[timerIndex]?.value as NodeJS.Timeout
+      expect(timer.hasRef()).toBe(true)
+
+      controller.abort()
+      await expect(authentication).rejects.toMatchObject({
+        code: 'CANCELLED',
+        message: 'Garmin authentication was cancelled',
+      })
+    } finally {
+      controller.abort()
+      await authentication?.catch(() => undefined)
+      timerSpy.mockRestore()
+    }
+  })
+
   it('accepts a returned ticket before considering stale MFA page markers', async () => {
     const { dependencies, post, upstream } = fixture([
       '<title>Enter MFA code for login</title>',
@@ -225,7 +261,9 @@ describe('interactive Garmin authentication', () => {
     }, dependencies)
 
     expect(result.usedMfa).toBe(true)
-    expect(promptMfa).toHaveBeenCalledWith({ method: 'email' })
+    expect(promptMfa).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'email',
+    }))
     expect(post).toHaveBeenNthCalledWith(
       2,
       'https://sso.garmin.com/sso/verifyMFA/mfaCode',
@@ -240,6 +278,36 @@ describe('interactive Garmin authentication', () => {
     expect(verificationBody).toContain('mfa-code=123456')
     expect(verificationBody).not.toContain('password-secret')
     expect(upstream.getOauth1Token).toHaveBeenCalledWith('ST-MFA')
+  })
+
+  it('cancels a pending custom MFA prompt even when the prompt ignores its signal', async () => {
+    const controller = new AbortController()
+    const mfaPage = [
+      '<input name="_csrf" value="mfa-csrf">',
+      '<input name="mfa-code">',
+      '<script>var mfaMethod = "email"; var codeSentTo = "***";</script>',
+    ].join('')
+    const { dependencies, upstream } = fixture(mfaPage)
+    let markPromptStarted!: () => void
+    const promptStarted = new Promise<void>(resolve => { markPromptStarted = resolve })
+    const promptMfa = jest.fn((context: { signal?: AbortSignal }) => {
+      expect(context.signal).toBe(controller.signal)
+      markPromptStarted()
+      return new Promise<string>(() => undefined)
+    })
+
+    const authentication = authenticateGarminSession({
+      username: 'runner@example.test',
+      password: 'password-secret',
+      region: 'global',
+      promptMfa,
+      signal: controller.signal,
+    }, dependencies)
+    await promptStarted
+    controller.abort()
+
+    await expect(authentication).rejects.toMatchObject({ code: 'CANCELLED' })
+    expect(upstream.getOauth1Token).not.toHaveBeenCalled()
   })
 
   it('hands an explicit MFA page to browser authentication when requested', async () => {
@@ -423,7 +491,9 @@ describe('interactive Garmin authentication', () => {
       promptMfa,
     }, dependencies)).resolves.toMatchObject({ usedMfa: true })
 
-    expect(promptMfa).toHaveBeenCalledWith({ method: 'totp' })
+    expect(promptMfa).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'totp',
+    }))
     expect(post).toHaveBeenCalledTimes(2)
   })
 

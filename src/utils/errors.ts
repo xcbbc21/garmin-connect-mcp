@@ -13,6 +13,16 @@ export class PublicToolError extends Error {
   override name = 'PublicToolError'
 }
 
+/** Shared cancellation signal for terminal and browser authentication flows. */
+export class GarminAuthenticationCancelledError extends PublicToolError {
+  override name = 'GarminAuthenticationCancelledError'
+  readonly code = 'CANCELLED' as const
+
+  constructor() {
+    super('Garmin authentication was cancelled')
+  }
+}
+
 export const GARMIN_BROWSER_AUTH_COMMAND =
   'garmin-connect-auth serve --account <alias> --region <global|cn> --open'
 

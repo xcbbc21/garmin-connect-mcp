@@ -38,6 +38,7 @@ import {
   type GarminSessionFile,
 } from './session-store'
 import {
+  GarminAuthenticationCancelledError,
   GarminAuthenticationRequiredError,
   PublicToolError,
   publicErrorMessage,
@@ -264,11 +265,11 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
       region,
       browserOnChallenge: true,
       signal: input.signal,
-      promptMfa: async ({ method }) => promptAuthCli(
+      promptMfa: async ({ method, signal }) => promptAuthCli(
         input.io,
         `Garmin MFA code (${safeMfaMethod(method)}): `,
         true,
-        input.signal,
+        signal,
       ),
     })
     throwIfAuthCliCancelled(input.signal)
@@ -692,7 +693,7 @@ function promptAuthCli(
 }
 
 function throwIfAuthCliCancelled(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
+  if (signal?.aborted) throw new GarminAuthenticationCancelledError()
 }
 
 async function promptVisible(
@@ -701,7 +702,7 @@ async function promptVisible(
   label: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
+  if (signal?.aborted) throw new GarminAuthenticationCancelledError()
   requireTty(input)
   const rl = readline.createInterface({ input, output, terminal: true })
   try {
@@ -709,7 +710,7 @@ async function promptVisible(
       ? rl.question(label)
       : rl.question(label, { signal }))
   } catch (error) {
-    if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
+    if (signal?.aborted) throw new GarminAuthenticationCancelledError()
     throw error
   } finally {
     rl.close()
@@ -723,7 +724,7 @@ function promptHidden(
   signal?: AbortSignal,
 ): Promise<string> {
   if (signal?.aborted) {
-    return Promise.reject(new BrowserCanaryControlError('CANCELLED'))
+    return Promise.reject(new GarminAuthenticationCancelledError())
   }
   requireTty(input)
   output.write(label)
@@ -764,7 +765,7 @@ function promptHidden(
       }
     }
     const onAbort = (): void => {
-      finish(new BrowserCanaryControlError('CANCELLED'))
+      finish(new GarminAuthenticationCancelledError())
     }
     input.on('data', onData)
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -859,7 +860,10 @@ export function authCliExitCode(
   signal?: AuthCliTerminationSignal,
 ): number {
   if (
-    error instanceof BrowserCanaryControlError
+    (
+      error instanceof BrowserCanaryControlError
+      || error instanceof GarminAuthenticationCancelledError
+    )
     && error.code === 'CANCELLED'
   ) {
     return authCliSignalExitCode(signal ?? 'SIGINT')

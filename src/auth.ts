@@ -2,12 +2,12 @@ import axios from 'axios'
 import { wrapper } from 'axios-cookiejar-support'
 import { GarminConnect } from 'garmin-connect'
 import { CookieJar } from 'tough-cookie'
-import { BrowserCanaryControlError } from './browser-auth-canary'
 import type { GarminRegion } from './config'
 import { hardenGarminHttpClient } from './client'
 import { detectGarminBrowserChallenge } from './garmin-auth-challenge'
 import type { GarminSessionTokens } from './session-store'
 import {
+  GarminAuthenticationCancelledError,
   GarminAuthenticationRequiredError,
   PublicToolError,
 } from './utils/errors'
@@ -28,6 +28,7 @@ const MAX_AUTH_RESPONSE_BYTES = 5 * 1024 * 1024
 
 export interface MfaPromptContext {
   method: string
+  signal?: AbortSignal
 }
 
 export interface GarminAuthOptions {
@@ -220,9 +221,13 @@ export async function authenticateGarminSession(
           )
         }
 
-        const mfaCode = (await options.promptMfa({
-          method: mfaMethod || 'verification',
-        })).trim()
+        const mfaCode = (await awaitAuthenticationInput(
+          options.promptMfa({
+            method: mfaMethod || 'verification',
+            signal: options.signal,
+          }),
+          options.signal,
+        )).trim()
         throwIfAuthenticationCancelled(options.signal)
         if (!mfaCode) throw new PublicToolError('MFA code is required')
         if (mfaCode.length > 32) throw new PublicToolError('MFA code is invalid')
@@ -292,9 +297,9 @@ export async function authenticateGarminSession(
     return { tokens, displayName, usedMfa }
   } catch (error) {
     if (options.signal?.aborted) {
-      throw new BrowserCanaryControlError('CANCELLED')
+      throw new GarminAuthenticationCancelledError()
     }
-    if (error instanceof BrowserCanaryControlError) throw error
+    if (error instanceof GarminAuthenticationCancelledError) throw error
     if (error instanceof PublicToolError) throw error
     const status = httpStatus(error)
     if (status === 429) {
@@ -383,7 +388,34 @@ function httpStatus(error: unknown): number | undefined {
 }
 
 function throwIfAuthenticationCancelled(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
+  if (signal?.aborted) throw new GarminAuthenticationCancelledError()
+}
+
+function awaitAuthenticationInput<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  throwIfAuthenticationCancelled(signal)
+  if (!signal) return operation
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const cleanup = (): boolean => {
+      if (settled) return false
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      return true
+    }
+    const succeed = (value: T): void => {
+      if (cleanup()) resolve(value)
+    }
+    const fail = (error: unknown): void => {
+      if (cleanup()) reject(error)
+    }
+    const onAbort = (): void => fail(new GarminAuthenticationCancelledError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(succeed, fail)
+    if (signal.aborted) onAbort()
+  })
 }
 
 function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -398,9 +430,8 @@ function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
       if (error) reject(error)
       else resolve()
     }
-    const onAbort = (): void => finish(new BrowserCanaryControlError('CANCELLED'))
+    const onAbort = (): void => finish(new GarminAuthenticationCancelledError())
     const timer = setTimeout(() => finish(), milliseconds)
-    timer.unref?.()
     signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) onAbort()
   })

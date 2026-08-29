@@ -4,7 +4,10 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BrowserCanaryControlError } from '../src/browser-auth-canary'
-import { GarminAuthenticationRequiredError } from '../src/utils/errors'
+import {
+  GarminAuthenticationCancelledError,
+  GarminAuthenticationRequiredError,
+} from '../src/utils/errors'
 import {
   authCliExitCode,
   defaultAccountSessionPath,
@@ -1122,6 +1125,10 @@ describe('Garmin interactive auth CLI', () => {
     expect(authCliExitCode(cancelled, 'SIGINT')).toBe(130)
     expect(authCliExitCode(cancelled, 'SIGTERM')).toBe(143)
     expect(authCliExitCode(cancelled, 'SIGHUP')).toBe(129)
+    expect(authCliExitCode(
+      new GarminAuthenticationCancelledError(),
+      'SIGTERM',
+    )).toBe(143)
     expect(authCliExitCode(timedOut)).toBe(1)
     expect(authCliExitCode(new Error('unexpected'))).toBe(1)
   })
