@@ -11,6 +11,26 @@
 
 **[English](README.md)** | 中文 | **[测试报告](TEST_REPORT.zh-CN.md)** | **[更新日志](CHANGELOG.md)**
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/coding-agents-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/coding-agents-light.png">
+    <img src="docs/assets/coding-agents-light.png" width="720" alt="DeepSeek Harness、WorkBuddy、千问办公、ZCode、Claude Code、Codex、Cursor 与 Windsurf">
+  </picture>
+</p>
+<p align="center">
+  <strong>支持主流 Coding Agent 与 AI 工作台</strong><br>
+  <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> ·
+  <a href="https://www.codebuddy.cn/work/">WorkBuddy</a> ·
+  <a href="https://qwenwork.cn/">千问办公</a> ·
+  <a href="https://zcode.z.ai/">ZCode</a> ·
+  <a href="https://www.anthropic.com/claude-code">Claude Code</a> ·
+  <a href="https://openai.com/codex/">Codex</a> ·
+  <a href="https://www.cursor.com/">Cursor</a> ·
+  <a href="https://windsurf.com/">Windsurf</a><br>
+  <sub>根据客户端能力，通过 MCP 或 <code>SKILL.md</code> 工作流接入。</sub>
+</p>
+
 > [!WARNING]
 > **0.1.6-rc.1 候选版实验状态：** dsh 本机网页、`garmin-connect-auth serve` 系统浏览器流程与
 > MCP URL elicitation 现在可以初始化同一种 owner-only session。Garmin 两步验证仍是
@@ -993,3 +1013,5 @@ npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add dsh-plugi
 - [Cordis](https://github.com/cordiverse/cordis) — 插件生命周期框架
 - [garmin-connect](https://www.npmjs.com/package/garmin-connect) — 非官方 Garmin Connect Node.js 客户端
 - 感谢 Zhitao 的 [DailySync](https://dailysync.cn) 所带来的启发
+
+<sub>产品名称和图标归各自权利人所有，仅用于说明互操作兼容性。</sub>

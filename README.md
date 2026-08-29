@@ -11,6 +11,26 @@
 
 English | **[简体中文](README.zh-CN.md)** | **[Test Report](TEST_REPORT.md)** | **[Changelog](CHANGELOG.md)**
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/coding-agents-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/coding-agents-light.png">
+    <img src="docs/assets/coding-agents-light.png" width="720" alt="DeepSeek Harness, WorkBuddy, Qwen Work, ZCode, Claude Code, Codex, Cursor, and Windsurf">
+  </picture>
+</p>
+<p align="center">
+  <strong>Works with mainstream coding agents and AI workspaces</strong><br>
+  <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> ·
+  <a href="https://www.codebuddy.cn/work/">WorkBuddy</a> ·
+  <a href="https://qwenwork.cn/">Qwen Work</a> ·
+  <a href="https://zcode.z.ai/">ZCode</a> ·
+  <a href="https://www.anthropic.com/claude-code">Claude Code</a> ·
+  <a href="https://openai.com/codex/">Codex</a> ·
+  <a href="https://www.cursor.com/">Cursor</a> ·
+  <a href="https://windsurf.com/">Windsurf</a><br>
+  <sub>Connect through MCP or a <code>SKILL.md</code> workflow, depending on the client.</sub>
+</p>
+
 > [!WARNING]
 > **0.1.6-rc.1 experimental status:** local dsh Web, the
 > `garmin-connect-auth serve` system-browser flow, and MCP URL elicitation can
@@ -1116,3 +1136,5 @@ Distribution notes:
 - [Cordis](https://github.com/cordiverse/cordis) — the plugin lifecycle framework
 - [garmin-connect](https://www.npmjs.com/package/garmin-connect) — unofficial Garmin Connect client for Node.js
 - Thanks to Zhitao and [DailySync](https://dailysync.cn) for the inspiration
+
+<sub>Product names and logos belong to their respective owners and are shown only to describe interoperability.</sub>
