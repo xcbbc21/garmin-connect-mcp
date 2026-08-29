@@ -138,7 +138,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(result.stdout).toContain('--account <alias>')
     expect(result.stdout).toContain('--region <global|cn>')
     expect(result.stdout).toContain('--output <path>')
-    expect(result.stdout).toContain('requires MFA or CAPTCHA, login continues')
+    expect(result.stdout).toContain('password blank to use Garmin\'s browser page')
     expect(result.stderr).toBe('')
   })
 
@@ -396,7 +396,7 @@ describe('Garmin interactive auth CLI', () => {
     const write = jest.fn()
     const io: AuthCliIO = { prompt, write }
     const authenticate = jest.fn().mockRejectedValue(
-      new GarminAuthenticationRequiredError('challenge'),
+      new GarminAuthenticationRequiredError('challenge', undefined, 'mfa'),
     )
     const writeSession = jest.fn().mockResolvedValue(undefined)
     const browserAuthenticate = jest.fn().mockResolvedValue({
@@ -439,6 +439,36 @@ describe('Garmin interactive auth CLI', () => {
     expect(write.mock.calls.flat().join('')).not.toContain('PASSWORD_MARKER')
   })
 
+  it('does not report a CAPTCHA browser recovery as MFA use', async () => {
+    const answers = ['runner@example.test', 'PASSWORD_MARKER']
+    const prompt = jest.fn(async () => answers.shift() ?? '')
+    const io: AuthCliIO = { prompt, write: jest.fn() }
+    const authenticate = jest.fn().mockRejectedValue(
+      new GarminAuthenticationRequiredError(
+        'challenge',
+        undefined,
+        'verification',
+      ),
+    )
+    const browserAuthenticate = jest.fn().mockResolvedValue({
+      success: true,
+      account: 'default',
+      region: 'global',
+      sessionTokenFile: '/safe/default.json',
+    })
+
+    await expect(runAuthSetup({
+      argv: ['login', '--output', '/safe/default.json'],
+      env: {},
+      io,
+      dependencies: {
+        authenticate,
+        writeSession: jest.fn(),
+      },
+      browserDependencies: serveDependencies(browserAuthenticate),
+    })).resolves.toMatchObject({ usedMfa: false })
+  })
+
   it('uses the shared browser flow when no terminal password is supplied', async () => {
     const answers = ['runner@example.test', '']
     const prompt = jest.fn(async () => answers.shift() ?? '')
@@ -451,11 +481,13 @@ describe('Garmin interactive auth CLI', () => {
       region: 'global',
       sessionTokenFile: '/safe/default.json',
     })
+    const signal = new AbortController().signal
 
     await expect(runAuthSetup({
       argv: ['login', '--output', '/safe/default.json'],
       env: {},
       io,
+      signal,
       dependencies: { authenticate, writeSession },
       browserDependencies: serveDependencies(browserAuthenticate),
     })).resolves.toEqual({
@@ -468,6 +500,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(authenticate).not.toHaveBeenCalled()
     expect(writeSession).not.toHaveBeenCalled()
     expect(browserAuthenticate).toHaveBeenCalledTimes(1)
+    expect(browserAuthenticate).toHaveBeenCalledWith(expect.objectContaining({ signal }))
   })
 
   it.each([
@@ -1062,7 +1095,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(authCliExitCode(new Error('unexpected'))).toBe(1)
   })
 
-  it('exits on SIGTERM while the real visible username prompt is pending', async () => {
+  it('exits on SIGTERM while a normal login username prompt is pending', async () => {
     if (process.platform === 'win32') return
     const directory = mkdtempSync(path.join(tmpdir(), 'garmin-auth-signal-test-'))
     const entrypoint = path.resolve(__dirname, '../src/auth-cli.ts')
@@ -1075,8 +1108,7 @@ describe('Garmin interactive auth CLI', () => {
       '--import',
       require.resolve('tsx'),
       entrypoint,
-      'serve',
-      '--open',
+      'login',
       '--account',
       'signal-test',
       '--region',

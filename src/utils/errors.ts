@@ -1,13 +1,17 @@
+import type {
+  GarminAuthenticationRequiredReason,
+  GarminBrowserChallengeKind,
+} from '../auth-requirement'
+
+export type {
+  GarminAuthenticationRequiredReason,
+  GarminBrowserChallengeKind,
+} from '../auth-requirement'
+
 /** An error explicitly designed to be shown to an AI tool caller. */
 export class PublicToolError extends Error {
   override name = 'PublicToolError'
 }
-
-export type GarminAuthenticationRequiredReason =
-  | 'missing'
-  | 'expired'
-  | 'rejected'
-  | 'challenge'
 
 export const GARMIN_BROWSER_AUTH_COMMAND =
   'garmin-connect-auth serve --account <alias> --region <global|cn> --open'
@@ -23,6 +27,8 @@ export class GarminAuthenticationRequiredError extends PublicToolError {
   constructor(
     readonly reason: GarminAuthenticationRequiredReason,
     message = defaultGarminAuthenticationRequiredMessage(reason),
+    /** Internal only: Host RPC serializes `reason`, never this detail. */
+    readonly challengeKind?: GarminBrowserChallengeKind,
   ) {
     super(message)
   }

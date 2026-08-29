@@ -57,6 +57,7 @@ export interface AuthSetupInput {
   argv: string[]
   env: Record<string, string | undefined>
   io: AuthCliIO
+  signal?: AbortSignal
   dependencies?: AuthCliDependencies
   browserDependencies?: AuthServeCliDependencies
 }
@@ -193,9 +194,10 @@ General options:
   -h, --help              Show this help
   -V, --version           Show the installed version
 
-Passwords are requested interactively with terminal echo disabled. If Garmin
-requires MFA or CAPTCHA, login continues in Garmin's browser page. Never pass
-passwords or verification codes as command-line options or model input.
+Passwords are requested interactively with terminal echo disabled; leave the
+password blank to use Garmin's browser page. MFA or CAPTCHA also continues in
+that page. Never pass passwords or verification codes as command-line options
+or model input.
 
 The serve command keeps password, verification code, CAPTCHA, and MFA inside
 Garmin's page. It writes only the resulting long-lived session to the selected
@@ -223,13 +225,23 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
     : defaultAccountSessionPath(account, input.env)
 
   const username = input.env.GARMIN_USERNAME?.trim()
-    || (await input.io.prompt('Garmin email: ', false)).trim()
+    || (await promptAuthCli(
+      input.io,
+      'Garmin email: ',
+      false,
+      input.signal,
+    )).trim()
   if (!username) throw new PublicToolError('Garmin username is required')
 
   // Authentication bootstrap always reads the password from the foreground
   // TTY. It deliberately ignores GARMIN_PASSWORD so MFA setup cannot silently
   // turn a long-lived environment secret into login input.
-  let password = await input.io.prompt('Garmin password: ', true)
+  let password = await promptAuthCli(
+    input.io,
+    'Garmin password: ',
+    true,
+    input.signal,
+  )
 
   try {
     if (!password) {
@@ -244,9 +256,11 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
       password,
       region,
       browserOnChallenge: true,
-      promptMfa: async ({ method }) => input.io.prompt(
+      promptMfa: async ({ method }) => promptAuthCli(
+        input.io,
         `Garmin MFA code (${safeMfaMethod(method)}): `,
         true,
+        input.signal,
       ),
     })
     await dependencies.writeSession(
@@ -279,7 +293,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
     return continueAuthSetupInBrowser(
       input,
       { account, region, sessionTokenFile, username },
-      true,
+      error.challengeKind === 'mfa',
     )
   } finally {
     // JavaScript strings cannot be reliably zeroized, but dropping the last
@@ -312,6 +326,7 @@ async function continueAuthSetupInBrowser(
       GARMIN_PASSWORD: undefined,
     },
     io: input.io,
+    signal: input.signal,
     dependencies: input.browserDependencies,
   })
   return {
@@ -875,37 +890,40 @@ async function main(): Promise<void> {
     }
     const browserLoginRequested = argv[0] === 'login' && argv.includes('--browser')
     const serveRequested = argv[0] === 'serve'
-    if (argv[0] === 'canary' || browserLoginRequested || serveRequested) {
-      const termination = installAuthCliTermination()
-      try {
-        if (browserLoginRequested) {
-          await runBrowserAuthSetup({
-            argv,
-            env: process.env,
-            io: terminalIO(),
-            signal: termination.signal,
-          })
-        } else if (serveRequested) {
-          await runAuthServe({
-            argv,
-            env: process.env,
-            io: terminalIO(),
-            signal: termination.signal,
-          })
-        } else {
-          await runAuthCanary({
-            argv,
-            io: terminalIO(),
-            signal: termination.signal,
-          })
-        }
-      } finally {
-        terminationSignal = termination.receivedSignal()
-        termination.dispose()
+    const termination = installAuthCliTermination()
+    try {
+      if (browserLoginRequested) {
+        await runBrowserAuthSetup({
+          argv,
+          env: process.env,
+          io: terminalIO(),
+          signal: termination.signal,
+        })
+      } else if (serveRequested) {
+        await runAuthServe({
+          argv,
+          env: process.env,
+          io: terminalIO(),
+          signal: termination.signal,
+        })
+      } else if (argv[0] === 'canary') {
+        await runAuthCanary({
+          argv,
+          io: terminalIO(),
+          signal: termination.signal,
+        })
+      } else {
+        await runAuthSetup({
+          argv,
+          env: process.env,
+          io: terminalIO(),
+          signal: termination.signal,
+        })
       }
-      return
+    } finally {
+      terminationSignal = termination.receivedSignal()
+      termination.dispose()
     }
-    await runAuthSetup({ argv, env: process.env, io: terminalIO() })
   } catch (error) {
     process.stderr.write(`${publicErrorMessage(error, 'Garmin authentication failed')}\n`)
     process.exitCode = authCliExitCode(error, terminationSignal)

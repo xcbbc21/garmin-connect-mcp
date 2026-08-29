@@ -19,8 +19,6 @@ const MFA_CODE_INPUT_PATTERN =
   /<input\b[^>]*\bname\s*=\s*["']mfa-code["'][^>]*>/i
 const MFA_FORM_ACTION_PATTERN =
   /<form\b[^>]*\baction\s*=\s*["'][^"']*verifyMFA[^"']*["'][^>]*>/i
-const BROWSER_VERIFICATION_PATTERN =
-  /(?:g-recaptcha|h-captcha|hcaptcha|cf-turnstile|cf-chl-|challenge-platform|recaptcha\/api)/i
 const BROWSER_VERIFICATION_MESSAGE =
   'Open Garmin Connect in a browser and complete the verification, then retry; automatic browser authentication is not yet supported'
 const MFA_REJECTED_MESSAGE =
@@ -169,11 +167,13 @@ export async function authenticateGarminSession(
     let usedMfa = false
 
     if (!ticket) {
-      if (
-        options.browserOnChallenge
-        && detectGarminBrowserChallenge(responseHtml)
-      ) {
-        throw new GarminAuthenticationRequiredError('challenge')
+      const browserChallenge = detectGarminBrowserChallenge(responseHtml)
+      if (options.browserOnChallenge && browserChallenge) {
+        throw new GarminAuthenticationRequiredError(
+          'challenge',
+          undefined,
+          browserChallenge,
+        )
       }
       throwIfBrowserVerification(responseHtml)
 
@@ -328,7 +328,7 @@ function hasMfaChallenge(
 }
 
 function throwIfBrowserVerification(html: string): void {
-  if (BROWSER_VERIFICATION_PATTERN.test(html)) {
+  if (detectGarminBrowserChallenge(html) === 'verification') {
     throw new PublicToolError(BROWSER_VERIFICATION_MESSAGE)
   }
 }

@@ -193,6 +193,7 @@ describe('interactive Garmin authentication', () => {
     await expect(authentication).rejects.toMatchObject({
       name: 'GarminAuthenticationRequiredError',
       reason: 'challenge',
+      challengeKind: 'mfa',
     })
     expect(promptMfa).not.toHaveBeenCalled()
     expect(post).toHaveBeenCalledTimes(1)
@@ -212,6 +213,25 @@ describe('interactive Garmin authentication', () => {
     }, dependencies)).rejects.toMatchObject({
       name: 'GarminAuthenticationRequiredError',
       reason: 'challenge',
+      challengeKind: 'verification',
+    })
+  })
+
+  it('hands a Cloudflare managed challenge to browser authentication when requested', async () => {
+    const { dependencies } = fixture(
+      '<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>',
+    )
+
+    await expect(authenticateGarminSession({
+      username: 'runner@example.test',
+      password: 'password-secret',
+      region: 'global',
+      promptMfa: async () => 'must-not-be-read',
+      browserOnChallenge: true,
+    }, dependencies)).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'challenge',
+      challengeKind: 'verification',
     })
   })
 

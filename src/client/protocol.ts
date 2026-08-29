@@ -1,3 +1,10 @@
+import {
+  isGarminAuthenticationRequiredReason,
+  type GarminAuthenticationRequirement as GarminAuthenticationRequirementWire,
+} from './auth-requirement'
+
+export type { GarminAuthenticationRequiredReason } from './auth-requirement'
+
 export const GARMIN_AUTH_PUBLIC_STATUSES = [
   'in_progress',
   'succeeded',
@@ -18,18 +25,9 @@ export type GarminAuthenticatedAccount = {
   region: 'cn' | 'global'
 }
 
-export type GarminAuthenticationRequiredReason =
-  | 'missing'
-  | 'expired'
-  | 'rejected'
-  | 'challenge'
-
 export type GarminAuthenticationRequirement = {
   authenticationRequired: true
-  reason: GarminAuthenticationRequiredReason
-  region: 'cn' | 'global'
-  revision: number
-}
+} & GarminAuthenticationRequirementWire
 
 export type GarminAuthAccountResult = {
   success: true
@@ -88,7 +86,7 @@ export function parseGarminAuthAccountRpcResult(value: unknown): GarminAuthAccou
     && business.success === true
     && business.authenticated === false
     && business.authenticationRequired === true
-    && isAuthenticationRequiredReason(business.reason)
+    && isGarminAuthenticationRequiredReason(business.reason)
     && (business.region === 'cn' || business.region === 'global')
     && Number.isSafeInteger(business.revision)
     && (business.revision as number) >= 1
@@ -129,15 +127,6 @@ export function parseGarminAuthAccountRpcResult(value: unknown): GarminAuthAccou
     email: business.email,
     region: business.region,
   }
-}
-
-function isAuthenticationRequiredReason(
-  value: unknown,
-): value is GarminAuthenticationRequiredReason {
-  return value === 'missing'
-    || value === 'expired'
-    || value === 'rejected'
-    || value === 'challenge'
 }
 
 export function parseGarminAuthBeginRpcResult(value: unknown): GarminAuthBeginResult {

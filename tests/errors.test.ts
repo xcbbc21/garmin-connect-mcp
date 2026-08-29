@@ -4,6 +4,9 @@ import {
   publicErrorMessage,
   safeUpstreamLogLine,
 } from '../src/utils/errors'
+import {
+  isGarminAuthenticationRequiredReason,
+} from '../src/auth-requirement'
 
 describe('error disclosure boundaries', () => {
   it.each([
@@ -20,6 +23,29 @@ describe('error disclosure boundaries', () => {
     expect(error.message).toContain(
       'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
+  })
+
+  it('keeps a locally detected browser challenge kind available to the caller', () => {
+    const error = new GarminAuthenticationRequiredError(
+      'challenge',
+      undefined,
+      'mfa',
+    )
+
+    expect(error.challengeKind).toBe('mfa')
+    expect(error.message).toContain('requires browser verification')
+  })
+
+  it.each([
+    ['missing', true],
+    ['expired', true],
+    ['rejected', true],
+    ['challenge', true],
+    ['verification', false],
+    ['private upstream detail', false],
+    [undefined, false],
+  ])('validates the bounded auth reason domain for %p', (value, expected) => {
+    expect(isGarminAuthenticationRequiredReason(value)).toBe(expected)
   })
 
   it('does not trust arbitrary upstream messages with a plausible prefix', () => {

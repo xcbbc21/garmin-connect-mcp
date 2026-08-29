@@ -223,6 +223,29 @@ describe('GarminClient', () => {
     })
   })
 
+  it('turns a Cloudflare managed challenge into browser-recoverable authentication', async () => {
+    const sessionTokenFile = await createEmptySessionPath()
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      sessionTokenFile,
+    }, { allowUnconfigured: true })
+    latestGarmin().login.mockImplementation(async () => {
+      ;(latestGarmin().client as any).handleMFA(
+        '<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>',
+      )
+    })
+
+    await expect(client.connect()).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'challenge',
+    })
+    expect(client.getAuthenticationRequirement()).toEqual({
+      reason: 'challenge',
+      region: 'global',
+      revision: 1,
+    })
+  })
+
   it.each([
     [
       'the pinned SDK no-ticket error',

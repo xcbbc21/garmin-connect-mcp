@@ -14,7 +14,11 @@ import {
   type EmbeddedAuthStatusResult,
 } from './embedded-auth-controller'
 import { createEmbeddedAuthController } from './embedded-auth-runtime'
-import type { GarminAuthenticationRequiredReason } from './utils/errors'
+import {
+  isGarminAuthenticationRequiredReason,
+  type GarminAuthenticationRequirement,
+  type GarminAuthenticationRequiredReason,
+} from './auth-requirement'
 
 const RPC_CHANNEL = '/garmin-auth'
 const RPC_EFFECT_LABEL = 'garmin-connect: embedded auth rpc'
@@ -52,11 +56,8 @@ export interface EmbeddedAuthAuthenticatedAccount {
   region: GarminRegion
 }
 
-export interface EmbeddedAuthAuthenticationRequirement {
-  reason: GarminAuthenticationRequiredReason
-  region: GarminRegion
-  revision: number
-}
+export type EmbeddedAuthAuthenticationRequirement =
+  GarminAuthenticationRequirement
 
 export type EmbeddedAuthAuthenticatedAccountProvider = () =>
   | EmbeddedAuthAuthenticatedAccount
@@ -310,7 +311,7 @@ function exactAuthenticationRequirement(
     }
     const { reason, region, revision } = value as Record<string, unknown>
     if (
-      !isAuthenticationRequiredReason(reason)
+      !isGarminAuthenticationRequiredReason(reason)
       || (region !== 'cn' && region !== 'global')
       || !Number.isSafeInteger(revision)
       || (revision as number) < 1
@@ -321,13 +322,4 @@ function exactAuthenticationRequirement(
   } catch {
     return undefined
   }
-}
-
-function isAuthenticationRequiredReason(
-  value: unknown,
-): value is GarminAuthenticationRequiredReason {
-  return value === 'missing'
-    || value === 'expired'
-    || value === 'rejected'
-    || value === 'challenge'
 }

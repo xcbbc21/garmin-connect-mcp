@@ -244,6 +244,34 @@ describe('DSH embedded Garmin authentication RPC', () => {
     expect(JSON.stringify(response)).not.toContain(secret)
   })
 
+  it('does not reflect an internal browser challenge kind through the RPC', async () => {
+    const subject = fixture()
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      {
+        createController: subject.factory,
+        getAuthenticatedAccount: jest.fn().mockReturnValue(undefined),
+        getAuthenticationRequirement: jest.fn().mockReturnValue({
+          reason: 'challenge',
+          region: 'global',
+          revision: 1,
+          challengeKind: 'mfa',
+        }),
+      },
+    )
+    const handler = subject.handle.mock.calls[0][1]
+
+    await expect(handler(
+      'account',
+      {},
+      new AbortController().signal,
+    )).resolves.toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+  })
+
   it('collapses unsafe account providers without exposing their values', async () => {
     const subject = fixture()
     const secret = 'ST-secret'

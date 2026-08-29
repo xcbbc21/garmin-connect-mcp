@@ -1,3 +1,5 @@
+import type { GarminBrowserChallengeKind } from './auth-requirement'
+
 const ISSUED_TICKET_PATTERN = /\bticket=(ST-[^"'\s<&]+)/i
 const MFA_METHOD_PATTERN =
   /(?:var|let|const)\s+mfaMethod\s*=\s*["']\s*([^"'\s][^"']*)["']\s*;?/i
@@ -12,9 +14,13 @@ const ACTIVE_BROWSER_VERIFICATION_PATTERNS = [
   /(?:^|\.)hcaptcha\.com\/1\/api\.js/i,
   /\bclass\s*=\s*["'][^"']*\bcf-turnstile\b[^"']*["']/i,
   /challenges\.cloudflare\.com\/turnstile\//i,
+  // Managed challenges emit these concrete markers. A generic Cloudflare
+  // branded page is not sufficient evidence to start browser recovery.
+  /(?:["']|=)\/cdn-cgi\/challenge-platform(?:\/|[?#])/i,
+  /\b(?:cf-chl-[a-z0-9_-]+|_cf_chl_[a-z0-9_-]+)\b/i,
 ] as const
 
-export type GarminBrowserChallenge = 'mfa' | 'verification'
+export type GarminBrowserChallenge = GarminBrowserChallengeKind
 
 /**
  * Recognize only positive browser-challenge evidence from Garmin's sign-in
