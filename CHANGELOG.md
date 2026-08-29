@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
 - When no session path is configured, the local Web flow derives one from `GARMIN_ACCOUNT`; after a confirmed write, the running Garmin client forgets any earlier rejected session and can load the new file on its next tool call without a restart.
 - Added `garmin-connect-auth serve --account <alias> --region <global|cn> --open`, which reuses the shared loopback bridge in the system default browser without Playwright or a separate Chrome profile.
 - Standalone MCP now supports URL elicitation for typed missing, expired, or rejected Garmin credentials. Concurrent requests share one local flow; completion is notified to the client, which must explicitly retry the original tool.
+- The local dsh Web client now opens the configured region's browser flow once when the Host reports a new typed missing/expired/rejected session or a positively identified MFA/CAPTCHA challenge. Dismissing one revision does not create a reopen loop.
+- Terminal `garmin-connect-auth login` now continues in the shared system-browser flow when the password is left blank or Garmin returns explicit MFA/CAPTCHA page evidence.
 
 ### Security
 - In the local Web bridge, email, password, MFA code, and CAPTCHA input stay inside Garmin's iframe. On the browser side, the short-lived ticket reaches only the isolated loopback bridge and is immediately passed to the Host exchange; the outer dsh page, model context, and AI-callable tool results receive neither the ticket nor DI tokens or form credentials.
@@ -17,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Before saving a browser-authenticated session under the configured email, the bridge now explicitly asks the user to confirm that the sanitized Garmin profile corresponds to that email.
 - System-browser launching validates the exact random loopback bridge URL and uses shell-free platform launchers; Windows resolves a strictly validated absolute System32 `rundll32.exe` instead of permitting current-directory binary lookup. Passwords, MFA codes, tickets, and tokens are never accepted as CLI arguments or written to MCP tool results.
 - MCP authentication never auto-replays the interrupted tool, so workout/FIT writes cannot be duplicated by authentication completion. Account/region mismatch, unsafe session permissions, transient network failures, persistence failures, and unknown write outcomes do not get misclassified as MFA prompts.
+- Password authentication triggers browser recovery only from positive Garmin MFA/CAPTCHA markup. The pinned SDK's ambiguous no-ticket text, a password HTTP 401, generic sign-in HTML, network failures, and MFA-looking titles do not open a browser automatically.
 - `serve` requires both `--account` and `--region` instead of inferring either from the environment. MCP fallback guidance preserves an explicitly configured session destination without echoing that local path into model context.
 - POSIX session destinations are now fully prepared before browser authentication: safe links are canonicalized, ancestor ownership/write access and final effective-UID owner-only permissions are checked, missing components are created one at a time as `0700`, and the canonical parent/file state is revalidated around the no-follow atomic write.
 - POSIX session reads now canonicalize a safe parent alias and verify the entire non-writable ancestor chain, private final parent, final file owner/mode/link count, and descriptor/path identity before consuming credentials. On Darwin, granting extended ACL entries are rejected on every checked directory and file even when POSIX mode bits appear private.
@@ -33,16 +36,16 @@ All notable changes to this project will be documented in this file.
 - Browser, canary, and `serve` CLI operations now get one bounded 35-second graceful cleanup window after the first termination signal; a second signal requests an immediate conventional signal exit.
 - The system-browser launcher now detects immediate non-zero exits, MCP completion notifications have a bounded wait, and closing a flow already saving credentials drains the irrevocable commit before reporting its real result (or an explicit unknown outcome). The bridge hides cancellation after that commit point.
 - Web disposal now waits for the shared flow's irrevocable save before closing its listener. CLI/MCP broker and controller drains start together rather than stacking timeouts, and MCP stdin EOF plus `SIGINT`/`SIGTERM`/`SIGHUP` run one bounded server/auth cleanup while keeping signal handlers installed through the commit window.
-- A legacy configured password still works for non-MFA accounts; the pinned SDK's exact MFA/ticket failure is now converted to typed browser-recoverable authentication so dsh/MCP can surface the loopback flow.
+- A legacy configured password still works for non-MFA accounts; explicit MFA/CAPTCHA page evidence is converted to typed browser-recoverable authentication, while ambiguous no-ticket/password failures remain ordinary actionable errors.
 
 ### Changed
 - The local Web, `serve`, and MCP browser-auth flows now allow 10 minutes for password, CAPTCHA, and MFA completion before expiring.
 - The local dsh Web UI now presents separate China and International Garmin login buttons, validates the selected region against `GARMIN_REGION`, and uses a responsive, security-focused dialog and bridge layout.
 - Once the Host has verified an account identity, the matching region button shows the configured account email as its signed-in subtitle; identity-unverified legacy OAuth tokens keep the neutral domain subtitle.
-- The signed-in subtitle refreshes every 15 seconds and when the page regains focus, so later Host-side credential rejection and lazy authentication are reflected without a reload.
+- The signed-in subtitle refreshes every 15 seconds and when the page regains focus; while unauthenticated, a one-second coarse-state poll can surface one new browser-auth requirement without a reload.
 - Standalone MCP no longer requires password/token material at process startup. With `GARMIN_USERNAME`, `GARMIN_REGION`, and `GARMIN_ACCOUNT`, it derives the same owner-only account session path used by local Web and CLI authentication.
 - MCP clients without URL-elicitation capability receive an actionable `garmin-connect-auth serve` fallback instead of starting a listener they cannot surface. One MCP process still owns one account; configure named `garmin-cn` and `garmin-global` processes when both regions are needed.
-- Malformed, obsolete, account-mismatched, or otherwise unsafe local session files remain configuration errors and no longer trigger browser authentication; only missing, expired, or Garmin-rejected credentials do.
+- Malformed, obsolete, account-mismatched, or otherwise unsafe local session files remain configuration errors and no longer trigger browser authentication; only missing, expired, Garmin-rejected credentials or positively identified browser challenges do.
 - CI now exercises exact Windows DACL behavior on `windows-latest` and real Darwin inherited/file ACL behavior on `macos-latest`, in addition to the Linux Node.js build/test matrix.
 
 ### Experimental — not release-supported

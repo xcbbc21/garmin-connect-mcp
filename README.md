@@ -237,6 +237,15 @@ this state, and the status endpoint never returns a ticket or token. The local
 page refreshes this state every 15 seconds and whenever the window regains focus,
 so later credential rejection or a successful lazy login updates the subtitle.
 
+When the Host reports a missing, expired, or rejected session, or password
+login returns positive MFA/CAPTCHA page evidence, the local page automatically
+opens the configured region's auth dialog once. Closing it does not reopen the
+same requirement revision; only a new state can trigger another automatic open.
+The SDK's ambiguous no-ticket text, a password HTTP 401, generic sign-in HTML,
+network errors, and MFA-looking titles do not trigger browser authentication.
+While unauthenticated, the page polls this coarse data-free state once per
+second; after login it returns to the 15-second account refresh.
+
 Configure `GARMIN_USERNAME` and the correct `GARMIN_REGION` before opening the
 dialog. `GARMIN_SESSION_TOKEN_FILE` is optional for this Web flow: when omitted,
 the Host uses `GARMIN_ACCOUNT` (default `default`) and writes
@@ -315,9 +324,12 @@ npm run auth:canary -- --region global
 npm run auth:canary -- --region cn
 ```
 
-The legacy hidden terminal login without `--browser` remains for compatibility,
-but it cannot reliably complete browser-only challenges such as CAPTCHA. These
-diagnostics do not change the preview status of MFA bootstrap.
+The direct terminal-password attempt without `--browser` remains for
+compatibility. Leaving its password prompt blank opens the shared system-browser
+flow; positive MFA/CAPTCHA page evidence switches to that same flow without
+asking for a terminal MFA code. Ambiguous password, network, and no-ticket
+failures do not auto-open a browser. These diagnostics do not change the preview
+status of MFA bootstrap.
 
 DI v2 files bind the normalized username, region, and probed Garmin profile via
 one-way hashes, including `profileIdHash`; they do not duplicate the plaintext
@@ -575,7 +587,8 @@ export GARMIN_FIT_DOWNLOAD_DIR='/absolute/path/to/garmin-fit-parent'
 ```
 
 Do not put a password or MFA code in these variables. If a tool encounters
-a missing, expired, or rejected session and the client advertises MCP URL
+a missing, expired, or rejected session, or an explicit MFA/CAPTCHA browser
+challenge, and the client advertises MCP URL
 elicitation, the tool call returns a random local `127.0.0.1` sign-in URL. Open
 that URL, finish Garmin login/MFA and profile confirmation in the browser, wait
 for the completion notification, then retry the original request. The server
@@ -584,9 +597,11 @@ flow. Clients without URL elicitation receive the equivalent trusted-terminal
 fallback command:
 
 If a legacy `GARMIN_PASSWORD` is still present, successful password-only login
-continues to work. When the pinned SDK instead reports its MFA/ticket challenge,
-the failure is converted to the same browser-recoverable MCP authentication
-state; the password and upstream error text never enter the tool result.
+continues to work. Only positive MFA input/form or active CAPTCHA markup is
+converted to the same browser-recoverable MCP authentication state. The SDK's
+ambiguous no-ticket text, a wrong password, HTTP 401, and network failures are
+not treated as MFA; the password and upstream error text never enter the tool
+result.
 
 ```bash
 garmin-connect-auth serve --account personal --region global --open

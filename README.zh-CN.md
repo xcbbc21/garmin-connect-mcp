@@ -221,6 +221,12 @@ ticket/service 配对，并在请求 DI 前拒绝其他 loopback 主机、端口
 本机网页每 15 秒及重新聚焦时刷新一次该状态，因此 Host 后续拒绝凭据或首次工具调用完成
 认证后，副标题会自动更新。
 
+如果 Host 检测到 session／密码缺失、session 过期或被拒绝，或者密码登录返回了明确的
+MFA／CAPTCHA 页面标记，本机网页会自动打开一次与配置区域匹配的认证对话框。用户关闭后，
+同一状态版本不会反复弹出；新的认证状态才会再次触发。SDK 含糊的 no-ticket 文本、密码
+HTTP 401、普通登录页、网络错误或仅标题像 MFA 的页面都不会自动打开浏览器。未登录时网页
+每秒读取一次这种不含上游文本的粗粒度状态，登录后恢复为 15 秒刷新。
+
 打开对话框前必须配置 `GARMIN_USERNAME` 和正确的 `GARMIN_REGION`。该 Web 流程可不设置
 `GARMIN_SESSION_TOKEN_FILE`：Host 会使用 `GARMIN_ACCOUNT`（默认 `default`），在通常的
 POSIX 配置路径写入
@@ -286,8 +292,10 @@ npm run auth:canary -- --region global
 npm run auth:canary -- --region cn
 ```
 
-为兼容旧用法，不带 `--browser` 的隐藏终端输入流程仍保留，但无法可靠完成 CAPTCHA 等
-浏览器挑战。这些诊断入口不会改变 MFA 初始化的预览状态。
+为兼容旧用法，不带 `--browser` 的终端密码尝试仍保留。密码提示处直接回车会打开共享的
+系统浏览器流程；检测到明确的 MFA／CAPTCHA 页面标记时也会转到同一流程，不再在终端询问
+MFA 验证码。含糊的密码、网络或 no-ticket 错误不会自动打开浏览器。这些诊断入口不会改变
+MFA 初始化的预览状态。
 
 DI v2 文件会通过不可逆摘要绑定规范化 username、region，以及刚探测到的 Garmin
 profile（包括 `profileIdHash`）；绑定信息不会重复保存明文邮箱。运行时会在发布刷新后的
@@ -502,14 +510,16 @@ export GARMIN_FIT_DOWNLOAD_DIR='/absolute/path/to/garmin-fit-parent'
 # export GARMIN_SESSION_TOKEN_FILE='/absolute/path/to/personal-cn.session.json'
 ```
 
-不要在这些环境变量中放密码或 MFA 验证码。工具遇到 session 缺失、过期或被拒绝，
+不要在这些环境变量中放密码或 MFA 验证码。工具遇到 session 缺失、过期、被拒绝或明确的
+MFA／CAPTCHA 浏览器挑战，
 且客户端声明支持 MCP URL elicitation 时，本次工具调用会返回一个随机的本机
 `127.0.0.1` 登录链接。打开链接，在浏览器中完成 Garmin 登录/MFA 与 profile 确认，
 等待完成通知后，再重试原请求。服务端不会自动重放，因此不会借认证流程重复执行写入。
 不支持 URL elicitation 的客户端会收到等价的可信终端回退命令：
 
-若环境中仍保留旧的 `GARMIN_PASSWORD`，无需 MFA 的密码登录仍可继续工作；如果锁定版本
-的 SDK 返回 MFA/ticket challenge，则会把它转换成同一个可由浏览器恢复的 MCP 认证状态，
+若环境中仍保留旧的 `GARMIN_PASSWORD`，无需 MFA 的密码登录仍可继续工作。只有 Garmin
+响应中出现明确的 MFA 输入／表单或活动 CAPTCHA 标记，才会转换成同一个可由浏览器恢复的
+MCP 认证状态；SDK 含糊的 no-ticket 文本、错误密码、HTTP 401 与网络错误不会被当作 MFA。
 密码和上游错误文本都不会进入工具结果。
 
 ```bash
