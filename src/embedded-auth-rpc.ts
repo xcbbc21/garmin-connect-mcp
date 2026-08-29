@@ -14,6 +14,7 @@ import {
   type EmbeddedAuthStatusResult,
 } from './embedded-auth-controller'
 import { createEmbeddedAuthController } from './embedded-auth-runtime'
+import type { GarminAuthenticationRequiredReason } from './utils/errors'
 
 const RPC_CHANNEL = '/garmin-auth'
 const RPC_EFFECT_LABEL = 'garmin-connect: embedded auth rpc'
@@ -27,6 +28,13 @@ type EmbeddedAuthRpcResult =
   | EmbeddedAuthCancelResult
 
 export type EmbeddedAuthAccountResult = {
+  success: true
+  authenticated: false
+  authenticationRequired: true
+  reason: GarminAuthenticationRequiredReason
+  region: GarminRegion
+  revision: number
+} | {
   success: true
   authenticated: false
 } | {
@@ -44,10 +52,21 @@ export interface EmbeddedAuthAuthenticatedAccount {
   region: GarminRegion
 }
 
+export interface EmbeddedAuthAuthenticationRequirement {
+  reason: GarminAuthenticationRequiredReason
+  region: GarminRegion
+  revision: number
+}
+
 export type EmbeddedAuthAuthenticatedAccountProvider = () =>
   | EmbeddedAuthAuthenticatedAccount
   | undefined
   | Promise<EmbeddedAuthAuthenticatedAccount | undefined>
+
+export type EmbeddedAuthAuthenticationRequirementProvider = () =>
+  | EmbeddedAuthAuthenticationRequirement
+  | undefined
+  | Promise<EmbeddedAuthAuthenticationRequirement | undefined>
 
 export interface EmbeddedAuthRpcController {
   begin(
@@ -66,6 +85,7 @@ export type EmbeddedAuthRpcControllerFactory = (
 export interface EmbeddedAuthRpcRegistrationOptions {
   createController?: EmbeddedAuthRpcControllerFactory
   getAuthenticatedAccount?: EmbeddedAuthAuthenticatedAccountProvider
+  getAuthenticationRequirement?: EmbeddedAuthAuthenticationRequirementProvider
   replaceSession?: (writeSession: () => Promise<void>) => Promise<void>
 }
 
@@ -113,7 +133,11 @@ export function registerEmbeddedAuthRpc(
     const connection = connectionCtx.connection as HostConnectionHandle
     const disposeRpc = connection.rpc.handle(
       RPC_CHANNEL,
-      createRpcHandler(controller, registration.getAuthenticatedAccount),
+      createRpcHandler(
+        controller,
+        registration.getAuthenticatedAccount,
+        registration.getAuthenticationRequirement,
+      ),
       { authority: 'loopback' },
     )
 
@@ -133,6 +157,7 @@ export function registerEmbeddedAuthRpc(
 function createRpcHandler(
   controller: EmbeddedAuthRpcController,
   getAuthenticatedAccount?: EmbeddedAuthAuthenticatedAccountProvider,
+  getAuthenticationRequirement?: EmbeddedAuthAuthenticationRequirementProvider,
 ): ConnectionRpcHandler {
   return async (endpoint, payload, signal) => {
     const unavailable = (): { ok: true; value: EmbeddedAuthRpcResult } => ({
@@ -146,6 +171,20 @@ function createRpcHandler(
         if (!isExactEmptyObject(payload)) return unavailable()
         const rawAccount = await getAuthenticatedAccount?.()
         if (rawAccount === undefined) {
+          const rawRequirement = await getAuthenticationRequirement?.()
+          if (rawRequirement !== undefined) {
+            const requirement = exactAuthenticationRequirement(rawRequirement)
+            if (!requirement) return unavailable()
+            return {
+              ok: true,
+              value: {
+                success: true,
+                authenticated: false,
+                authenticationRequired: true,
+                ...requirement,
+              },
+            }
+          }
           return {
             ok: true,
             value: { success: true, authenticated: false },
@@ -249,4 +288,46 @@ function exactAuthenticatedAccount(
   } catch {
     return undefined
   }
+}
+
+function exactAuthenticationRequirement(
+  value: unknown,
+): EmbeddedAuthAuthenticationRequirement | undefined {
+  try {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return undefined
+    }
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return undefined
+    const keys = Object.keys(value).sort()
+    if (
+      keys.length !== 3
+      || keys[0] !== 'reason'
+      || keys[1] !== 'region'
+      || keys[2] !== 'revision'
+    ) {
+      return undefined
+    }
+    const { reason, region, revision } = value as Record<string, unknown>
+    if (
+      !isAuthenticationRequiredReason(reason)
+      || (region !== 'cn' && region !== 'global')
+      || !Number.isSafeInteger(revision)
+      || (revision as number) < 1
+    ) {
+      return undefined
+    }
+    return { reason, region, revision: revision as number }
+  } catch {
+    return undefined
+  }
+}
+
+function isAuthenticationRequiredReason(
+  value: unknown,
+): value is GarminAuthenticationRequiredReason {
+  return value === 'missing'
+    || value === 'expired'
+    || value === 'rejected'
+    || value === 'challenge'
 }

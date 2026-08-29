@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BrowserCanaryControlError } from '../src/browser-auth-canary'
+import { GarminAuthenticationRequiredError } from '../src/utils/errors'
 import {
   authCliExitCode,
   defaultAccountSessionPath,
@@ -137,7 +138,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(result.stdout).toContain('--account <alias>')
     expect(result.stdout).toContain('--region <global|cn>')
     expect(result.stdout).toContain('--output <path>')
-    expect(result.stdout).toContain('Passwords and MFA codes are requested interactively')
+    expect(result.stdout).toContain('requires MFA or CAPTCHA, login continues')
     expect(result.stderr).toBe('')
   })
 
@@ -384,6 +385,89 @@ describe('Garmin interactive auth CLI', () => {
     expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({
       password: 'TTY_PASSWORD',
     }))
+  })
+
+  it('switches an explicit password MFA challenge to the shared browser flow', async () => {
+    const answers = [
+      'runner@example.test',
+      'PASSWORD_MARKER',
+    ]
+    const prompt = jest.fn(async () => answers.shift() ?? '')
+    const write = jest.fn()
+    const io: AuthCliIO = { prompt, write }
+    const authenticate = jest.fn().mockRejectedValue(
+      new GarminAuthenticationRequiredError('challenge'),
+    )
+    const writeSession = jest.fn().mockResolvedValue(undefined)
+    const browserAuthenticate = jest.fn().mockResolvedValue({
+      success: true,
+      account: 'personal',
+      region: 'cn',
+      sessionTokenFile: '/safe/personal.json',
+    })
+
+    await expect(runAuthSetup({
+      argv: [
+        'login',
+        '--account', 'personal',
+        '--region', 'cn',
+        '--output', '/safe/personal.json',
+      ],
+      env: {},
+      io,
+      dependencies: { authenticate, writeSession },
+      browserDependencies: serveDependencies(browserAuthenticate),
+    })).resolves.toEqual({
+      account: 'personal',
+      region: 'cn',
+      sessionTokenFile: path.resolve('/safe/personal.json'),
+      usedMfa: true,
+    })
+
+    expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({
+      browserOnChallenge: true,
+      password: 'PASSWORD_MARKER',
+    }))
+    expect(browserAuthenticate).toHaveBeenCalledWith(expect.objectContaining({
+      username: 'runner@example.test',
+      region: 'cn',
+      sessionTokenFile: path.resolve('/safe/personal.json'),
+    }))
+    expect(browserAuthenticate.mock.calls[0][0]).not.toHaveProperty('password')
+    expect(writeSession).not.toHaveBeenCalled()
+    expect(prompt).toHaveBeenCalledTimes(2)
+    expect(write.mock.calls.flat().join('')).not.toContain('PASSWORD_MARKER')
+  })
+
+  it('uses the shared browser flow when no terminal password is supplied', async () => {
+    const answers = ['runner@example.test', '']
+    const prompt = jest.fn(async () => answers.shift() ?? '')
+    const io: AuthCliIO = { prompt, write: jest.fn() }
+    const authenticate = jest.fn()
+    const writeSession = jest.fn()
+    const browserAuthenticate = jest.fn().mockResolvedValue({
+      success: true,
+      account: 'default',
+      region: 'global',
+      sessionTokenFile: '/safe/default.json',
+    })
+
+    await expect(runAuthSetup({
+      argv: ['login', '--output', '/safe/default.json'],
+      env: {},
+      io,
+      dependencies: { authenticate, writeSession },
+      browserDependencies: serveDependencies(browserAuthenticate),
+    })).resolves.toEqual({
+      account: 'default',
+      region: 'global',
+      sessionTokenFile: path.resolve('/safe/default.json'),
+      usedMfa: false,
+    })
+
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(writeSession).not.toHaveBeenCalled()
+    expect(browserAuthenticate).toHaveBeenCalledTimes(1)
   })
 
   it.each([

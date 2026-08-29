@@ -4,8 +4,12 @@ import { GarminConnect } from 'garmin-connect'
 import { CookieJar } from 'tough-cookie'
 import type { GarminRegion } from './config'
 import { hardenGarminHttpClient } from './client'
+import { detectGarminBrowserChallenge } from './garmin-auth-challenge'
 import type { GarminSessionTokens } from './session-store'
-import { PublicToolError } from './utils/errors'
+import {
+  GarminAuthenticationRequiredError,
+  PublicToolError,
+} from './utils/errors'
 
 const CSRF_PATTERN = /name=["']_csrf["']\s+value=["'](.+?)["']/i
 const TICKET_PATTERN = /(?:[?&]|&amp;)ticket=(ST-[^"&\s<]+)/i
@@ -36,6 +40,7 @@ export interface GarminAuthOptions {
   password: string
   region: GarminRegion
   promptMfa(context: MfaPromptContext): Promise<string>
+  browserOnChallenge?: boolean
   requestTimeoutMs?: number
 }
 
@@ -164,6 +169,12 @@ export async function authenticateGarminSession(
     let usedMfa = false
 
     if (!ticket) {
+      if (
+        options.browserOnChallenge
+        && detectGarminBrowserChallenge(responseHtml)
+      ) {
+        throw new GarminAuthenticationRequiredError('challenge')
+      }
       throwIfBrowserVerification(responseHtml)
 
       const mfaVariables = parseMfaVariables(responseHtml)

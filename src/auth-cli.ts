@@ -37,7 +37,11 @@ import {
   writeSessionTokenFile,
   type GarminSessionFile,
 } from './session-store'
-import { PublicToolError, publicErrorMessage } from './utils/errors'
+import {
+  GarminAuthenticationRequiredError,
+  PublicToolError,
+  publicErrorMessage,
+} from './utils/errors'
 
 export interface AuthCliIO {
   prompt(label: string, secret: boolean, signal?: AbortSignal): Promise<string>
@@ -54,6 +58,7 @@ export interface AuthSetupInput {
   env: Record<string, string | undefined>
   io: AuthCliIO
   dependencies?: AuthCliDependencies
+  browserDependencies?: AuthServeCliDependencies
 }
 
 export interface AuthSetupResult {
@@ -188,8 +193,9 @@ General options:
   -h, --help              Show this help
   -V, --version           Show the installed version
 
-Passwords and MFA codes are requested interactively with terminal echo disabled.
-Never pass either secret as a command-line option, environment variable, or model input.
+Passwords are requested interactively with terminal echo disabled. If Garmin
+requires MFA or CAPTCHA, login continues in Garmin's browser page. Never pass
+passwords or verification codes as command-line options or model input.
 
 The serve command keeps password, verification code, CAPTCHA, and MFA inside
 Garmin's page. It writes only the resulting long-lived session to the selected
@@ -224,13 +230,20 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
   // TTY. It deliberately ignores GARMIN_PASSWORD so MFA setup cannot silently
   // turn a long-lived environment secret into login input.
   let password = await input.io.prompt('Garmin password: ', true)
-  if (!password) throw new PublicToolError('Garmin password is required')
 
   try {
+    if (!password) {
+      return continueAuthSetupInBrowser(
+        input,
+        { account, region, sessionTokenFile, username },
+        false,
+      )
+    }
     const authenticated = await dependencies.authenticate({
       username,
       password,
       region,
+      browserOnChallenge: true,
       promptMfa: async ({ method }) => input.io.prompt(
         `Garmin MFA code (${safeMfaMethod(method)}): `,
         true,
@@ -256,10 +269,56 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
       sessionTokenFile,
       usedMfa: authenticated.usedMfa,
     }
+  } catch (error) {
+    if (
+      !(error instanceof GarminAuthenticationRequiredError)
+      || error.reason !== 'challenge'
+    ) {
+      throw error
+    }
+    return continueAuthSetupInBrowser(
+      input,
+      { account, region, sessionTokenFile, username },
+      true,
+    )
   } finally {
     // JavaScript strings cannot be reliably zeroized, but dropping the last
     // local reference promptly keeps the password out of subsequent logic.
     password = ''
+  }
+}
+
+async function continueAuthSetupInBrowser(
+  input: AuthSetupInput,
+  details: {
+    account: string
+    region: GarminRegion
+    sessionTokenFile: string
+    username: string
+  },
+  usedMfa: boolean,
+): Promise<AuthSetupResult> {
+  await runAuthServe({
+    argv: [
+      'serve',
+      '--open',
+      '--account', details.account,
+      '--region', details.region,
+      '--output', details.sessionTokenFile,
+    ],
+    env: {
+      ...input.env,
+      GARMIN_USERNAME: details.username,
+      GARMIN_PASSWORD: undefined,
+    },
+    io: input.io,
+    dependencies: input.browserDependencies,
+  })
+  return {
+    account: details.account,
+    region: details.region,
+    sessionTokenFile: details.sessionTokenFile,
+    usedMfa,
   }
 }
 

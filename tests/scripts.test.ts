@@ -173,7 +173,7 @@ describe('maintenance scripts', () => {
       {},
       expect.any(AbortSignal),
     )
-    expect(setIntervalMock).toHaveBeenCalledWith(expect.any(Function), 15_000)
+    expect(setIntervalMock).toHaveBeenCalledWith(expect.any(Function), 1_000)
 
     rpcCall.mockClear()
     intervalCallbacks[0]()

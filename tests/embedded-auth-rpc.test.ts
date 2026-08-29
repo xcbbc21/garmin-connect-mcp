@@ -181,6 +181,69 @@ describe('DSH embedded Garmin authentication RPC', () => {
     })
   })
 
+  it('returns only coarse browser-recovery state for an unauthenticated Host', async () => {
+    const subject = fixture()
+    const getAuthenticationRequirement = jest.fn().mockReturnValue({
+      reason: 'challenge',
+      region: 'cn',
+      revision: 3,
+    })
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      {
+        createController: subject.factory,
+        getAuthenticatedAccount: jest.fn().mockReturnValue(undefined),
+        getAuthenticationRequirement,
+      },
+    )
+    const handler = subject.handle.mock.calls[0][1]
+
+    await expect(handler(
+      'account',
+      {},
+      new AbortController().signal,
+    )).resolves.toEqual({
+      ok: true,
+      value: {
+        success: true,
+        authenticated: false,
+        authenticationRequired: true,
+        reason: 'challenge',
+        region: 'cn',
+        revision: 3,
+      },
+    })
+    expect(getAuthenticationRequirement).toHaveBeenCalledTimes(1)
+  })
+
+  it('collapses malformed browser-recovery state without reflecting it', async () => {
+    const subject = fixture()
+    const secret = 'ST-secret /private/session.json'
+    registerEmbeddedAuthRpc(
+      subject.ctx as unknown as Context,
+      {} as never,
+      {
+        createController: subject.factory,
+        getAuthenticatedAccount: jest.fn().mockReturnValue(undefined),
+        getAuthenticationRequirement: jest.fn().mockReturnValue({
+          reason: 'challenge',
+          region: 'global',
+          revision: 1,
+          token: secret,
+        }),
+      },
+    )
+    const handler = subject.handle.mock.calls[0][1]
+    const response = await handler('account', {}, new AbortController().signal)
+
+    expect(response).toEqual({
+      ok: true,
+      value: { success: false, code: 'unavailable' },
+    })
+    expect(JSON.stringify(response)).not.toContain(secret)
+  })
+
   it('collapses unsafe account providers without exposing their values', async () => {
     const subject = fixture()
     const secret = 'ST-secret'

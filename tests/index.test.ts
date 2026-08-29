@@ -9,9 +9,15 @@ const mockGetAuthenticatedAccount = jest.fn().mockReturnValue({
   email: 'runner@example.test',
   region: 'global',
 })
+const mockGetAuthenticationRequirement = jest.fn().mockReturnValue({
+  reason: 'challenge',
+  region: 'global',
+  revision: 2,
+})
 const mockClient = {
   connect: mockConnect,
   getAuthenticatedAccount: mockGetAuthenticatedAccount,
+  getAuthenticationRequirement: mockGetAuthenticationRequirement,
   replacePersistedSession: mockReplacePersistedSession,
 }
 const mockRegisterTools = jest.fn()
@@ -72,6 +78,7 @@ describe('plugin activation', () => {
       expect.anything(),
       {
         getAuthenticatedAccount: expect.any(Function),
+        getAuthenticationRequirement: expect.any(Function),
         replaceSession: expect.any(Function),
       },
     )
@@ -82,6 +89,12 @@ describe('plugin activation', () => {
       region: 'global',
     })
     expect(mockGetAuthenticatedAccount).toHaveBeenCalledTimes(1)
+    await expect(options.getAuthenticationRequirement()).resolves.toEqual({
+      reason: 'challenge',
+      region: 'global',
+      revision: 2,
+    })
+    expect(mockGetAuthenticationRequirement).toHaveBeenCalledTimes(1)
     const writer = jest.fn().mockResolvedValue(undefined)
     await options.replaceSession(writer)
     expect(mockReplacePersistedSession).toHaveBeenCalledWith(writer)

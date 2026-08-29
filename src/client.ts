@@ -9,6 +9,7 @@ import {
   replaceGarminDiSessionPath,
 } from './di-session'
 import { MAX_ZIP_BYTES } from './fit-export'
+import { detectGarminBrowserChallenge } from './garmin-auth-challenge'
 import {
   GarminDiSessionFileError,
   GarminSessionTokenFileInvalidError,
@@ -24,6 +25,7 @@ import { parseLocalDate } from './utils/date'
 import {
   GARMIN_BROWSER_AUTH_COMMAND,
   GarminAuthenticationRequiredError,
+  type GarminAuthenticationRequiredReason,
   PublicToolError,
 } from './utils/errors'
 
@@ -42,8 +44,8 @@ const DI_SESSION_EXPIRED_MESSAGE =
   `Garmin DI session has expired; run ${GARMIN_BROWSER_AUTH_COMMAND}`
 const SESSION_TOKEN_REJECTED_MESSAGE =
   `Garmin session token was rejected; run ${GARMIN_BROWSER_AUTH_COMMAND}`
-const LEGACY_SDK_BROWSER_AUTH_REQUIRED_MESSAGE =
-  'login failed (Ticket not found or MFA), please check username and password'
+const PASSWORD_SIGN_IN_FAILED_MESSAGE =
+  'Garmin password sign-in did not complete; check email, region, and password'
 const MISSING_SESSION_FILE_FINGERPRINT = 'missing'
 const UNREADABLE_SESSION_FILE_FINGERPRINT = 'unreadable'
 
@@ -55,6 +57,12 @@ export interface GarminClientOptions {
 export interface GarminAuthenticatedAccount {
   email: string
   region: Config['region']
+}
+
+export interface GarminAuthenticationRequirement {
+  reason: GarminAuthenticationRequiredReason
+  region: Config['region']
+  revision: number
 }
 
 type SessionRestoreResult = false | 'verified' | 'unverified'
@@ -86,6 +94,8 @@ export class GarminClient {
   private sessionReplacementGate: Promise<void> | null = null
   private authEpoch = 0
   private authenticatedAccount?: GarminAuthenticatedAccount
+  private authenticationRequirement?: GarminAuthenticationRequirement
+  private authenticationRequirementRevision = 0
 
   constructor(
     ctx: Context,
@@ -148,6 +158,13 @@ export class GarminClient {
     return { ...this.authenticatedAccount }
   }
 
+  /** Return only coarse browser-recovery state; never upstream error details. */
+  getAuthenticationRequirement(): GarminAuthenticationRequirement | undefined {
+    return this.authenticationRequirement
+      ? { ...this.authenticationRequirement }
+      : undefined
+  }
+
   private async login(): Promise<void> {
     try {
       let identityVerified = false
@@ -160,7 +177,7 @@ export class GarminClient {
         const restored = await this.restoreConfiguredSession()
         if (!restored) {
           this.log('warn', '[garmin] Configured session is unavailable; falling back to password login.')
-          await this.withRequestTimeout(() => this.gc.login())
+          await this.loginWithPassword()
           identityVerified = true
         } else {
           identityVerified = restored === 'verified'
@@ -172,7 +189,7 @@ export class GarminClient {
         )
       } else if (this.config.password?.trim()) {
         this.log('info', '[garmin] Logging in with username/password…')
-        await this.withRequestTimeout(() => this.gc.login())
+        await this.loginWithPassword()
         identityVerified = true
       } else if (this.sessionTokenRejected) {
         throw new GarminAuthenticationRequiredError(
@@ -183,24 +200,33 @@ export class GarminClient {
         throw new GarminAuthenticationRequiredError('missing')
       }
       this.connected = true
+      this.clearAuthenticationRequirement()
       if (identityVerified) this.markAuthenticatedAccount()
       this.log('info', '[garmin] ✅ Connected successfully.')
     } catch (err) {
       this.connected = false
       const status = getHttpStatus(err)
-      const normalizedError = (
-        status === 401
-        || isLegacySdkBrowserAuthenticationRequired(err)
-      ) && !(err instanceof PublicToolError)
-        ? new GarminAuthenticationRequiredError('rejected')
-        : err
-      const reason = normalizedError instanceof PublicToolError
-        ? normalizedError.message
+      if (err instanceof GarminAuthenticationRequiredError) {
+        this.publishAuthenticationRequirement(err.reason)
+      } else {
+        this.clearAuthenticationRequirement()
+      }
+      const reason = err instanceof PublicToolError
+        ? err.message
         : status
           ? `Garmin connection failed (HTTP ${status})`
           : 'Garmin connection failed'
       this.log('error', `[garmin] ❌ ${reason}`)
-      throw normalizedError
+      throw err
+    }
+  }
+
+  private async loginWithPassword(): Promise<void> {
+    try {
+      await this.withRequestTimeout(() => this.gc.login())
+    } catch (error) {
+      if (error instanceof PublicToolError) throw error
+      throw new PublicToolError(PASSWORD_SIGN_IN_FAILED_MESSAGE)
     }
   }
 
@@ -419,6 +445,7 @@ export class GarminClient {
       releaseReplacement = resolveReplacement
     })
     this.sessionReplacementGate = replacementGate
+    this.clearAuthenticationRequirement()
 
     let committed = false
     let verifiedReplacement = false
@@ -462,7 +489,10 @@ export class GarminClient {
       upstream.oauth1Token = undefined
       upstream.oauth2Token = undefined
       if (committed) {
-        if (verifiedReplacement) this.markAuthenticatedAccount()
+        if (verifiedReplacement) {
+          this.markAuthenticatedAccount()
+          this.clearAuthenticationRequirement()
+        }
         else this.authenticatedAccount = undefined
       }
 
@@ -497,6 +527,9 @@ export class GarminClient {
         }
         return result
       } catch (err: any) {
+        if (err instanceof GarminAuthenticationRequiredError) {
+          this.publishAuthenticationRequirement(err.reason)
+        }
         if (attemptEpoch !== this.authEpoch) {
           if (i === retries) throw authenticationChangedError()
           await this.ensureConnected()
@@ -518,9 +551,11 @@ export class GarminClient {
           if (this.diSessionSelected) {
             if (status === 401) {
               this.rejectConfiguredSessionToken()
-              throw new GarminAuthenticationRequiredError(
-                'rejected',
-                DI_SESSION_REJECTED_MESSAGE,
+              throw this.trackAuthenticationRequirement(
+                new GarminAuthenticationRequiredError(
+                  'rejected',
+                  DI_SESSION_REJECTED_MESSAGE,
+                ),
               )
             }
             throw err
@@ -530,9 +565,11 @@ export class GarminClient {
             // accounts. Never carry health data across that identity boundary.
             this.rejectConfiguredSessionToken()
             if (!this.config.password?.trim()) {
-              throw new GarminAuthenticationRequiredError(
-                'rejected',
-                SESSION_TOKEN_REJECTED_MESSAGE,
+              throw this.trackAuthenticationRequirement(
+                new GarminAuthenticationRequiredError(
+                  'rejected',
+                  SESSION_TOKEN_REJECTED_MESSAGE,
+                ),
               )
             }
           }
@@ -612,6 +649,29 @@ export class GarminClient {
       getAuthEpoch: () => this.authEpoch,
       discardStaleRefresh: () => this.discardStaleRefresh(),
     })
+  }
+
+  private publishAuthenticationRequirement(
+    reason: GarminAuthenticationRequiredReason,
+  ): void {
+    if (this.authenticationRequirement?.reason === reason) return
+    this.authenticationRequirementRevision += 1
+    this.authenticationRequirement = {
+      reason,
+      region: this.config.region,
+      revision: this.authenticationRequirementRevision,
+    }
+  }
+
+  private clearAuthenticationRequirement(): void {
+    this.authenticationRequirement = undefined
+  }
+
+  private trackAuthenticationRequirement(
+    error: GarminAuthenticationRequiredError,
+  ): GarminAuthenticationRequiredError {
+    this.publishAuthenticationRequirement(error.reason)
+    return error
   }
 
   private discardStaleRefresh(): void {
@@ -893,6 +953,11 @@ export function hardenGarminHttpClient(
       throw new PublicToolError('Garmin account is locked; unlock it in Garmin Connect')
     }
   }
+  upstream.handleMFA = (html: unknown): void => {
+    if (detectGarminBrowserChallenge(html)) {
+      throw new GarminAuthenticationRequiredError('challenge')
+    }
+  }
 }
 
 async function refreshOauth2Quietly(upstream: any): Promise<void> {
@@ -929,11 +994,6 @@ function authenticationChangedError(): PublicToolError {
   return new PublicToolError(
     'Garmin authentication changed while the request was in flight; retry the request',
   )
-}
-
-function isLegacySdkBrowserAuthenticationRequired(error: unknown): boolean {
-  return isRecord(error)
-    && error.message === LEGACY_SDK_BROWSER_AUTH_REQUIRED_MESSAGE
 }
 
 async function readSessionFileSnapshot(path: string): Promise<SessionFileSnapshot> {

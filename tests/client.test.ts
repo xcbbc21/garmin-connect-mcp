@@ -183,25 +183,73 @@ describe('GarminClient', () => {
     await expect(operation).rejects.toThrow(
       'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
     )
+    expect(client.getAuthenticationRequirement()).toEqual({
+      reason: 'missing',
+      region: 'global',
+      revision: 1,
+    })
+
+    await expect(client.connect()).rejects.toMatchObject({ reason: 'missing' })
+    expect(client.getAuthenticationRequirement()).toEqual({
+      reason: 'missing',
+      region: 'global',
+      revision: 1,
+    })
   })
 
-  it('turns the pinned SDK MFA/ticket failure into browser-recoverable authentication', async () => {
+  it('turns explicit upstream MFA evidence into browser-recoverable authentication', async () => {
     const sessionTokenFile = await createEmptySessionPath()
     const client = new GarminClient(createContext(), {
       ...baseConfig,
       sessionTokenFile,
     }, { allowUnconfigured: true })
-    latestGarmin().login.mockRejectedValue(new Error(
-      'login failed (Ticket not found or MFA), please check username and password',
-    ))
+    latestGarmin().login.mockImplementation(async () => {
+      ;(latestGarmin().client as any).handleMFA(
+        '<form action="/sso/verifyMFA/loginEnterMfaCode"></form>',
+      )
+    })
 
     const operation = client.connect()
     await expect(operation).rejects.toMatchObject({
       name: 'GarminAuthenticationRequiredError',
-      reason: 'rejected',
+      reason: 'challenge',
     })
     await expect(operation).rejects.toThrow('garmin-connect-auth serve')
     expect(latestGarmin().login).toHaveBeenCalledTimes(1)
+    expect(client.getAuthenticationRequirement()).toEqual({
+      reason: 'challenge',
+      region: 'global',
+      revision: 1,
+    })
+  })
+
+  it.each([
+    [
+      'the pinned SDK no-ticket error',
+      new Error('login failed (Ticket not found or MFA), please check username and password'),
+    ],
+    [
+      'an HTTP 401 password response',
+      Object.assign(new Error('private upstream response'), { status: 401 }),
+    ],
+    ['a network error', new Error('private network detail')],
+  ])('does not infer browser authentication from %s', async (_label, failure) => {
+    const sessionTokenFile = await createEmptySessionPath()
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      sessionTokenFile,
+    }, { allowUnconfigured: true })
+    latestGarmin().login.mockRejectedValue(failure)
+
+    const operation = client.connect()
+    await expect(operation).rejects.toBeInstanceOf(PublicToolError)
+    await expect(operation).rejects.not.toBeInstanceOf(
+      GarminAuthenticationRequiredError,
+    )
+    await expect(operation).rejects.toThrow(
+      'Garmin password sign-in did not complete; check email, region, and password',
+    )
+    expect(client.getAuthenticationRequirement()).toBeUndefined()
   })
 
   it('publishes the configured account only after password authentication succeeds', async () => {
@@ -238,6 +286,7 @@ describe('GarminClient', () => {
       email: 'runner@example.test',
       region: 'global',
     })
+    expect(client.getAuthenticationRequirement()).toBeUndefined()
     await expect(client.connect()).resolves.toBeUndefined()
     expect(latestGarmin().getUserProfile).toHaveBeenCalledTimes(1)
   })
@@ -1172,7 +1221,9 @@ describe('GarminClient', () => {
       'Login failed for runner@example.test password=password-value Authorization: Bearer token-value',
     ))
 
-    await expect(client.connect()).rejects.toThrow('Login failed')
+    await expect(client.connect()).rejects.toThrow(
+      'Garmin password sign-in did not complete; check email, region, and password',
+    )
 
     const errorLogger = context.logger.error as unknown as jest.Mock
     const logged = errorLogger.mock.calls.flat().map(String).join(' ')

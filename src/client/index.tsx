@@ -8,9 +8,11 @@ import {
   parseGarminAuthBeginRpcResult,
   parseGarminAuthStatusRpcResult,
   type GarminAuthenticatedAccount,
+  type GarminAuthenticationRequirement,
   type GarminAuthBeginResult,
   type GarminAuthPublicStatus,
 } from './protocol'
+import { nextAutomaticGarminAuthentication } from './auto-auth'
 import {
   releaseGarminAuthFlow,
   retainUnreleasedGarminAuthFlowId,
@@ -21,7 +23,8 @@ import {
 } from './view'
 
 const RPC_CHANNEL = '/garmin-auth'
-const ACCOUNT_REFRESH_MS = 15_000
+const AUTHENTICATED_ACCOUNT_REFRESH_MS = 15_000
+const UNAUTHENTICATED_ACCOUNT_REFRESH_MS = 1_000
 const STATUS_POLL_MS = 750
 
 type GarminClientContext = ClientContext & { connection: ConnectionHandle }
@@ -45,10 +48,13 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
   const [selectedRegion, setSelectedRegion] = useState<GarminLoginRegion>()
   const [authenticatedAccount, setAuthenticatedAccount] =
     useState<GarminAuthenticatedAccount>()
+  const [authenticationRequirement, setAuthenticationRequirement] =
+    useState<GarminAuthenticationRequirement>()
   const generation = useRef(0)
   const activeFlowId = useRef<string>()
   const accountRequest = useRef<AbortController>()
   const beginRequest = useRef<AbortController>()
+  const lastAutoHandledRevision = useRef<number>()
 
   const cancelFlow = useCallback((
     flowId: string,
@@ -61,6 +67,9 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
 
   const beginAuthentication = useCallback(async (region: GarminLoginRegion) => {
     if (!ctx.connection.isLoopback || busy || beginRequest.current) return
+    if (authenticationRequirement?.region === region) {
+      lastAutoHandledRevision.current = authenticationRequirement.revision
+    }
     const current = ++generation.current
     const previousFlowId = activeFlowId.current
     setSelectedRegion(region)
@@ -115,7 +124,7 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
       if (beginRequest.current === controller) beginRequest.current = undefined
       if (generation.current === current) setBusy(false)
     }
-  }, [busy, cancelFlow, ctx])
+  }, [authenticationRequirement, busy, cancelFlow, ctx])
 
   const closeAuthentication = useCallback(() => {
     generation.current += 1
@@ -161,13 +170,29 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
           ),
         )
         if (controller.signal.aborted) return
-        setAuthenticatedAccount(
-          result.success && result.authenticated
-            ? { email: result.email, region: result.region }
-            : undefined,
-        )
+        if (result.success && result.authenticated) {
+          setAuthenticatedAccount({ email: result.email, region: result.region })
+          setAuthenticationRequirement(undefined)
+        } else {
+          setAuthenticatedAccount(undefined)
+          setAuthenticationRequirement(
+            result.success
+              && !result.authenticated
+              && 'authenticationRequired' in result
+              ? {
+                  authenticationRequired: true,
+                  reason: result.reason,
+                  region: result.region,
+                  revision: result.revision,
+                }
+              : undefined,
+          )
+        }
       } catch {
-        if (!controller.signal.aborted) setAuthenticatedAccount(undefined)
+        if (!controller.signal.aborted) {
+          setAuthenticatedAccount(undefined)
+          setAuthenticationRequirement(undefined)
+        }
       } finally {
         if (accountRequest.current === controller) {
           accountRequest.current = undefined
@@ -180,14 +205,37 @@ function GarminAuthOverlay({ ctx }: { ctx: GarminClientContext }): ReactElement 
     refreshAuthenticatedAccount()
     if (!ctx.connection.isLoopback) return
     const onFocus = (): void => refreshAuthenticatedAccount()
-    const timer = setInterval(refreshAuthenticatedAccount, ACCOUNT_REFRESH_MS)
+    const refreshMs = authenticatedAccount
+      ? AUTHENTICATED_ACCOUNT_REFRESH_MS
+      : UNAUTHENTICATED_ACCOUNT_REFRESH_MS
+    const timer = setInterval(refreshAuthenticatedAccount, refreshMs)
     window.addEventListener('focus', onFocus)
     return () => {
       clearInterval(timer)
       window.removeEventListener('focus', onFocus)
       accountRequest.current?.abort()
     }
-  }, [ctx.connection.isLoopback, refreshAuthenticatedAccount])
+  }, [Boolean(authenticatedAccount), ctx.connection.isLoopback, refreshAuthenticatedAccount])
+
+  useEffect(() => {
+    const decision = nextAutomaticGarminAuthentication(
+      authenticationRequirement,
+      {
+        active: open || busy,
+        isLoopback: ctx.connection.isLoopback,
+        lastHandledRevision: lastAutoHandledRevision.current,
+      },
+    )
+    if (!decision) return
+    lastAutoHandledRevision.current = decision.revision
+    void beginAuthentication(decision.region)
+  }, [
+    authenticationRequirement,
+    beginAuthentication,
+    busy,
+    ctx.connection.isLoopback,
+    open,
+  ])
 
   useEffect(() => {
     if (status === 'succeeded') refreshAuthenticatedAccount()

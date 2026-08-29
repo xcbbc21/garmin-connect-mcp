@@ -173,6 +173,48 @@ describe('interactive Garmin authentication', () => {
     expect(upstream.getOauth1Token).toHaveBeenCalledWith('ST-MFA')
   })
 
+  it('hands an explicit MFA page to browser authentication when requested', async () => {
+    const mfaPage = [
+      '<title>Enter MFA code for login</title>',
+      '<input name="_csrf" value="mfa-csrf">',
+      '<input name="mfa-code">',
+    ].join('')
+    const { dependencies, post } = fixture(mfaPage)
+    const promptMfa = jest.fn().mockResolvedValue('123456')
+
+    const authentication = authenticateGarminSession({
+      username: 'runner@example.test',
+      password: 'password-secret',
+      region: 'global',
+      promptMfa,
+      browserOnChallenge: true,
+    }, dependencies)
+
+    await expect(authentication).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'challenge',
+    })
+    expect(promptMfa).not.toHaveBeenCalled()
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('hands active CAPTCHA verification to browser authentication when requested', async () => {
+    const { dependencies } = fixture(
+      '<div class="g-recaptcha" data-sitekey="public-key"></div>',
+    )
+
+    await expect(authenticateGarminSession({
+      username: 'runner@example.test',
+      password: 'password-secret',
+      region: 'cn',
+      promptMfa: async () => 'must-not-be-read',
+      browserOnChallenge: true,
+    }, dependencies)).rejects.toMatchObject({
+      name: 'GarminAuthenticationRequiredError',
+      reason: 'challenge',
+    })
+  })
+
   it('does not request another code when Garmin reports an existing delivery target', async () => {
     const mfaPage = [
       '<title>Enter MFA code for login</title>',

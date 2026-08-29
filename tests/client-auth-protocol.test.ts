@@ -18,6 +18,25 @@ describe('DSH Garmin authentication client protocol', () => {
       ok: true,
       value: {
         success: true,
+        authenticated: false,
+        authenticationRequired: true,
+        reason: 'challenge',
+        region: 'global',
+        revision: 7,
+      },
+    })).toEqual({
+      success: true,
+      authenticated: false,
+      authenticationRequired: true,
+      reason: 'challenge',
+      region: 'global',
+      revision: 7,
+    })
+
+    expect(parseGarminAuthAccountRpcResult({
+      ok: true,
+      value: {
+        success: true,
         authenticated: true,
         email: 'runner@example.test',
         region: 'cn',
@@ -55,6 +74,31 @@ describe('DSH Garmin authentication client protocol', () => {
       authenticated: true,
       email: 'runner@example.test',
       region: 'global',
+      token: 'ST-secret',
+    },
+    {
+      success: true,
+      authenticated: false,
+      authenticationRequired: true,
+      reason: 'private upstream error',
+      region: 'global',
+      revision: 1,
+    },
+    {
+      success: true,
+      authenticated: false,
+      authenticationRequired: true,
+      reason: 'missing',
+      region: 'global',
+      revision: 0,
+    },
+    {
+      success: true,
+      authenticated: false,
+      authenticationRequired: true,
+      reason: 'challenge',
+      region: 'global',
+      revision: 1,
       token: 'ST-secret',
     },
   ])('rejects an unsafe authenticated account summary: %#', (value) => {

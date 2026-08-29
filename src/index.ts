@@ -32,6 +32,10 @@ export function apply(ctx: Context, config: Config) {
       await initialConnection
       return client.getAuthenticatedAccount()
     },
+    getAuthenticationRequirement: async () => {
+      await initialConnection
+      return client.getAuthenticationRequirement()
+    },
     replaceSession: writer => client.replacePersistedSession(writer),
   })
 }

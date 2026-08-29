@@ -18,10 +18,26 @@ export type GarminAuthenticatedAccount = {
   region: 'cn' | 'global'
 }
 
+export type GarminAuthenticationRequiredReason =
+  | 'missing'
+  | 'expired'
+  | 'rejected'
+  | 'challenge'
+
+export type GarminAuthenticationRequirement = {
+  authenticationRequired: true
+  reason: GarminAuthenticationRequiredReason
+  region: 'cn' | 'global'
+  revision: number
+}
+
 export type GarminAuthAccountResult = {
   success: true
   authenticated: false
 } | ({
+  success: true
+  authenticated: false
+} & GarminAuthenticationRequirement) | ({
   success: true
   authenticated: true
 } & GarminAuthenticatedAccount) | {
@@ -61,6 +77,32 @@ export function parseGarminAuthAccountRpcResult(value: unknown): GarminAuthAccou
   const business = value.value
   if (isBusinessFailure(business)) return business
   if (
+    isExactRecord(business, [
+      'success',
+      'authenticated',
+      'authenticationRequired',
+      'reason',
+      'region',
+      'revision',
+    ])
+    && business.success === true
+    && business.authenticated === false
+    && business.authenticationRequired === true
+    && isAuthenticationRequiredReason(business.reason)
+    && (business.region === 'cn' || business.region === 'global')
+    && Number.isSafeInteger(business.revision)
+    && (business.revision as number) >= 1
+  ) {
+    return {
+      success: true,
+      authenticated: false,
+      authenticationRequired: true,
+      reason: business.reason,
+      region: business.region,
+      revision: business.revision as number,
+    }
+  }
+  if (
     isExactRecord(business, ['success', 'authenticated'])
     && business.success === true
     && business.authenticated === false
@@ -87,6 +129,15 @@ export function parseGarminAuthAccountRpcResult(value: unknown): GarminAuthAccou
     email: business.email,
     region: business.region,
   }
+}
+
+function isAuthenticationRequiredReason(
+  value: unknown,
+): value is GarminAuthenticationRequiredReason {
+  return value === 'missing'
+    || value === 'expired'
+    || value === 'rejected'
+    || value === 'challenge'
 }
 
 export function parseGarminAuthBeginRpcResult(value: unknown): GarminAuthBeginResult {

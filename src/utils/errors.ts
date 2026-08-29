@@ -7,6 +7,7 @@ export type GarminAuthenticationRequiredReason =
   | 'missing'
   | 'expired'
   | 'rejected'
+  | 'challenge'
 
 export const GARMIN_BROWSER_AUTH_COMMAND =
   'garmin-connect-auth serve --account <alias> --region <global|cn> --open'
@@ -34,7 +35,9 @@ function defaultGarminAuthenticationRequiredMessage(
     ? 'is required'
     : reason === 'expired'
       ? 'has expired'
-      : 'was rejected'
+      : reason === 'challenge'
+        ? 'requires browser verification'
+        : 'was rejected'
   return `Garmin authentication ${state}; run ${GARMIN_BROWSER_AUTH_COMMAND}`
 }
 
