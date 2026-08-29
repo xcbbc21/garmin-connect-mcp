@@ -18,6 +18,7 @@ const CSRF_PATTERN = /^[A-Za-z0-9_-]{32,128}$/
 const MAX_REQUEST_BODY_BYTES = 4 * 1024
 const MAX_REQUEST_TARGET_BYTES = 512
 const FIXED_ERROR_BODY = '{"ok":false,"error":"request_rejected"}'
+const BRIDGE_AWAITING_STATUS = '请完成登录或验证。'
 const UNSAFE_IDENTITY_CHARACTERS =
   /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g
 const BRIDGE_ROUTE_PATTERN =
@@ -676,7 +677,6 @@ function renderBridgePage(
     }
     .notice-copy { min-width: 0; }
     .notice-copy strong { display: block; font-size: .78rem; }
-    .privacy-note { display: block; margin-top: .1rem; color: #40745f; font-size: .67rem; }
     p { margin: .18rem 0 0; line-height: 1.42; }
     #status { color: #516477; font-size: .72rem; }
     iframe {
@@ -742,11 +742,10 @@ function renderBridgePage(
 <body>
   <main>
     <header class="bridge-notice">
-      <span aria-hidden="true" class="notice-icon">✓</span>
-      <div class="notice-copy">
-        <strong>安全登录</strong>
-        <span class="privacy-note">仅在 Garmin 官方页面输入账号、密码和验证码</span>
-      <p id="status" role="status" aria-live="polite">请在 Garmin 官方页面中完成登录和验证码验证。</p>
+        <span aria-hidden="true" class="notice-icon">✓</span>
+        <div class="notice-copy">
+          <strong>安全登录</strong>
+          <p id="status" role="status" aria-live="polite">${BRIDGE_AWAITING_STATUS}</p>
       </div>
     </header>
     <iframe id="garmin-auth-frame" title="Garmin 官方登录" src="${frameUrl}"
@@ -852,7 +851,7 @@ function bridgeScript(config: string): string {
       confirmation.hidden = true
       switch (current.state) {
         case 'awaiting_garmin':
-          setStatus('请在 Garmin 官方页面中完成登录和验证码验证。')
+          setStatus(${JSON.stringify(BRIDGE_AWAITING_STATUS)})
           break
         case 'exchanging':
           frame.hidden = true
