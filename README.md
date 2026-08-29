@@ -263,6 +263,9 @@ MFA and refresh-token rotation remain unverified. Treat the flow as experimental
 not as a production recovery guarantee. Login, MFA, and profile confirmation
 must finish within the bridge's 10-minute lifetime.
 
+See the [target architecture for two-step verification](#target-architecture-for-two-step-verification)
+for the complete trust boundary and data flow.
+
 #### Local system-browser authentication — preview
 
 The recommended local preview for CLI and MCP clients is the loopback broker.
@@ -922,6 +925,74 @@ connect.garmin.cn     → Claude Desktop / Claude Code /
                         WorkBuddy / ZCode
 ```
 
+### Target architecture for two-step verification
+
+The architecture gives dsh Web, MCP clients, and the CLI one shared local
+authentication runtime while keeping Garmin credentials out of AI conversations:
+
+```text
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│ dsh Web          │  │ MCP tool call    │  │ CLI serve        │
+│ region/auth state│  │ URL elicitation  │  │ system browser   │
+└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
+         └─────────────────────┼─────────────────────┘
+                               ▼
+          LocalAuthBroker + EmbeddedAuthController
+                               │
+                               ▼
+          random one-shot 127.0.0.1 bridge
+          flowId + CSRF + strict CSP + 10-minute TTL
+                               │ embeds the exact regional page
+                               ▼
+          official Garmin GAuth iframe (cn / global)
+          email, password, MFA, and CAPTCHA stay here
+                               │
+                               │ one-time ticket + original exact service
+                               ▼
+          Host validates origin / iframe / CSRF / ticket / service
+                               │
+                               ▼
+          regional DI exchange → profile probe → user confirmation
+                               │
+                               ▼
+          atomically persist an owner-only DI v2 session
+          bound to account, region, and profile; never shared by processes
+                               │
+                               ▼
+          GarminClient hot-load / safe refresh
+                               │
+                               ▼
+          user explicitly retries the original tool call
+```
+
+The non-negotiable boundaries are:
+
+- The outer dsh page, MCP client, and model see only a one-time local URL,
+  completion notification, or coarse non-sensitive status. Tickets, DI tokens,
+  session contents, and session paths never enter model context or AI tool
+  arguments/results.
+- The bridge accepts only the expected Garmin SSO origin, iframe window, CSRF,
+  and an exactly matched `ticket/service` pair. It never rewrites the service,
+  follows a redirect, or retries a one-time ticket against a fallback.
+- Before saving a session, the Host probes the Garmin profile and asks the user
+  to confirm the account. It then writes the session atomically with private
+  permissions. A running client hot-loads only a changed, account-matching,
+  validated session.
+- Authentication never replays the original tool automatically, preventing
+  duplicate FIT downloads or workout writes. Failure, cancellation, or timeout
+  ends the flow; another attempt creates a new flow.
+- Refresh may replay a safe GET at most once. It first verifies the same profile
+  and persists rotated tokens; writes are never replayed after refresh.
+
+> [!WARNING]
+> This is the target architecture and the boundary followed by the current
+> experimental implementation. A real China-region MFA → exact ticket/service
+> → DI exchange → profile confirmation → private session write → fresh-client
+> read chain has passed locally. Real International MFA, real refresh-token
+> rotation, and complete URL-elicitation UX in more MCP clients remain pending.
+> The design is same-machine loopback only, not a remote, multi-user, or hosted
+> authentication service.
+
 ---
 
 ## Development
@@ -1044,3 +1115,4 @@ Distribution notes:
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — the agentic coding runtime
 - [Cordis](https://github.com/cordiverse/cordis) — the plugin lifecycle framework
 - [garmin-connect](https://www.npmjs.com/package/garmin-connect) — unofficial Garmin Connect client for Node.js
+- Thanks to Zhitao and [DailySync](https://dailysync.cn) for the inspiration

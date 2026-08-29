@@ -240,6 +240,8 @@ POSIX 配置路径写入
 使用链路；国际区 MFA 与 refresh token 轮换仍未验证。因此它仍是实验功能，不能视为
 生产环境恢复保证。登录、MFA 与 profile 确认必须在桥页的 10 分钟有效期内完成。
 
+完整的信任边界与数据流见[两步验证登录目标架构](#两步验证登录目标架构)。
+
 #### 本机系统浏览器认证——预览
 
 CLI 与 MCP 客户端推荐使用新的 loopback broker 预览流程，并显式选择账号别名与区域。
@@ -808,6 +810,66 @@ connect.garmin.cn     → Claude Desktop / Claude Code /
                         WorkBuddy / ZCode
 ```
 
+### 两步验证登录目标架构
+
+这套架构让 dsh Web、MCP 客户端和命令行共用同一个本机认证 runtime，同时把
+Garmin 凭据与 AI 对话彻底分开：
+
+```text
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│ dsh Web          │  │ MCP 工具调用     │  │ CLI serve        │
+│ 区域按钮/认证状态│  │ URL elicitation  │  │ 系统默认浏览器   │
+└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
+         └─────────────────────┼─────────────────────┘
+                               ▼
+          LocalAuthBroker + EmbeddedAuthController
+                               │
+                               ▼
+          随机 127.0.0.1 一次性桥页
+          flowId + CSRF + 严格 CSP + 10 分钟有效期
+                               │ 嵌入与区域严格匹配的页面
+                               ▼
+          Garmin 官方 GAuth iframe（cn / global）
+          账号、密码、MFA、CAPTCHA 只在这里输入
+                               │
+                               │ 一次性 ticket + 原始精确 service
+                               ▼
+          Host 校验 origin / iframe / CSRF / ticket / service
+                               │
+                               ▼
+          对应区域 DI 交换 → profile 探测 → 用户确认账号
+                               │
+                               ▼
+          owner-only DI v2 session 原子落盘
+          绑定账号、区域和 profile；不在进程间共享
+                               │
+                               ▼
+          GarminClient 热加载 / 安全刷新
+                               │
+                               ▼
+          用户显式重试原来的工具调用
+```
+
+关键约束如下：
+
+- dsh 外层页面、MCP 客户端和模型只会看到本机一次性 URL、完成通知或不含敏感
+  数据的粗粒度状态；ticket、DI token、session 内容和 session 路径不会进入模型
+  上下文或 AI 工具参数/结果。
+- bridge 只接受预期 Garmin SSO origin、对应 iframe window、CSRF 和严格匹配的
+  `ticket/service`。一次性 ticket 不改写 service、不跟随重定向，也不做后备重试。
+- 写入 session 前先探测 Garmin profile，并由用户确认账号；随后以私有权限原子
+  写入。运行中的客户端只热加载内容已变化、账号匹配且验证通过的 session。
+- 认证完成后不自动重放原工具，避免 FIT 下载或创建训练等写操作重复执行。失败、
+  取消或超时会结束当前 flow；再次认证必须创建新的 flow。
+- refresh 只允许为安全的 GET 请求最多重放一次；刷新后先复核同一 profile 并
+  持久化轮换后的 token，写请求绝不因刷新而自动重放。
+
+> [!WARNING]
+> 这是目标架构，也是当前实验实现遵循的边界。真实中国区 MFA → 精确
+> ticket/service → DI 交换 → profile 确认 → 私有 session 落盘 → 新客户端只读查询
+> 已在本机验证；国际区真实 MFA、真实 refresh-token 轮换以及更多 MCP 客户端的完整
+> URL elicitation 体验仍待验证。它仅支持同机 loopback，不是远程、多用户或托管认证服务。
+
 ---
 
 ## 开发
@@ -930,3 +992,4 @@ npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add dsh-plugi
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — AI 代理编码运行时
 - [Cordis](https://github.com/cordiverse/cordis) — 插件生命周期框架
 - [garmin-connect](https://www.npmjs.com/package/garmin-connect) — 非官方 Garmin Connect Node.js 客户端
+- 感谢 Zhitao 的 [DailySync](https://dailysync.cn) 所带来的启发
