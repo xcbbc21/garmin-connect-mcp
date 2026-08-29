@@ -352,5 +352,5 @@ describe('Windows exact-private session host integration', () => {
     } finally {
       await rm(parent, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 })

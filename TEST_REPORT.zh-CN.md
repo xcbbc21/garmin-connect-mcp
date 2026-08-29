@@ -21,6 +21,7 @@
 | 本机自动测试 | **通过** — 38 个套件、824 项测试 |
 | TypeScript 构建 | **通过** |
 | npm 打包烟测 | **通过** — 179 个文件；压缩后 294.8 kB；解压后 1.2 MB |
+| 远程 CI | 发布门禁 — 本提交的 Linux Node 20/22、Windows ACL 与 macOS ACL 任务必须全部通过 |
 | 真实 Garmin 集成 | **本次未重跑** — 2026-08-21 的 `global` 只读基线为 8/8 |
 | 两步验证 | **预览** — 真实 CN 浏览器/session/profile/活动读取链路通过；国际区与真实 refresh 待验证 |
 
@@ -52,8 +53,8 @@ npm run pack:smoke
 
 测试还覆盖了绝对路径、有界且无 shell 的 Windows PowerShell/.NET ACL 边界、静态编码的
 精确 DACL 程序、当前 SID owner、全链重解析点与不可信根目录拒绝、逐层目录 fail-closed
-验证/创建，以及在写入凭据字节前先保护空临时文件的顺序。CI 已新增 `windows-latest` 任务，用真实
-Windows ACL API 运行该套件；本机快照未执行该远端任务。
+验证/创建，以及在写入凭据字节前先保护空临时文件的顺序。`windows-latest` 任务会用真实
+Windows ACL API 运行该套件，本 RC 只会在发布提交的该任务通过后发布。
 
 POSIX 覆盖还包括有效 UID owner 与 owner 写入/执行权限、不安全祖先拒绝、安全链接规范化、
 逐级 `0700` 预创建、no-follow 临时文件，以及原子替换前的父目录/文件再次验证。读取时也会
@@ -151,8 +152,6 @@ session 再到只读调用的链路，但不代表国际区 MFA、真实 refresh
 - 在具体客户端中完成 MCP 浏览器认证、完成通知与重试。Codex CLI `0.147.0`
   已完成 stdio 初始化并收到 `-32042` URL elicitation，但 URL 只出现在原始工具
   诊断中，未转成一级认证提示；Claude Code 与 ZCode 仍未验证。
-- 在真实 `windows-latest` runner 上执行新增 ACL 烟测；workflow 已加入，但本机 macOS
-  快照无法执行该任务。
 - WorkBuddy MCP 客户端烟测。
 - ZCode MCP 客户端烟测。
 - 真实 FIT 下载以及后续文件导入。

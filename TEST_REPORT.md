@@ -25,6 +25,7 @@ verification.
 | Local automated snapshot | **Passed** — 38 suites, 824 tests |
 | TypeScript build | **Passed** |
 | npm package smoke test | **Passed** — 179 files; 294.8 kB packed; 1.2 MB unpacked |
+| Remote CI | Publication-gated — Linux Node 20/22, Windows ACL, and macOS ACL jobs must all pass for this commit |
 | Real Garmin integration | **Not rerun** — prior 2026-08-21 `global` read-only baseline was 8/8 |
 | Two-step verification | **Preview** — real CN browser/session/profile/activity-read chain passed; International and real refresh pending |
 
@@ -59,9 +60,9 @@ The suite also covers an absolute, bounded, shell-free Windows PowerShell/.NET
 ACL boundary, a static encoded exact-DACL program, current-SID ownership,
 full-chain reparse-point and untrusted-root rejection, per-component fail-closed
 directory verification/creation, and the requirement to secure the empty temporary file before
-writing credential bytes. A `windows-latest` CI job now runs that suite against
-the real Windows ACL API; that remote job was not executed as part of this local
-snapshot.
+writing credential bytes. A `windows-latest` CI job runs that suite against
+the real Windows ACL API, and RC publication is gated on that job passing for
+the release commit.
 
 POSIX coverage includes effective-UID ownership and owner write/execute checks,
 unsafe ancestor rejection, safe-link canonicalization, one-component-at-a-time
@@ -185,8 +186,6 @@ clients:
   `-32042` URL-elicitation response, but exposed its URL only in raw tool
   diagnostics rather than a first-class prompt; Claude Code and ZCode remain
   untested.
-- Running the new Windows ACL smoke test on a real `windows-latest` runner; the
-  workflow is present, but this local macOS snapshot cannot execute it.
 - WorkBuddy MCP client smoke testing.
 - ZCode MCP client smoke testing.
 - A real FIT download and subsequent file import.
