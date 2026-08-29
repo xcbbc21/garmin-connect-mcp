@@ -170,7 +170,10 @@ describe('Garmin interactive auth CLI', () => {
     expect(result.stdout).toContain(
       'garmin-connect-auth login --browser --region <global|cn> [options]',
     )
-    expect(result.stdout).toContain('--browser')
+    expect(result.stdout).toContain(
+      '--browser               Legacy Playwright diagnostic',
+    )
+    expect(result.stdout).not.toContain('Unfinished preview')
     expect(result.stdout).toContain(
       'The serve command keeps password, verification code, CAPTCHA, and MFA inside',
     )

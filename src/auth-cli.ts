@@ -184,7 +184,7 @@ Usage:
   garmin-connect-auth canary --region <global|cn>
 
 Login options:
-  --browser               Unfinished preview: use Garmin's page for credentials
+  --browser               Legacy Playwright diagnostic for Garmin's sign-in page
   --account <alias>       Account alias (default: default)
   --region <global|cn>    Region (default: global; required with --browser)
   --output <path>         OAuth session file path

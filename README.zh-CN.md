@@ -1,6 +1,6 @@
 # dsh-plugin-garmin-connect
 
-> 一个包含**安全浏览器 MFA 认证**的 Garmin Connect 插件与 MCP 服务器，让 AI Agent 直接读取你的运动与健康数据。
+> 一个基于 TypeScript、包含**安全浏览器 MFA 认证**的 Garmin Connect 插件与 MCP 服务器：为 DeepSeek Harness 打造，也适用于更多 AI Agent。
 
 [![npm version](https://img.shields.io/npm/v/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)

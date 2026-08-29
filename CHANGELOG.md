@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.1.6] - 2026-08-29
+## [0.1.6] - 2026-08-30
 
 ### Changed
 - Promoted browser-based MFA from preview to a supported capability for both China and International Garmin accounts across local dsh Web, the system-browser `garmin-connect-auth serve` flow, and MCP URL elicitation.
@@ -63,7 +63,10 @@ All notable changes to this project will be documented in this file.
 - Malformed, obsolete, account-mismatched, or otherwise unsafe local session files remain configuration errors and no longer trigger browser authentication; only missing, expired, Garmin-rejected credentials or positively identified browser challenges do.
 - CI now exercises exact Windows DACL behavior on `windows-latest` and real Darwin inherited/file ACL behavior on `macos-latest`, in addition to the Linux Node.js build/test matrix.
 
-### Experimental preview
+### Experimental preview (status at 0.1.6-rc.1)
+
+> Historical RC status: International-region MFA was subsequently verified and
+> promoted to a supported capability in the final 0.1.6 release above.
 - The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.
 - Browser third-party-cookie or iframe policy may prevent Garmin GAuth from completing. On 2026-08-29, a real China-region MFA run passed the visible browser, exact loopback-bound ticket exchange, profile confirmation, owner-only session persistence, fresh-client session consumption, profile probe, and recent-activity read chain. Same-process hot loading is covered by automated tests; International-region real-account MFA and refresh-token rotation remain unverified, so the feature stays experimental.
 - The new `serve` and MCP URL-elicitation paths have automated loopback/runtime coverage. The successful China-region run used the same shared runtime through a local browser. Codex CLI `0.147.0` completed real stdio initialization and received the `-32042` URL-elicitation response, but exposed the URL only in raw tool diagnostics instead of a first-class authentication prompt; ZCode, completion/retry UX, and International-region MFA still require manual verification.
