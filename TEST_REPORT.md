@@ -20,9 +20,9 @@ verification.
 | Test date | 2026-08-29 |
 | Package manifest | `0.1.5` + `Unreleased` changes |
 | Release readiness | **Automated gates passed** — browser MFA remains experimental while International/refresh/client gaps remain |
-| Local automated snapshot | **Passed** — 38 suites, 818 tests |
+| Local automated snapshot | **Passed** — 38 suites, 821 tests |
 | TypeScript build | **Passed** |
-| npm package smoke test | **Passed** — 179 files; 291.1 kB packed; 1.2 MB unpacked |
+| npm package smoke test | **Passed** — 179 files; 291.4 kB packed; 1.2 MB unpacked |
 | Real Garmin integration | **Not rerun** — prior 2026-08-21 `global` read-only baseline was 8/8 |
 | Two-step verification | **Preview** — real CN browser/session/profile/activity-read chain passed; International and real refresh pending |
 
@@ -42,16 +42,16 @@ npm run pack:smoke
 | Metric | Result |
 | --- | ---: |
 | Test suites | 38 passed |
-| Tests | 818 passed |
-| Statements | 85.89% |
-| Branches | 79.66% |
-| Functions | 87.25% |
-| Lines | 88.72% |
+| Tests | 821 passed |
+| Statements | 85.58% |
+| Branches | 79.53% |
+| Functions | 86.94% |
+| Lines | 88.48% |
 
 `npm run build` completed successfully. `npm run pack:smoke` also completed
 successfully and inspected a tarball containing 179 files, including the new
 local-auth and MCP-auth runtime modules, changelog, and both test-report pages,
-with a packed size of 291.1 kB and an unpacked size of 1.2 MB.
+with a packed size of 291.4 kB and an unpacked size of 1.2 MB.
 
 The suite also covers an absolute, bounded, shell-free Windows PowerShell/.NET
 ACL boundary, a static encoded exact-DACL program, current-SID ownership,
@@ -76,7 +76,8 @@ Web/CLI/MCP bridge starts, content-fingerprinted hot loading of a session writte
 by another local process, positive MFA/CAPTCHA page classification without
 misclassifying ambiguous SDK no-ticket/password/network failures, narrowly
 scoped Cloudflare managed-challenge detection, abortable terminal prompts,
-non-zero system-browser launcher exits, bounded MCP completion
+abortable SSO requests and credential-submission dwell time, non-zero
+system-browser launcher exits, bounded MCP completion
 notifications, and commit-point draining so an in-progress atomic save is never
 misreported as cancelled. It also covers Web disposal during an irrevocable
 write, non-stacking broker/controller drain deadlines, rejected inline-token
