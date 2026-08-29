@@ -20,7 +20,7 @@ verification.
 | Test date | 2026-08-29 |
 | Package manifest | `0.1.5` + `Unreleased` changes |
 | Release readiness | **Automated gates passed** — browser MFA remains experimental while International/refresh/client gaps remain |
-| Local automated snapshot | **Passed** — 38 suites, 823 tests |
+| Local automated snapshot | **Passed** — 38 suites, 824 tests |
 | TypeScript build | **Passed** |
 | npm package smoke test | **Passed** — 179 files; 292.0 kB packed; 1.2 MB unpacked |
 | Real Garmin integration | **Not rerun** — prior 2026-08-21 `global` read-only baseline was 8/8 |
@@ -42,7 +42,7 @@ npm run pack:smoke
 | Metric | Result |
 | --- | ---: |
 | Test suites | 38 passed |
-| Tests | 823 passed |
+| Tests | 824 passed |
 | Statements | 85.91% |
 | Branches | 79.53% |
 | Functions | 87.42% |
