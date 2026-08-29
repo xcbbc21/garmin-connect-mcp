@@ -42,7 +42,7 @@ describe('Windows exact owner-only session ACLs', () => {
         encoding: 'utf8',
         maxBuffer: 64 * 1024,
         shell: false,
-        timeout: 30_000,
+        timeout: 60_000,
         windowsHide: true,
       }))
       expect(call.options.env).toEqual(expect.objectContaining({

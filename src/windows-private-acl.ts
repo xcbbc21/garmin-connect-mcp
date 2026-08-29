@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process'
 import { win32 } from 'node:path'
 import { PublicToolError } from './utils/errors'
 
-// Windows PowerShell 5.1 can spend more than ten seconds on its first launch
-// on a cold host (for example while endpoint protection scans the process).
+// Windows PowerShell 5.1 can spend tens of seconds on its first launch on a
+// cold hosted runner (for example while endpoint protection scans the process).
 // Keep the ACL subprocess bounded while allowing that one-time startup cost.
-const WINDOWS_COMMAND_TIMEOUT_MS = 30_000
+const WINDOWS_COMMAND_TIMEOUT_MS = 60_000
 const WINDOWS_COMMAND_MAX_BUFFER_BYTES = 64 * 1024
 const WINDOWS_ACL_ERROR = 'Garmin session token file could not be written'
 
