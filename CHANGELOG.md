@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.6-rc.1] - 2026-08-29
+
 ### Added
 - Added an experimental Garmin sign-in entry to the local dsh Web UI. It opens a custom bridge on an ephemeral `127.0.0.1` port and embeds Garmin's official GAuth page inside that bridge.
 - After the bridge receives one valid region-bound service ticket, the plugin Host immediately exchanges it for DI credentials, probes a sanitized Garmin profile for user confirmation, and atomically saves an owner-only session bound to the configured account and region.
@@ -27,6 +29,7 @@ All notable changes to this project will be documented in this file.
 - All browser-auth entry points now run the same session-destination preflight before starting a loopback listener. Windows implicit paths prefer local `LOCALAPPDATA`; UNC/network session destinations remain unsupported.
 
 ### Fixed
+- Synchronized the dependency lockfile with the current DeepSeek Harness development packages so a clean `npm ci` succeeds in release and CI environments.
 - China-region MFA tickets that Garmin binds to the current loopback bridge are now exchanged with that exact service instead of being incorrectly rewritten to the Garmin embed URL. Cross-region services, other loopback ports/hosts, paths, queries, fragments, credentials, and malformed variants are rejected before any DI request.
 - Retrying or closing the Web login no longer discards an active flow handle until the Host confirms cancellation or a terminal state.
 - Installing a newly authenticated session now fences new Garmin work and drains old in-process DI refresh writes before the atomic replacement, preventing a late refresh from overwriting the new session.
@@ -48,10 +51,10 @@ All notable changes to this project will be documented in this file.
 - Malformed, obsolete, account-mismatched, or otherwise unsafe local session files remain configuration errors and no longer trigger browser authentication; only missing, expired, Garmin-rejected credentials or positively identified browser challenges do.
 - CI now exercises exact Windows DACL behavior on `windows-latest` and real Darwin inherited/file ACL behavior on `macos-latest`, in addition to the Linux Node.js build/test matrix.
 
-### Experimental — not release-supported
+### Experimental preview
 - The embedded flow is limited to a loopback dsh Web UI on the same machine. It is not a remote, hosted, or tunneled authentication endpoint.
 - Browser third-party-cookie or iframe policy may prevent Garmin GAuth from completing. On 2026-08-29, a real China-region MFA run passed the visible browser, exact loopback-bound ticket exchange, profile confirmation, owner-only session persistence, fresh-client session consumption, profile probe, and recent-activity read chain. Same-process hot loading is covered by automated tests; International-region real-account MFA and refresh-token rotation remain unverified, so the feature stays experimental.
-- The new `serve` and MCP URL-elicitation paths have automated loopback/runtime coverage. The successful China-region run used the same shared runtime through a local browser; concrete MCP-client URL elicitation and International-region MFA still require manual verification.
+- The new `serve` and MCP URL-elicitation paths have automated loopback/runtime coverage. The successful China-region run used the same shared runtime through a local browser. Codex CLI `0.147.0` completed real stdio initialization and received the `-32042` URL-elicitation response, but exposed the URL only in raw tool diagnostics instead of a first-class authentication prompt; ZCode, completion/retry UX, and International-region MFA still require manual verification.
 - `garmin-connect-auth login --browser` and `canary` remain legacy Playwright diagnostics, not the recommended fallback for `serve` or MCP authentication.
 
 ## [0.1.5] - 2026-08-21

@@ -12,7 +12,7 @@
 English | **[简体中文](README.zh-CN.md)** | **[Test Report](TEST_REPORT.md)** | **[Changelog](CHANGELOG.md)**
 
 > [!WARNING]
-> **Unreleased experimental status:** local dsh Web, the
+> **0.1.6-rc.1 experimental status:** local dsh Web, the
 > `garmin-connect-auth serve` system-browser flow, and MCP URL elicitation can
 > now bootstrap the same owner-only session. Garmin two-step verification is
 > still a preview: a real China-region MFA browser-to-session-and-read chain
@@ -798,6 +798,17 @@ Open **Settings → MCP Servers → New MCP Server**, choose **User** scope and
 `stdio`, then enter the same absolute Node.js command, `lib/mcp.js` argument,
 and Garmin environment variables. Alternatively, edit the native user config
 at `~/.zcode/cli/config.json`:
+
+To test this release candidate directly from npm, use an absolute `npx` path
+as the command and these arguments instead of a checkout's `lib/mcp.js`:
+
+```text
+-y --package dsh-plugin-garmin-connect@0.1.6-rc.1 garmin-connect-mcp
+```
+
+Do not configure `GARMIN_PASSWORD`; with a missing session, the first read-only
+tool call can exercise ZCode's URL-elicitation path. Keep the explicit
+owner-only `GARMIN_SESSION_TOKEN_FILE` shown below.
 
 ```json
 {

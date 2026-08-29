@@ -2,24 +2,25 @@
 
 [English](./TEST_REPORT.md)
 
-本页面是基于 `0.1.5` package manifest 的当前 `Unreleased` 修改静态验证快照，记录
+本页面是 `0.1.6-rc.1` 候选版的静态验证快照，记录
 已经验证的范围、主动排除的操作，以及仍需人工验证的项目。
 
 > **验证范围：** 下列自动检查已在本机源码树重新执行。新的系统浏览器与 MCP 认证路径
 > 已有离线覆盖。2026-08-29 还在本机跑通了真实中国区 MFA 的浏览器、session 落盘与
-> 只读调用链路；国际区 MFA、真实 refresh token 轮换及具体 MCP 客户端 URL elicitation
-> 仍是预览缺口。
+> 只读调用链路；国际区 MFA、真实 refresh token 轮换及具体 MCP 客户端的完整认证 UX
+> 仍是预览缺口。Codex CLI `0.147.0` 已在真实 stdio 工具调用中收到 URL elicitation，
+> 但只在原始工具诊断里显示 URL，没有转成一级认证提示。
 
 ## 验证概览
 
 | 项目 | 结果 |
 | --- | --- |
 | 测试日期 | 2026-08-29 |
-| package manifest | `0.1.5` + `Unreleased` 修改 |
+| package manifest | `0.1.6-rc.1` |
 | 发布就绪度 | **自动门禁通过** — 国际区/refresh/具体客户端验证前，浏览器 MFA 仍属实验功能 |
 | 本机自动测试 | **通过** — 38 个套件、824 项测试 |
 | TypeScript 构建 | **通过** |
-| npm 打包烟测 | **通过** — 179 个文件；压缩后 292.0 kB；解压后 1.2 MB |
+| npm 打包烟测 | **通过** — 179 个文件；压缩后 294.8 kB；解压后 1.2 MB |
 | 真实 Garmin 集成 | **本次未重跑** — 2026-08-21 的 `global` 只读基线为 8/8 |
 | 两步验证 | **预览** — 真实 CN 浏览器/session/profile/活动读取链路通过；国际区与真实 refresh 待验证 |
 
@@ -47,7 +48,7 @@ npm run pack:smoke
 
 `npm run build` 已成功完成。`npm run pack:smoke` 也已通过，检查的 npm 包包含
 179 个文件（包含新的本地认证与 MCP 认证 runtime、更新日志及中英文测试报告页面），
-压缩后大小为 292.0 kB，解压后大小为 1.2 MB。
+压缩后大小为 294.8 kB，解压后大小为 1.2 MB。
 
 测试还覆盖了绝对路径、有界且无 shell 的 Windows PowerShell/.NET ACL 边界、静态编码的
 精确 DACL 程序、当前 SID owner、全链重解析点与不可信根目录拒绝、逐层目录 fail-closed
@@ -147,8 +148,9 @@ session 再到只读调用的链路，但不代表国际区 MFA、真实 refresh
 - 使用真实国际区 MFA 账号运行浏览器认证流程。
 - 对浏览器生成的 session 实际触发 access/refresh token 轮换；自动 fixture 已覆盖刷新
   逻辑，但本次未强制真实账号刷新。
-- 在 Codex、Claude Code 等具体客户端中验证 MCP URL elicitation、完成通知与重试；
-  当前仅离线覆盖能力回退。
+- 在具体客户端中完成 MCP 浏览器认证、完成通知与重试。Codex CLI `0.147.0`
+  已完成 stdio 初始化并收到 `-32042` URL elicitation，但 URL 只出现在原始工具
+  诊断中，未转成一级认证提示；Claude Code 与 ZCode 仍未验证。
 - 在真实 `windows-latest` runner 上执行新增 ACL 烟测；workflow 已加入，但本机 macOS
   快照无法执行该任务。
 - WorkBuddy MCP 客户端烟测。
@@ -164,7 +166,7 @@ session 再到只读调用的链路，但不代表国际区 MFA、真实 refresh
   或健康数值。
 - 本次没有执行 Garmin 数据写操作。经授权的真实中国区浏览器认证写入了一份本机私有
   session，随后只执行 profile 与最近活动读取；本报告不记录任何私密值或目标路径。
-- package manifest 仍为 `0.1.5`；新认证工作记录在 `Unreleased`，本次验证没有发布它。
+- package manifest 为 `0.1.6-rc.1`；本快照验证该候选版，不会改动 npm `latest` 标签。
 
 后续每个候选版本都应重新运行上述自动检查。国际区 MFA、真实 refresh 轮换、FIT 及
 客户端烟测只能在账号所有者明确同意后执行，并继续使用同等的隐私保护措施。

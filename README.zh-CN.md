@@ -12,7 +12,7 @@
 **[English](README.md)** | 中文 | **[测试报告](TEST_REPORT.zh-CN.md)** | **[更新日志](CHANGELOG.md)**
 
 > [!WARNING]
-> **未发布的实验状态：** dsh 本机网页、`garmin-connect-auth serve` 系统浏览器流程与
+> **0.1.6-rc.1 候选版实验状态：** dsh 本机网页、`garmin-connect-auth serve` 系统浏览器流程与
 > MCP URL elicitation 现在可以初始化同一种 owner-only session。Garmin 两步验证仍是
 > 预览功能：2026-08-29 已在本机跑通真实中国区 MFA 的浏览器、session 落盘与只读调用
 > 链路；国际区 MFA 与 refresh token 轮换仍待验证，浏览器策略也可能阻断流程。旧的
@@ -693,6 +693,16 @@ session 文件；多个条目可共享同一个 FIT 父目录，“区域+邮箱
 打开 **设置 → MCP 服务器 → 新建 MCP 服务器**，选择**用户**作用域和 `stdio`，填写
 同样的 Node.js 绝对路径、`lib/mcp.js` 参数及 Garmin 环境变量。也可以直接编辑用户级
 原生配置 `~/.zcode/cli/config.json`：
+
+若要直接从 npm 验证本候选版，把 command 设为 `npx` 的绝对路径，并使用下列
+参数代替本地 checkout 的 `lib/mcp.js`：
+
+```text
+-y --package dsh-plugin-garmin-connect@0.1.6-rc.1 garmin-connect-mcp
+```
+
+不要配置 `GARMIN_PASSWORD`；在 session 缺失时，第一次只读工具调用即可验证 ZCode
+的 URL elicitation 链路。请保留下方显式的 owner-only `GARMIN_SESSION_TOKEN_FILE`。
 
 ```json
 {

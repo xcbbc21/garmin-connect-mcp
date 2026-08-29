@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-garmin-connect",
-  "version": "0.1.5",
+  "version": "0.1.6-rc.1",
   "description": "A DeepSeek Harness plugin that exposes Garmin Connect fitness and health data as AI-callable tools",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -47,6 +47,10 @@
     "url": "git+https://github.com/Likenttt/garmin-connect-plugin-for-dsh.git"
   },
   "homepage": "https://github.com/Likenttt/garmin-connect-plugin-for-dsh#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "build": "npm run build:host && npm run build:client:types && npm run build:client",
     "build:host": "tsc",

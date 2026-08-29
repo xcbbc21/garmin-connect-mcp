@@ -2,8 +2,8 @@
 
 [简体中文](./TEST_REPORT.zh-CN.md)
 
-This page is the static verification snapshot for the current `Unreleased`
-changes on top of the `0.1.5` package manifest. It records what was tested,
+This page is the static verification snapshot for the `0.1.6-rc.1` release
+candidate. It records what was tested,
 what was deliberately excluded, and which gaps still require manual
 verification.
 
@@ -11,18 +11,20 @@ verification.
 > source tree. The new system-browser and MCP authentication paths are covered
 > offline. A real China-region MFA browser-to-session-and-read chain also passed
 > locally on 2026-08-29. International-region MFA, real refresh-token rotation,
-> and concrete MCP-client URL elicitation remain preview gaps.
+> and first-class MCP-client authentication UX remain preview gaps. Codex CLI
+> `0.147.0` reached the URL-elicitation response in real stdio tool diagnostics;
+> it did not present that URL as a first-class authentication prompt.
 
 ## Snapshot
 
 | Item | Result |
 | --- | --- |
 | Test date | 2026-08-29 |
-| Package manifest | `0.1.5` + `Unreleased` changes |
+| Package manifest | `0.1.6-rc.1` |
 | Release readiness | **Automated gates passed** — browser MFA remains experimental while International/refresh/client gaps remain |
 | Local automated snapshot | **Passed** — 38 suites, 824 tests |
 | TypeScript build | **Passed** |
-| npm package smoke test | **Passed** — 179 files; 292.0 kB packed; 1.2 MB unpacked |
+| npm package smoke test | **Passed** — 179 files; 294.8 kB packed; 1.2 MB unpacked |
 | Real Garmin integration | **Not rerun** — prior 2026-08-21 `global` read-only baseline was 8/8 |
 | Two-step verification | **Preview** — real CN browser/session/profile/activity-read chain passed; International and real refresh pending |
 
@@ -51,7 +53,7 @@ npm run pack:smoke
 `npm run build` completed successfully. `npm run pack:smoke` also completed
 successfully and inspected a tarball containing 179 files, including the new
 local-auth and MCP-auth runtime modules, changelog, and both test-report pages,
-with a packed size of 292.0 kB and an unpacked size of 1.2 MB.
+with a packed size of 294.8 kB and an unpacked size of 1.2 MB.
 
 The suite also covers an absolute, bounded, shell-free Windows PowerShell/.NET
 ACL boundary, a static encoded exact-DACL program, current-SID ownership,
@@ -178,8 +180,11 @@ clients:
 - Exercising actual access/refresh-token rotation on a browser-created session;
   refresh behavior is covered by automated fixtures but was not forced against
   the real account.
-- Exercising MCP URL elicitation and completion/retry in Codex, Claude Code,
-  and other concrete clients; capability fallback is covered only offline.
+- Completing MCP browser authentication and completion/retry in a concrete
+  client. Codex CLI `0.147.0` completed stdio initialization and received the
+  `-32042` URL-elicitation response, but exposed its URL only in raw tool
+  diagnostics rather than a first-class prompt; Claude Code and ZCode remain
+  untested.
 - Running the new Windows ACL smoke test on a real `windows-latest` runner; the
   workflow is present, but this local macOS snapshot cannot execute it.
 - WorkBuddy MCP client smoke testing.
@@ -198,8 +203,8 @@ These are documented limitations of this snapshot, not passing test results.
   browser authentication wrote one private local session and was followed only
   by profile and recent-activity reads; no private value or destination is
   recorded in this report.
-- The package manifest remains `0.1.5`; the new authentication work is recorded
-  under `Unreleased` and has not been published by this verification run.
+- The package manifest is `0.1.6-rc.1`; this snapshot verifies the release
+  candidate without changing the npm `latest` tag.
 
 Future release candidates should rerun the automated commands above.
 International MFA, real refresh rotation, FIT, and client smoke tests should be
