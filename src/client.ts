@@ -527,13 +527,13 @@ export class GarminClient {
         }
         return result
       } catch (err: any) {
-        if (err instanceof GarminAuthenticationRequiredError) {
-          this.publishAuthenticationRequirement(err.reason)
-        }
         if (attemptEpoch !== this.authEpoch) {
           if (i === retries) throw authenticationChangedError()
           await this.ensureConnected()
           continue
+        }
+        if (err instanceof GarminAuthenticationRequiredError) {
+          this.publishAuthenticationRequirement(err.reason)
         }
         if (
           err instanceof GarminAuthenticationRequiredError

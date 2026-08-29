@@ -1155,6 +1155,36 @@ describe('GarminClient', () => {
     })
   })
 
+  it('does not publish a stale auth challenge after another request switches identity', async () => {
+    const client = new GarminClient(createContext(), {
+      ...baseConfig,
+      sessionToken: JSON.stringify({ oauth1: {}, oauth2: {} }),
+    })
+    let rejectOld!: (error: unknown) => void
+    let markOldStarted!: () => void
+    const oldStarted = new Promise<void>(resolve => { markOldStarted = resolve })
+    latestGarmin().getSleepData
+      .mockImplementationOnce(() => {
+        markOldStarted()
+        return new Promise((_resolve, reject) => { rejectOld = reject })
+      })
+      .mockRejectedValueOnce(Object.assign(new Error('unauthorized'), { status: 401 }))
+      .mockResolvedValueOnce({ dailySleepDTO: { calendarDate: 'password-new-day' } })
+      .mockResolvedValueOnce({ dailySleepDTO: { calendarDate: 'password-original-day' } })
+
+    const oldRequest = client.getSleep('2026-08-19')
+    await oldStarted
+    await expect(client.getSleep('2026-08-20')).resolves.toEqual({
+      dailySleepDTO: { calendarDate: 'password-new-day' },
+    })
+    rejectOld(new GarminAuthenticationRequiredError('expired'))
+
+    await expect(oldRequest).resolves.toEqual({
+      dailySleepDTO: { calendarDate: 'password-original-day' },
+    })
+    expect(client.getAuthenticationRequirement()).toBeUndefined()
+  })
+
   it('fails once with an actionable error when a token-only session is rejected', async () => {
     const client = new GarminClient(createContext(), {
       ...baseConfig,
