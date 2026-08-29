@@ -1,6 +1,6 @@
 # dsh-plugin-garmin-connect
 
-> A Garmin Connect plugin and MCP server that brings your fitness & health data into the AI agent loop — **browser-based MFA supported.**
+> A Garmin Connect plugin and MCP server with **secure browser-based MFA**, bringing your fitness & health data into the AI agent loop.
 
 [![npm version](https://img.shields.io/npm/v/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)
