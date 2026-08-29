@@ -2,6 +2,7 @@ import axios from 'axios'
 import { wrapper } from 'axios-cookiejar-support'
 import { GarminConnect } from 'garmin-connect'
 import { CookieJar } from 'tough-cookie'
+import { BrowserCanaryControlError } from './browser-auth-canary'
 import type { GarminRegion } from './config'
 import { hardenGarminHttpClient } from './client'
 import { detectGarminBrowserChallenge } from './garmin-auth-challenge'
@@ -15,10 +16,6 @@ const CSRF_PATTERN = /name=["']_csrf["']\s+value=["'](.+?)["']/i
 const TICKET_PATTERN = /(?:[?&]|&amp;)ticket=(ST-[^"&\s<]+)/i
 const MFA_VARIABLE_PATTERN =
   /(?:var|let|const)\s+(customerGuid|mfaMethod|locale|clientId|codeSentTo)\s*=\s*["']([^"']*)["']\s*;?/gi
-const MFA_CODE_INPUT_PATTERN =
-  /<input\b[^>]*\bname\s*=\s*["']mfa-code["'][^>]*>/i
-const MFA_FORM_ACTION_PATTERN =
-  /<form\b[^>]*\baction\s*=\s*["'][^"']*verifyMFA[^"']*["'][^>]*>/i
 const BROWSER_VERIFICATION_MESSAGE =
   'Open Garmin Connect in a browser and complete the verification, then retry; automatic browser authentication is not yet supported'
 const MFA_REJECTED_MESSAGE =
@@ -40,6 +37,7 @@ export interface GarminAuthOptions {
   promptMfa(context: MfaPromptContext): Promise<string>
   browserOnChallenge?: boolean
   requestTimeoutMs?: number
+  signal?: AbortSignal
 }
 
 interface SsoClientLike {
@@ -71,7 +69,7 @@ export interface GarminAuthDependencies {
     credentials: { username: string; password: string },
     domain: 'garmin.com' | 'garmin.cn',
   ): GarminAuthClientLike
-  wait?(milliseconds: number): Promise<void>
+  wait?(milliseconds: number, signal?: AbortSignal): Promise<void>
   random?(): number
 }
 
@@ -92,6 +90,7 @@ export async function authenticateGarminSession(
   const username = options.username.trim()
   if (!username) throw new PublicToolError('Garmin username is required')
   if (!options.password) throw new PublicToolError('Garmin password is required')
+  throwIfAuthenticationCancelled(options.signal)
 
   const timeoutMs = options.requestTimeoutMs ?? 30_000
   const domain = options.region === 'cn' ? 'garmin.cn' : 'garmin.com'
@@ -128,10 +127,15 @@ export async function authenticateGarminSession(
     }
     const commonHeaders = { 'User-Agent': USER_AGENT }
 
-    await sso.get(ssoEmbed, { params: initialParams, headers: commonHeaders })
+    await sso.get(ssoEmbed, {
+      params: initialParams,
+      headers: commonHeaders,
+      signal: options.signal,
+    })
     const signinPage = await sso.get(signinUrl, {
       params: widgetParams,
       headers: { ...commonHeaders, Referer: ssoEmbed },
+      signal: options.signal,
     })
     const signinHtml = requireHtml(signinPage.data)
     const csrf = extractRequired(CSRF_PATTERN, signinHtml)
@@ -140,7 +144,8 @@ export async function authenticateGarminSession(
     // short jitter mirrors the browser widget's normal dwell time.
     const random = dependencies.random?.() ?? Math.random()
     const delayMs = 3_000 + Math.floor(Math.max(0, Math.min(random, 1)) * 5_000)
-    await (dependencies.wait ?? wait)(delayMs)
+    await (dependencies.wait ?? wait)(delayMs, options.signal)
+    throwIfAuthenticationCancelled(options.signal)
 
     const loginResponse = await sso.post(
       signinUrl,
@@ -159,6 +164,7 @@ export async function authenticateGarminSession(
           Referer: signinUrl,
           Dnt: '1',
         },
+        signal: options.signal,
       },
     )
 
@@ -179,7 +185,7 @@ export async function authenticateGarminSession(
 
       const mfaVariables = parseMfaVariables(responseHtml)
       const mfaMethod = (mfaVariables.mfaMethod ?? '').toLowerCase()
-      const needsMfa = hasMfaChallenge(responseHtml, mfaVariables)
+      const needsMfa = detectGarminBrowserChallenge(responseHtml) === 'mfa'
 
       if (needsMfa) {
         usedMfa = true
@@ -209,6 +215,7 @@ export async function authenticateGarminSession(
                 Accept: 'application/json, text/plain, */*',
                 Referer: signinUrl,
               },
+              signal: options.signal,
             },
           )
         }
@@ -216,6 +223,7 @@ export async function authenticateGarminSession(
         const mfaCode = (await options.promptMfa({
           method: mfaMethod || 'verification',
         })).trim()
+        throwIfAuthenticationCancelled(options.signal)
         if (!mfaCode) throw new PublicToolError('MFA code is required')
         if (mfaCode.length > 32) throw new PublicToolError('MFA code is invalid')
         const mfaCsrf = extractRequired(CSRF_PATTERN, responseHtml)
@@ -238,6 +246,7 @@ export async function authenticateGarminSession(
                 Referer: signinUrl,
                 Dnt: '1',
               },
+              signal: options.signal,
             },
           )
         } catch (error) {
@@ -264,13 +273,17 @@ export async function authenticateGarminSession(
     if (garmin.client.client?.defaults) {
       garmin.client.client.defaults.timeout = timeoutMs
       garmin.client.client.defaults.maxContentLength = MAX_AUTH_RESPONSE_BYTES
+      garmin.client.client.defaults.signal = options.signal
     }
-    const consumerResponse = await sso.get(OAUTH_CONSUMER_URL)
+    const consumerResponse = await sso.get(OAUTH_CONSUMER_URL, {
+      signal: options.signal,
+    })
     const consumer = parseOauthConsumer(consumerResponse.data)
     garmin.client.OAUTH_CONSUMER = consumer
     const oauth1 = await garmin.client.getOauth1Token(ticket)
     await garmin.client.exchange(oauth1)
     const profile = await garmin.getUserProfile()
+    throwIfAuthenticationCancelled(options.signal)
     const tokens = parseExportedTokens(garmin.exportToken())
     const displayName = isRecord(profile) && typeof profile.displayName === 'string'
       ? profile.displayName
@@ -278,6 +291,10 @@ export async function authenticateGarminSession(
 
     return { tokens, displayName, usedMfa }
   } catch (error) {
+    if (options.signal?.aborted) {
+      throw new BrowserCanaryControlError('CANCELLED')
+    }
+    if (error instanceof BrowserCanaryControlError) throw error
     if (error instanceof PublicToolError) throw error
     const status = httpStatus(error)
     if (status === 429) {
@@ -316,15 +333,6 @@ function parseMfaVariables(html: string): Record<string, string> {
     values[match[1]] = match[2]
   }
   return values
-}
-
-function hasMfaChallenge(
-  html: string,
-  variables: Record<string, string> = parseMfaVariables(html),
-): boolean {
-  return Boolean(variables.mfaMethod)
-    || MFA_CODE_INPUT_PATTERN.test(html)
-    || MFA_FORM_ACTION_PATTERN.test(html)
 }
 
 function throwIfBrowserVerification(html: string): void {
@@ -374,6 +382,26 @@ function httpStatus(error: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) ? value : undefined
 }
 
-function wait(milliseconds: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, milliseconds))
+function throwIfAuthenticationCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
+}
+
+function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  throwIfAuthenticationCancelled(signal)
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+    const onAbort = (): void => finish(new BrowserCanaryControlError('CANCELLED'))
+    const timer = setTimeout(() => finish(), milliseconds)
+    timer.unref?.()
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
+  })
 }

@@ -62,12 +62,19 @@ export interface AuthSetupInput {
   browserDependencies?: AuthServeCliDependencies
 }
 
-export interface AuthSetupResult {
+interface AuthSetupResultBase {
   account: string
   region: GarminRegion
   sessionTokenFile: string
-  usedMfa: boolean
 }
+
+export type AuthSetupResult = AuthSetupResultBase & (
+  | { authenticationMode: 'terminal'; usedMfa: boolean }
+  | {
+      authenticationMode: 'browser'
+      browserTrigger: 'blank_password' | 'mfa' | 'verification' | 'challenge'
+    }
+)
 
 export interface AuthCanaryCliDependencies {
   canary(options: BrowserDiAuthCanaryOptions): Promise<BrowserDiAuthCanaryResult>
@@ -248,7 +255,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
       return continueAuthSetupInBrowser(
         input,
         { account, region, sessionTokenFile, username },
-        false,
+        'blank_password',
       )
     }
     const authenticated = await dependencies.authenticate({
@@ -256,6 +263,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
       password,
       region,
       browserOnChallenge: true,
+      signal: input.signal,
       promptMfa: async ({ method }) => promptAuthCli(
         input.io,
         `Garmin MFA code (${safeMfaMethod(method)}): `,
@@ -263,6 +271,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
         input.signal,
       ),
     })
+    throwIfAuthCliCancelled(input.signal)
     await dependencies.writeSession(
       sessionTokenFile,
       bindSessionTokensToAccount(authenticated.tokens, username, region),
@@ -281,6 +290,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
       account,
       region,
       sessionTokenFile,
+      authenticationMode: 'terminal',
       usedMfa: authenticated.usedMfa,
     }
   } catch (error) {
@@ -293,7 +303,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
     return continueAuthSetupInBrowser(
       input,
       { account, region, sessionTokenFile, username },
-      error.challengeKind === 'mfa',
+      error.challengeKind ?? 'challenge',
     )
   } finally {
     // JavaScript strings cannot be reliably zeroized, but dropping the last
@@ -310,7 +320,7 @@ async function continueAuthSetupInBrowser(
     sessionTokenFile: string
     username: string
   },
-  usedMfa: boolean,
+  browserTrigger: 'blank_password' | 'mfa' | 'verification' | 'challenge',
 ): Promise<AuthSetupResult> {
   await runAuthServe({
     argv: [
@@ -333,7 +343,8 @@ async function continueAuthSetupInBrowser(
     account: details.account,
     region: details.region,
     sessionTokenFile: details.sessionTokenFile,
-    usedMfa,
+    authenticationMode: 'browser',
+    browserTrigger,
   }
 }
 
@@ -678,6 +689,10 @@ function promptAuthCli(
   return signal === undefined
     ? io.prompt(label, secret)
     : io.prompt(label, secret, signal)
+}
+
+function throwIfAuthCliCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new BrowserCanaryControlError('CANCELLED')
 }
 
 async function promptVisible(

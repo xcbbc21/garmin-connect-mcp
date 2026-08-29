@@ -314,6 +314,7 @@ describe('Garmin interactive auth CLI', () => {
       account: 'personal',
       region: 'cn',
       sessionTokenFile: path.resolve('/safe/personal.json'),
+      authenticationMode: 'terminal',
       usedMfa: true,
     })
     expect(prompt).toHaveBeenNthCalledWith(1, 'Garmin email: ', false)
@@ -421,7 +422,8 @@ describe('Garmin interactive auth CLI', () => {
       account: 'personal',
       region: 'cn',
       sessionTokenFile: path.resolve('/safe/personal.json'),
-      usedMfa: true,
+      authenticationMode: 'browser',
+      browserTrigger: 'mfa',
     })
 
     expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({
@@ -466,7 +468,10 @@ describe('Garmin interactive auth CLI', () => {
         writeSession: jest.fn(),
       },
       browserDependencies: serveDependencies(browserAuthenticate),
-    })).resolves.toMatchObject({ usedMfa: false })
+    })).resolves.toMatchObject({
+      authenticationMode: 'browser',
+      browserTrigger: 'verification',
+    })
   })
 
   it('uses the shared browser flow when no terminal password is supplied', async () => {
@@ -494,13 +499,39 @@ describe('Garmin interactive auth CLI', () => {
       account: 'default',
       region: 'global',
       sessionTokenFile: path.resolve('/safe/default.json'),
-      usedMfa: false,
+      authenticationMode: 'browser',
+      browserTrigger: 'blank_password',
     })
 
     expect(authenticate).not.toHaveBeenCalled()
     expect(writeSession).not.toHaveBeenCalled()
     expect(browserAuthenticate).toHaveBeenCalledTimes(1)
     expect(browserAuthenticate).toHaveBeenCalledWith(expect.objectContaining({ signal }))
+  })
+
+  it('does not persist a terminal session after password authentication is cancelled', async () => {
+    const controller = new AbortController()
+    const io: AuthCliIO = {
+      prompt: jest.fn().mockResolvedValue('PASSWORD_MARKER'),
+      write: jest.fn(),
+    }
+    const authenticate = jest.fn(async (options: any) => {
+      expect(options.signal).toBe(controller.signal)
+      controller.abort()
+      return { tokens: TOKENS, usedMfa: false }
+    })
+    const writeSession = jest.fn()
+
+    await expect(runAuthSetup({
+      argv: ['login', '--output', '/safe/default.json'],
+      env: { GARMIN_USERNAME: 'runner@example.test' },
+      io,
+      signal: controller.signal,
+      dependencies: { authenticate, writeSession },
+    })).rejects.toMatchObject({ code: 'CANCELLED' })
+
+    expect(writeSession).not.toHaveBeenCalled()
+    expect(io.write).not.toHaveBeenCalled()
   })
 
   it.each([

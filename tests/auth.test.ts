@@ -53,12 +53,14 @@ describe('interactive Garmin authentication', () => {
       '<title>Success</title><a href="embed?ticket=ST-NORMAL">continue</a>',
     )
     const promptMfa = jest.fn()
+    const signal = new AbortController().signal
 
     await expect(authenticateGarminSession({
       username: 'runner@example.test',
       password: 'password-secret',
       region: 'global',
       promptMfa,
+      signal,
     }, dependencies)).resolves.toEqual({
       tokens: { oauth1: OAUTH1, oauth2: OAUTH2 },
       displayName: 'runner',
@@ -97,9 +99,76 @@ describe('interactive Garmin authentication', () => {
     expect(upstream.client.defaults).toMatchObject({
       timeout: 30_000,
       maxContentLength: 5 * 1024 * 1024,
+      signal,
     })
     expect(upstream.exchange).toHaveBeenCalledWith({ token: OAUTH1, oauth: {} })
     expect(garmin.exportToken).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels an in-flight SSO request through the caller signal', async () => {
+    const controller = new AbortController()
+    const { dependencies, post, upstream } = fixture(
+      '<a href="embed?ticket=ST-MUST-NOT-BE-USED">continue</a>',
+    )
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    const get = jest.fn((_url: string, config?: Record<string, unknown>) => (
+      new Promise<{ data: unknown }>((_resolve, reject) => {
+        const signal = config?.signal as AbortSignal | undefined
+        expect(signal).toBe(controller.signal)
+        signal?.addEventListener('abort', () => reject(new Error('cancelled')), {
+          once: true,
+        })
+        markStarted()
+      })
+    ))
+    dependencies.createSsoClient = jest.fn(() => ({ get, post }) as any)
+
+    const authentication = authenticateGarminSession({
+      username: 'runner@example.test',
+      password: 'password-secret',
+      region: 'global',
+      promptMfa: async () => 'must-not-be-read',
+      signal: controller.signal,
+    }, dependencies)
+    await started
+    controller.abort()
+
+    await expect(authentication).rejects.toMatchObject({ code: 'CANCELLED' })
+    expect(post).not.toHaveBeenCalled()
+    expect(upstream.getOauth1Token).not.toHaveBeenCalled()
+  })
+
+  it('cancels the credential-submission dwell time before posting a password', async () => {
+    const controller = new AbortController()
+    const { dependencies, post } = fixture(
+      '<a href="embed?ticket=ST-MUST-NOT-BE-USED">continue</a>',
+    )
+    let markWaiting!: () => void
+    const waiting = new Promise<void>(resolve => { markWaiting = resolve })
+    dependencies.wait = jest.fn((_milliseconds, signal) => (
+      new Promise<void>((_resolve, reject) => {
+        expect(signal).toBe(controller.signal)
+        signal?.addEventListener('abort', () => reject(new Error('cancelled')), {
+          once: true,
+        })
+        markWaiting()
+      })
+    ))
+
+    const authentication = authenticateGarminSession({
+      username: 'runner@example.test',
+      password: 'password-secret',
+      region: 'global',
+      promptMfa: async () => 'must-not-be-read',
+      signal: controller.signal,
+    }, dependencies)
+    await waiting
+    controller.abort()
+
+    await expect(authentication).rejects.toMatchObject({ code: 'CANCELLED' })
+    expect(dependencies.wait).toHaveBeenCalledWith(3_000, controller.signal)
+    expect(post).not.toHaveBeenCalled()
   })
 
   it('accepts a returned ticket before considering stale MFA page markers', async () => {
