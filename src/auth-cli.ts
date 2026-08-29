@@ -750,7 +750,7 @@ function promptHidden(
     const onData = (chunk: string | Buffer): void => {
       for (const character of String(chunk)) {
         if (character === '\u0003') {
-          finish(new PublicToolError('Authentication cancelled'))
+          finish(new GarminAuthenticationCancelledError())
           return
         }
         if (character === '\r' || character === '\n') {

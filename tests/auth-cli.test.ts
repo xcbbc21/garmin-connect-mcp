@@ -1197,4 +1197,65 @@ describe('Garmin interactive auth CLI', () => {
       rmSync(directory, { recursive: true, force: true })
     }
   }, 15_000)
+
+  it('exits with SIGINT status when Ctrl-C is entered in the hidden password prompt', async () => {
+    if (process.platform === 'win32') return
+    const directory = mkdtempSync(path.join(tmpdir(), 'garmin-auth-ctrl-c-test-'))
+    const entrypoint = path.resolve(__dirname, '../src/auth-cli.ts')
+    const fakeTtyModule = `data:text/javascript,${encodeURIComponent(
+      'Object.defineProperty(process.stdin,"isTTY",{value:true})',
+    )}`
+    const child = spawn(process.execPath, [
+      '--import',
+      fakeTtyModule,
+      '--import',
+      require.resolve('tsx'),
+      entrypoint,
+      'login',
+      '--output',
+      path.join(directory, 'session.json'),
+    ], {
+      env: {
+        ...process.env,
+        GARMIN_USERNAME: 'runner@example.test',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+    let controlSent = false
+
+    try {
+      const result = await new Promise<{
+        code: number | null
+        signal: NodeJS.Signals | null
+      }>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`auth CLI did not exit after Ctrl-C: ${stderr}`))
+        }, 10_000)
+        child.once('error', (error) => {
+          clearTimeout(timer)
+          reject(error)
+        })
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString('utf8')
+          if (!controlSent && stderr.includes('Garmin password:')) {
+            controlSent = true
+            child.stdin.end('\u0003')
+          }
+        })
+        child.once('close', (code, signal) => {
+          clearTimeout(timer)
+          resolve({ code, signal })
+        })
+      })
+
+      expect(controlSent).toBe(true)
+      expect(result).toEqual({ code: 130, signal: null })
+      expect(stderr).toContain('Garmin authentication was cancelled')
+      expect(stderr).not.toContain('Authentication succeeded')
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }, 15_000)
 })
