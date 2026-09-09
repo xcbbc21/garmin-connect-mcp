@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-09
+
+### Added
+- Ship the WorkBuddy `garmin-connect` skill and its setup reference in the npm package.
+- Document the optional `GARMIN_FIT_DOWNLOAD_DIR` setting and how to update the installed WorkBuddy skill.
+
+### Changed
+- Allow the WorkBuddy skill to create Garmin workouts and download activity FIT files when explicitly requested, instead of refusing all writes.
+- Retain the existing workout preview and one-time confirmation flow, explicit FIT destination, no-overwrite behavior, and manual retry after authentication or uncertain write results.
+
 ## [0.1.6] - 2026-08-30
 
 ### Changed

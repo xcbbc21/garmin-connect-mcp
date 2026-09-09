@@ -722,6 +722,18 @@ macOS/Linux 用 `command -v node`、Windows 用 `where node` 查找 Node.js 的�
 命名的 `mcpServers` 条目，并使用独立的
 session 文件；多个条目可共享同一个 FIT 父目录，“区域+邮箱”账号子目录会自动生成。
 
+#### 随包附带的技能
+
+从 **0.1.7** 起，npm 包内附带 `skills/garmin-connect/`。将这个完整目录复制到
+`~/.workbuddy/skills/garmin-connect/`，保留其中的 `references/`。如果已安装该技能，
+也需要同步更新已安装副本；仅升级 npm 包不会自动更新技能。重新加载 WorkBuddy 的
+技能与 MCP 服务，再新开会话使用。
+
+技能可按用户请求调用 `create_garmin_workout`，先预览训练，经用户确认后创建。
+使用 `download_garmin_activity_fit` 下载指定活动时，需在 MCP 服务的 `env` 中设置
+`GARMIN_FIT_DOWNLOAD_DIR`，值为可信本地父目录的绝对路径。完整配置步骤见随包附带的
+`references/workbuddy-setup.md`。
+
 ### ZCode
 
 打开 **设置 → MCP 服务器 → 新建 MCP 服务器**，选择**用户**作用域和 `stdio`，填写
