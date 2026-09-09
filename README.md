@@ -830,6 +830,20 @@ WorkBuddy and the model never receive the password/MFA code. Add another named
 the same FIT parent directory because region-and-email account subdirectories
 are automatic.
 
+#### Bundled skill
+
+Starting with version **0.1.7**, the npm package includes
+`skills/garmin-connect/`. Copy this complete directory, including `references/`,
+to `~/.workbuddy/skills/garmin-connect/`. If the skill is already installed,
+update that installed copy as well; upgrading the npm package alone does not
+update it. Reload WorkBuddy's skills and MCP service, then start a new session.
+
+The skill can use `create_garmin_workout` on request: preview the workout first,
+then create it after the user confirms the preview. To download a requested
+activity with `download_garmin_activity_fit`, set `GARMIN_FIT_DOWNLOAD_DIR` to
+the absolute path of a trusted local parent directory in the MCP service's
+`env`. See the bundled `references/workbuddy-setup.md` for setup details.
+
 ### ZCode
 
 Open **Settings → MCP Servers → New MCP Server**, choose **User** scope and
