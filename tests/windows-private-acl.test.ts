@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import type {
@@ -342,6 +343,27 @@ describe('Windows exact-private session host integration', () => {
     }
 
     try {
+      // Keep runtime error redaction intact. If native CI fails, emit only
+      // bounded process metadata, never the command, environment or output.
+      const diagnosticAcl = await createWindowsPrivateAcl({
+        run: (file, args, options) => new Promise((resolve, reject) => {
+          const started = Date.now()
+          execFile(file, [...args], options, (error, stdout, stderr) => {
+            if (error) {
+              console.error('Windows ACL smoke subprocess failed', {
+                elapsedMs: Date.now() - started,
+                killed: error.killed === true,
+                code: typeof error.code === 'number' ? error.code : 'non-numeric',
+                signal: error.signal === 'SIGTERM' ? 'SIGTERM' : 'other',
+                stdoutBytes: Buffer.byteLength(stdout),
+                stderrBytes: Buffer.byteLength(stderr),
+              })
+              reject(error)
+            } else resolve({ stdout, stderr })
+          })
+        }),
+      })
+      await diagnosticAcl.prepareDirectory(parent)
       await prepareSessionTokenWriteDestination(path)
       await writeSessionTokenFile(path, tokens)
       const acl = await createWindowsPrivateAcl()

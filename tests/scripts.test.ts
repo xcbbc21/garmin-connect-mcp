@@ -2,11 +2,12 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 describe('command entrypoint', () => {
   it('keeps MCP stdio stdout protocol-only during early dotenv warnings', () => {
     const entrypoint = path.resolve(__dirname, '../src/mcp.ts')
-    const tsxLoader = require.resolve('tsx')
+    const tsxLoader = pathToFileURL(require.resolve('tsx')).href
     const cwd = mkdtempSync(path.join(tmpdir(), 'garmin-mcp-test-'))
     let result: ReturnType<typeof spawnSync>
     try {
@@ -28,7 +29,7 @@ describe('command entrypoint', () => {
       rmSync(cwd, { recursive: true, force: true })
     }
 
-    expect(result.status).toBe(0)
+    expect({ status: result.status, stderr: result.status === 0 ? '' : result.stderr }).toEqual({ status: 0, stderr: '' })
     expect(result.stdout).toBe('')
     expect(result.stderr).not.toContain('fixture@example.test')
     expect(result.stderr).not.toContain('fixture-password')

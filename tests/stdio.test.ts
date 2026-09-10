@@ -3,6 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 function toolJson(result: any): any {
   return JSON.parse(result.content[0].text)
@@ -11,11 +12,16 @@ function toolJson(result: any): any {
 describe('built MCP over child-process stdio', () => {
   it('initializes the actual executable, exposes the baseline and previews without account access', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'garmin-stdio-'))
+    // Windows deliberately rejects generic temp directories with inherited ACLs.
+    // Let the production client create its private parent below a trusted root.
+    const sessionDirectory = process.platform === 'win32'
+      ? path.join(process.env.LOCALAPPDATA!, `garmin-stdio-${randomUUID()}`)
+      : cwd
     const client = new Client({ name: 'generic-client', version: '1' })
     const transport = new StdioClientTransport({
       command: process.execPath, args: [path.resolve(__dirname, '../lib/mcp.js')], cwd,
       env: { GARMIN_USERNAME: 'fixture@example.test', GARMIN_REGION: 'cn',
-        GARMIN_ACCOUNT: 'test', GARMIN_SESSION_TOKEN_FILE: path.join(cwd, 'missing.session.json') },
+        GARMIN_ACCOUNT: 'test', GARMIN_SESSION_TOKEN_FILE: path.join(sessionDirectory, 'missing.session.json') },
       stderr: 'pipe',
     })
     const errors: Error[] = []
@@ -40,8 +46,9 @@ describe('built MCP over child-process stdio', () => {
       await client.close()
       expect(transport.pid).toBeNull()
       await rm(cwd, { recursive: true, force: true })
+      if (sessionDirectory !== cwd) await rm(sessionDirectory, { recursive: true, force: true })
     }
-  })
+  }, process.platform === 'win32' ? 120_000 : 15_000)
 
   it('executes a simulated Calendar write only after confirmation and rejects replay over stdio', async () => {
     const client = new Client({ name: 'generic-client', version: '1' })
