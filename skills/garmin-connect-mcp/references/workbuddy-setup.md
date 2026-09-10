@@ -150,7 +150,7 @@ install -d -m 700 "$HOME/.garmin-connect-auth/accounts"
 升级 npm 软件包不会自动替换 WorkBuddy 已安装的技能文件。要启用本技能中的
 写操作流程，应将当前版本的 `skills/garmin-connect-mcp/SKILL.md` 与
 `skills/garmin-connect-mcp/references/workbuddy-setup.md` 同步到 WorkBuddy 实际
-安装的 `garmin-connect` 技能目录，保留用户与本次更新无关的本地修改和其他技能。
+安装的 `garmin-connect-mcp` 技能目录，保留用户与本次更新无关的本地修改和其他技能。
 
 重新加载 WorkBuddy 的技能与 MCP 服务，再新开会话调用 `garmin-connect-mcp`。
 确认当前会话能看到 `create_garmin_workout` 和 `download_garmin_activity_fit`
