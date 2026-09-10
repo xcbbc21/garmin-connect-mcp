@@ -5,7 +5,7 @@ import { createMcpServer, standaloneConfig } from '../src/mcp'
 import { GarminAuthenticationRequiredError } from '../src/utils/errors'
 
 describe('MCP adapter', () => {
-  it('exposes the same ten non-secret Garmin tools as the plugin', async () => {
+  it('exposes calendar scheduling tools with write annotations and strict schemas', async () => {
     const service = serviceStub()
     const server = createMcpServer(service as any)
     const client = new Client({ name: 'test-client', version: '1.0.0' })
@@ -31,8 +31,27 @@ describe('MCP adapter', () => {
         'get_garmin_profile',
         'get_running_skill_advice',
         'create_garmin_workout',
+        'schedule_garmin_workout',
+        'batch_schedule_garmin_workouts',
+        'create_and_schedule_garmin_workout',
+        'unschedule_garmin_workout',
         'download_garmin_activity_fit',
       ])
+      const scheduleWorkout = result.tools.find(tool => tool.name === 'schedule_garmin_workout')!
+      expect(scheduleWorkout.inputSchema).toMatchObject({
+        type: 'object',
+        required: ['workoutId', 'date'],
+        additionalProperties: false,
+      })
+      expect(scheduleWorkout.annotations).toMatchObject({
+        readOnlyHint: false,
+        idempotentHint: false,
+      })
+      const batchSchedule = result.tools.find(tool => tool.name === 'batch_schedule_garmin_workouts')!
+      expect(batchSchedule.inputSchema).toMatchObject({
+        required: ['schedules'],
+        properties: expect.objectContaining({ schedules: expect.any(Object) }),
+      })
       const createWorkout = result.tools.find(tool => tool.name === 'create_garmin_workout')!
       expect(createWorkout.description).toContain('does not generate a training plan')
       expect(createWorkout.description).toContain('mode=personalized')
@@ -128,6 +147,10 @@ describe('MCP adapter', () => {
       expect(result.tools
         .filter(tool => ![
           'create_garmin_workout',
+          'schedule_garmin_workout',
+          'batch_schedule_garmin_workouts',
+          'create_and_schedule_garmin_workout',
+          'unschedule_garmin_workout',
           'download_garmin_activity_fit',
         ].includes(tool.name))
         .every(tool => tool.annotations?.readOnlyHint === true)).toBe(true)
@@ -168,6 +191,38 @@ describe('MCP adapter', () => {
       expect(result.content).toEqual(expect.arrayContaining([
         expect.objectContaining({ type: 'text' }),
       ]))
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  it('passes a calendar-schedule preview through the in-memory MCP transport', async () => {
+    const service = serviceStub()
+    service.scheduleWorkout.mockResolvedValue({
+      requiresConfirmation: true,
+      confirmationId: 'a0f7d8e1-172e-4e98-8e83-0c05de15a8a8',
+    })
+    const server = createMcpServer(service as any)
+    const client = new Client({ name: 'test-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    try {
+      const result = await client.callTool({
+        name: 'schedule_garmin_workout',
+        arguments: {
+          workoutId: 'workout-42',
+          date: '2026-09-15',
+          timezone: 'Asia/Shanghai',
+        },
+      })
+      expect(service.scheduleWorkout).toHaveBeenCalledWith({
+        workoutId: 'workout-42',
+        date: '2026-09-15',
+        timezone: 'Asia/Shanghai',
+      })
+      expect(result.isError).not.toBe(true)
     } finally {
       await client.close()
       await server.close()
@@ -473,7 +528,7 @@ describe('standalone MCP config', () => {
       password: '   ',
       sessionToken: '',
       sessionTokenFile:
-        '/private/config/dsh-plugin-garmin-connect/accounts/default.session.json',
+        '/private/config/garmin-connect-mcp/accounts/default.session.json',
     })
   })
 
@@ -486,7 +541,7 @@ describe('standalone MCP config', () => {
     process.env.XDG_CONFIG_HOME = '/private/config'
 
     expect(standaloneConfig().sessionTokenFile).toBe(
-      '/private/config/dsh-plugin-garmin-connect/accounts/international.session.json',
+      '/private/config/garmin-connect-mcp/accounts/international.session.json',
     )
   })
 
@@ -522,6 +577,10 @@ function serviceStub() {
     getProfile: jest.fn().mockResolvedValue({}),
     getRunningAdvice: jest.fn().mockResolvedValue({}),
     createWorkout: jest.fn().mockResolvedValue({}),
+    scheduleWorkout: jest.fn().mockResolvedValue({}),
+    batchScheduleWorkouts: jest.fn().mockResolvedValue({}),
+    createAndScheduleWorkout: jest.fn().mockResolvedValue({}),
+    unscheduleWorkout: jest.fn().mockResolvedValue({}),
     downloadActivityFit: jest.fn().mockResolvedValue({}),
   }
 }

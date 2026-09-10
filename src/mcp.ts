@@ -23,11 +23,15 @@ import {
 } from './tool-service'
 import type {
   ActivityArgs,
+  BatchScheduleWorkoutArgs,
+  CreateAndScheduleWorkoutArgs,
   CreateWorkoutArgs,
   DateRangeArgs,
   DownloadActivityFitArgs,
   PaginationArgs,
   RunningAdviceArgs,
+  ScheduleWorkoutArgs,
+  UnscheduleWorkoutArgs,
 } from './tool-service'
 import {
   GarminAuthenticationRequiredError,
@@ -48,6 +52,10 @@ type ToolService = Pick<
   | 'getProfile'
   | 'getRunningAdvice'
   | 'createWorkout'
+  | 'scheduleWorkout'
+  | 'batchScheduleWorkouts'
+  | 'createAndScheduleWorkout'
+  | 'unscheduleWorkout'
   | 'downloadActivityFit'
 >
 
@@ -81,6 +89,19 @@ const workoutStepSchema: z.ZodTypeAny = z.union([
   repeatWorkoutStepSchema,
 ])
 
+const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+  .describe('Local Garmin Calendar date in YYYY-MM-DD format')
+const timezoneSchema = z.string().min(1).max(100).optional()
+  .describe('IANA timezone used to interpret date, e.g. Asia/Shanghai; defaults to the MCP host timezone')
+const confirmationSchema = {
+  confirmed: z.boolean().optional().describe(
+    'Set true only after the user explicitly approves the returned preview.',
+  ),
+  confirmationId: z.string().uuid().optional().describe(
+    'One-time ID returned by the matching preview call.',
+  ),
+}
+
 const READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -113,7 +134,7 @@ class GarminMcpServer extends McpServer {
 
   constructor() {
     super({
-      name: 'garmin-connect',
+      name: 'garmin-connect-mcp',
       version: MCP_SERVER_VERSION,
     })
     const previousOnClose = this.server.onclose
@@ -304,6 +325,74 @@ export function createMcpServer(
       ),
     },
     (args: CreateWorkoutArgs) => invokeTool(() => service.createWorkout(args)),
+    WRITE_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'schedule_garmin_workout',
+    'Preview then schedule one existing Garmin workout-library entry on a local calendar date. ' +
+      'A repeated workout is allowed on different dates, but the same workout/date pair is rejected. ' +
+      'The write is non-idempotent: after a timeout, inspect Garmin Calendar before retrying.',
+    {
+      workoutId: z.string().min(1).max(128).describe('Existing Garmin workout-library ID.'),
+      date: calendarDateSchema,
+      timezone: timezoneSchema,
+      ...confirmationSchema,
+    },
+    (args: ScheduleWorkoutArgs) => invokeTool(() => service.scheduleWorkout(args)),
+    WRITE_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'batch_schedule_garmin_workouts',
+    'Preview then schedule 1–100 existing Garmin workout-library entries across future days or weeks. ' +
+      'The batch continues after an individual failure and returns per-entry results. Do not represent rest days: omit them instead of creating a workout.',
+    {
+      schedules: z.array(z.object({
+        workoutId: z.string().min(1).max(128),
+        date: calendarDateSchema,
+      }).strict()).min(1).max(100),
+      timezone: timezoneSchema,
+      ...confirmationSchema,
+    },
+    (args: BatchScheduleWorkoutArgs) => invokeTool(() => service.batchScheduleWorkouts(args)),
+    WRITE_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'create_and_schedule_garmin_workout',
+    'Preview then create one structured Garmin workout and schedule it on a local calendar date in one confirmed operation. ' +
+      'If creation succeeds but scheduling fails, the result reports the partial outcome and must not be blindly retried.',
+    {
+      workout: z.object({
+        name: z.string().min(1).max(80),
+        description: z.string().max(1024).optional(),
+        sport: z.enum(['running', 'cycling', 'swimming', 'strength']).optional(),
+        steps: z.array(workoutStepSchema).min(1).max(100),
+      }).strict(),
+      date: calendarDateSchema,
+      timezone: timezoneSchema,
+      ...confirmationSchema,
+    },
+    (args: CreateAndScheduleWorkoutArgs) => invokeTool(() => service.createAndScheduleWorkout(args)),
+    WRITE_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'unschedule_garmin_workout',
+    'Preview then remove one Garmin Calendar entry by the workoutScheduleId returned from a prior schedule operation. ' +
+      'This removes the calendar entry, not the reusable workout-library template.',
+    {
+      workoutScheduleId: z.string().min(1).max(128).describe(
+        'Garmin Calendar entry ID returned as workoutScheduleId by a schedule operation.',
+      ),
+      ...confirmationSchema,
+    },
+    (args: UnscheduleWorkoutArgs) => invokeTool(() => service.unscheduleWorkout(args)),
     WRITE_ANNOTATIONS,
     false,
   )

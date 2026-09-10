@@ -10,7 +10,7 @@ MCP 服务。它不是 WorkBuddy 企业版上传清单，也不支持纯网页�
 ## 环境与软件包
 
 - Node.js 20 或更高版本
-- 公共软件包：`dsh-plugin-garmin-connect`
+- 公共软件包：`garmin-connect-mcp`
 - npm 仓库：`https://registry.npmjs.org/`
 - MCP 可执行程序：`garmin-connect-mcp`
 
@@ -47,11 +47,11 @@ tarball。`npm pack` 会根据仓库元数据校验 tarball：
 ```bash
 DOWNLOAD_DIR="$(mktemp -d)"
 "$NODE_BIN" "$NPM_CLI" view \
-  dsh-plugin-garmin-connect \
+  garmin-connect-mcp \
   version dist.integrity \
   --registry=https://registry.npmjs.org/
 "$NODE_BIN" "$NPM_CLI" pack \
-  dsh-plugin-garmin-connect \
+  garmin-connect-mcp \
   --ignore-scripts \
   --registry=https://registry.npmjs.org/ \
   --pack-destination "$DOWNLOAD_DIR"
@@ -66,7 +66,7 @@ DOWNLOAD_DIR="$(mktemp -d)"
 ```bash
 /absolute/path/to/node /absolute/path/to/npx-cli.js -y \
   --registry=https://registry.npmjs.org/ \
-  --package dsh-plugin-garmin-connect \
+  --package garmin-connect-mcp \
   garmin-connect-auth --version
 ```
 
@@ -81,14 +81,14 @@ DOWNLOAD_DIR="$(mktemp -d)"
 ```json
 {
   "mcpServers": {
-    "garmin-connect": {
+    "garmin-connect-mcp": {
       "command": "/absolute/path/to/node",
       "args": [
         "/absolute/path/to/npx-cli.js",
         "-y",
         "--registry=https://registry.npmjs.org/",
         "--package",
-        "dsh-plugin-garmin-connect",
+        "garmin-connect-mcp",
         "garmin-connect-mcp"
       ],
       "env": {
@@ -123,7 +123,7 @@ install -d -m 700 "$HOME/.garmin-connect-auth/accounts"
 或不同账号绝不能共用同一个会话文件。
 
 保存配置，重新加载 WorkBuddy MCP 服务，并确认服务已经连接。然后开始一个新
-请求并再次调用 `garmin-connect`。WorkBuddy 重新加载前，原会话无法使用刚注册
+请求并再次调用 `garmin-connect-mcp`。WorkBuddy 重新加载前，原会话无法使用刚注册
 的工具。
 
 ## 可选：配置 FIT 下载目录
@@ -148,11 +148,11 @@ install -d -m 700 "$HOME/.garmin-connect-auth/accounts"
 ## 更新已安装技能
 
 升级 npm 软件包不会自动替换 WorkBuddy 已安装的技能文件。要启用本技能中的
-写操作流程，应将当前版本的 `skills/garmin-connect/SKILL.md` 与
-`skills/garmin-connect/references/workbuddy-setup.md` 同步到 WorkBuddy 实际
+写操作流程，应将当前版本的 `skills/garmin-connect-mcp/SKILL.md` 与
+`skills/garmin-connect-mcp/references/workbuddy-setup.md` 同步到 WorkBuddy 实际
 安装的 `garmin-connect` 技能目录，保留用户与本次更新无关的本地修改和其他技能。
 
-重新加载 WorkBuddy 的技能与 MCP 服务，再新开会话调用 `garmin-connect`。
+重新加载 WorkBuddy 的技能与 MCP 服务，再新开会话调用 `garmin-connect-mcp`。
 确认当前会话能看到 `create_garmin_workout` 和 `download_garmin_activity_fit`
 后，按技能中的写操作流程执行用户请求。修改项目里的副本或仅在旧会话中继续
 对话，不能保证已安装技能和工具得到更新。
@@ -178,7 +178,7 @@ origin。浏览器地址栏无法独立证明跨域 iframe 的来源，不要告
 ```bash
 /absolute/path/to/node /absolute/path/to/npx-cli.js -y \
   --registry=https://registry.npmjs.org/ \
-  --package dsh-plugin-garmin-connect \
+  --package garmin-connect-mcp \
   garmin-connect-auth serve --help
 ```
 
@@ -190,7 +190,7 @@ origin。浏览器地址栏无法独立证明跨域 iframe 的来源，不要告
 ```bash
 /absolute/path/to/node /absolute/path/to/npx-cli.js -y \
   --registry=https://registry.npmjs.org/ \
-  --package dsh-plugin-garmin-connect \
+  --package garmin-connect-mcp \
   garmin-connect-auth serve \
   --account workbuddy-cn \
   --region cn \

@@ -36,7 +36,7 @@ export function apply(ctx: GarminClientContext): void {
     name: 'shell.overlay',
     id: 'garmin-connect-auth',
     order: 90,
-    registrant: 'dsh-plugin-garmin-connect',
+    registrant: 'garmin-connect-mcp',
   }, () => <GarminAuthOverlay ctx={ctx} />))
 }
 

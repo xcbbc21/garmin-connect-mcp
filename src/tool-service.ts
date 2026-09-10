@@ -42,8 +42,11 @@ export interface GarminDataClient {
   getHeartRate(date: string): Promise<unknown>
   getWeight(date: string): Promise<unknown>
   getWorkouts(start?: number, limit?: number): Promise<unknown[]>
+  getWorkoutDetail(workoutId: string): Promise<unknown>
   downloadOriginalActivityZip(activityId: number, destinationDir: string): Promise<string>
   addWorkout(workout: Record<string, unknown>): Promise<Record<string, unknown>>
+  scheduleWorkout(workoutId: string, date: string): Promise<Record<string, unknown>>
+  unscheduleWorkout(workoutScheduleId: string): Promise<void>
   getUserProfile(): Promise<unknown>
 }
 
@@ -172,8 +175,42 @@ export type CreateWorkoutArgs = WorkoutDef & {
   confirmationId?: string
 }
 
+export interface ScheduleWorkoutArgs {
+  workoutId: string
+  date: string
+  timezone?: string
+  confirmed?: boolean
+  confirmationId?: string
+}
+
+export interface BatchScheduleWorkoutArgs {
+  schedules: Array<{ workoutId: string; date: string }>
+  timezone?: string
+  confirmed?: boolean
+  confirmationId?: string
+}
+
+export interface CreateAndScheduleWorkoutArgs {
+  workout: WorkoutDef
+  date: string
+  timezone?: string
+  confirmed?: boolean
+  confirmationId?: string
+}
+
+export interface UnscheduleWorkoutArgs {
+  workoutScheduleId: string
+  confirmed?: boolean
+  confirmationId?: string
+}
+
 interface PendingWorkoutConfirmation {
   definitionHash: string
+  expiresAt: number
+}
+
+interface PendingCalendarConfirmation {
+  requestHash: string
   expiresAt: number
 }
 
@@ -182,6 +219,7 @@ const MAX_PENDING_CONFIRMATIONS = 20
 
 export class GarminToolService {
   private readonly workoutConfirmations = new Map<string, PendingWorkoutConfirmation>()
+  private readonly calendarConfirmations = new Map<string, PendingCalendarConfirmation>()
   private readonly dateRequestLimiter = new AsyncSemaphore(4)
 
   constructor(
@@ -475,6 +513,150 @@ export class GarminToolService {
     }
   }
 
+  async scheduleWorkout(args: ScheduleWorkoutArgs): Promise<Record<string, unknown>> {
+    const request = this.validateScheduleRequest(args)
+    if (args.confirmed !== true) {
+      const workout = await this.client.getWorkoutDetail(request.workoutId)
+      const issuedConfirmationId = this.issueCalendarConfirmation({ operation: 'schedule', request })
+      return {
+        requiresConfirmation: true,
+        confirmationId: issuedConfirmationId,
+        preview: {
+          ...request,
+          workoutName: workoutName(workout),
+        },
+        message: 'Review this Garmin Calendar entry, then call schedule_garmin_workout again with confirmed=true and this confirmationId.',
+      }
+    }
+
+    this.consumeCalendarConfirmation(args.confirmationId, { operation: 'schedule', request })
+    const scheduled = await this.client.scheduleWorkout(request.workoutId, request.date)
+    return {
+      success: true,
+      workoutId: request.workoutId,
+      date: request.date,
+      timezone: request.timezone,
+      workoutScheduleId: scheduled.workoutScheduleId ?? null,
+      message: 'Workout was added to Garmin Calendar.',
+    }
+  }
+
+  async batchScheduleWorkouts(args: BatchScheduleWorkoutArgs): Promise<Record<string, unknown>> {
+    const request = this.validateBatchScheduleRequest(args)
+    if (args.confirmed !== true) {
+      const workoutDetails = new Map<string, unknown>()
+      for (const workoutId of new Set(request.schedules.map(schedule => schedule.workoutId))) {
+        workoutDetails.set(workoutId, await this.client.getWorkoutDetail(workoutId))
+      }
+      const issuedConfirmationId = this.issueCalendarConfirmation({ operation: 'batch-schedule', request })
+      return {
+        requiresConfirmation: true,
+        confirmationId: issuedConfirmationId,
+        preview: request.schedules.map(schedule => ({
+          ...schedule,
+          timezone: request.timezone,
+          workoutName: workoutName(workoutDetails.get(schedule.workoutId)),
+        })),
+        message: 'Review every Garmin Calendar entry, then call batch_schedule_garmin_workouts again with confirmed=true and this confirmationId. Rest days are intentionally omitted: they are not Garmin workouts.',
+      }
+    }
+
+    this.consumeCalendarConfirmation(args.confirmationId, { operation: 'batch-schedule', request })
+    const results: Array<Record<string, unknown>> = []
+    for (const schedule of request.schedules) {
+      try {
+        const scheduled = await this.client.scheduleWorkout(schedule.workoutId, schedule.date)
+        results.push({
+          success: true,
+          workoutId: schedule.workoutId,
+          date: schedule.date,
+          workoutScheduleId: scheduled.workoutScheduleId ?? null,
+        })
+      } catch {
+        results.push({
+          success: false,
+          workoutId: schedule.workoutId,
+          date: schedule.date,
+          message: 'Garmin calendar scheduling failed; check Garmin Calendar before retrying this entry.',
+        })
+      }
+    }
+    return {
+      success: results.every(result => result.success === true),
+      timezone: request.timezone,
+      successCount: results.filter(result => result.success === true).length,
+      failureCount: results.filter(result => result.success === false).length,
+      results,
+    }
+  }
+
+  async createAndScheduleWorkout(
+    args: CreateAndScheduleWorkoutArgs,
+  ): Promise<Record<string, unknown>> {
+    const validationError = validateWorkoutDef(args.workout)
+    if (validationError) throw new PublicToolError(`Invalid workout definition: ${validationError}`)
+    const schedule = this.validateCalendarDate(args.date, args.timezone)
+    const request = { workout: args.workout, schedule }
+    if (args.confirmed !== true) {
+      const issuedConfirmationId = this.issueCalendarConfirmation({ operation: 'create-and-schedule', request })
+      return {
+        requiresConfirmation: true,
+        confirmationId: issuedConfirmationId,
+        preview: request,
+        message: 'Review this workout and its Garmin Calendar date, then call create_and_schedule_garmin_workout again with confirmed=true and this confirmationId.',
+      }
+    }
+
+    this.consumeCalendarConfirmation(args.confirmationId, { operation: 'create-and-schedule', request })
+    const created = await this.client.addWorkout(buildGarminWorkout(args.workout))
+    const workoutId = typeof created.workoutId === 'string' || typeof created.workoutId === 'number'
+      ? String(created.workoutId)
+      : ''
+    if (!workoutId) {
+      return {
+        success: false,
+        workoutCreated: true,
+        workoutName: args.workout.name,
+        message: 'Workout was created, but Garmin did not return an ID so it was not scheduled. Check the workout library before retrying.',
+      }
+    }
+    try {
+      const scheduled = await this.client.scheduleWorkout(workoutId, schedule.date)
+      return {
+        success: true,
+        workoutId,
+        workoutScheduleId: scheduled.workoutScheduleId ?? null,
+        date: schedule.date,
+        timezone: schedule.timezone,
+      }
+    } catch {
+      return {
+        success: false,
+        workoutCreated: true,
+        workoutId,
+        date: schedule.date,
+        message: 'Workout was created, but calendar scheduling failed. Check Garmin Calendar before retrying.',
+      }
+    }
+  }
+
+  async unscheduleWorkout(args: UnscheduleWorkoutArgs): Promise<Record<string, unknown>> {
+    const workoutScheduleId = validateOpaqueId('workoutScheduleId', args.workoutScheduleId)
+    const request = { workoutScheduleId }
+    if (args.confirmed !== true) {
+      const issuedConfirmationId = this.issueCalendarConfirmation({ operation: 'unschedule', request })
+      return {
+        requiresConfirmation: true,
+        confirmationId: issuedConfirmationId,
+        preview: request,
+        message: 'Review this Garmin Calendar removal, then call unschedule_garmin_workout again with confirmed=true and this confirmationId.',
+      }
+    }
+    this.consumeCalendarConfirmation(args.confirmationId, { operation: 'unschedule', request })
+    await this.client.unscheduleWorkout(workoutScheduleId)
+    return { success: true, workoutScheduleId, message: 'Workout was removed from Garmin Calendar.' }
+  }
+
   private issueWorkoutConfirmation(definition: WorkoutDef): string {
     this.pruneWorkoutConfirmations()
     while (this.workoutConfirmations.size >= MAX_PENDING_CONFIRMATIONS) {
@@ -515,6 +697,81 @@ export class GarminToolService {
     const now = Date.now()
     for (const [id, confirmation] of this.workoutConfirmations) {
       if (confirmation.expiresAt <= now) this.workoutConfirmations.delete(id)
+    }
+  }
+
+  private validateScheduleRequest(args: {
+    workoutId?: string
+    date?: string
+    timezone?: string
+  }): { workoutId: string; date: string; timezone: string } {
+    const workoutId = validateOpaqueId('workoutId', args.workoutId)
+    return { workoutId, ...this.validateCalendarDate(args.date, args.timezone) }
+  }
+
+  private validateCalendarDate(
+    dateValue: unknown,
+    timezoneValue: unknown,
+  ): { date: string; timezone: string } {
+    const timezone = validateTimezone(timezoneValue)
+    const date = validateDate('date', typeof dateValue === 'string' ? dateValue : '')
+    if (date < todayInTimezone(timezone)) {
+      throw new PublicToolError('Invalid date: Garmin Calendar scheduling only accepts today or a future local date')
+    }
+    return { date, timezone }
+  }
+
+  private validateBatchScheduleRequest(
+    args: BatchScheduleWorkoutArgs,
+  ): { schedules: Array<{ workoutId: string; date: string }>; timezone: string } {
+    if (!Array.isArray(args.schedules) || args.schedules.length < 1 || args.schedules.length > 100) {
+      throw new PublicToolError('Invalid schedules: expected 1 to 100 workout calendar entries')
+    }
+    const timezone = validateTimezone(args.timezone)
+    const seen = new Set<string>()
+    const schedules = args.schedules.map((schedule, index) => {
+      const normalized = this.validateScheduleRequest({ ...schedule, timezone })
+      const key = `${normalized.workoutId}\u0000${normalized.date}`
+      if (seen.has(key)) {
+        throw new PublicToolError(`Duplicate schedule entry for workoutId ${normalized.workoutId} on ${normalized.date}`)
+      }
+      seen.add(key)
+      return { workoutId: normalized.workoutId, date: normalized.date, index }
+    })
+    return { timezone, schedules: schedules.map(({ workoutId, date }) => ({ workoutId, date })) }
+  }
+
+  private issueCalendarConfirmation(request: unknown): string {
+    this.pruneCalendarConfirmations()
+    while (this.calendarConfirmations.size >= MAX_PENDING_CONFIRMATIONS) {
+      const oldest = this.calendarConfirmations.keys().next().value
+      if (oldest === undefined) break
+      this.calendarConfirmations.delete(oldest)
+    }
+    const confirmationId = randomUUID()
+    this.calendarConfirmations.set(confirmationId, {
+      requestHash: hashRequest(request),
+      expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+    })
+    return confirmationId
+  }
+
+  private consumeCalendarConfirmation(confirmationId: string | undefined, request: unknown): void {
+    this.pruneCalendarConfirmations()
+    if (!confirmationId) {
+      throw new PublicToolError('Invalid calendar confirmation: request a preview and provide its confirmationId')
+    }
+    const pending = this.calendarConfirmations.get(confirmationId)
+    this.calendarConfirmations.delete(confirmationId)
+    if (!pending || pending.requestHash !== hashRequest(request)) {
+      throw new PublicToolError('Invalid calendar confirmation: the preview is missing, expired, already used, or changed')
+    }
+  }
+
+  private pruneCalendarConfirmations(): void {
+    const now = Date.now()
+    for (const [id, confirmation] of this.calendarConfirmations) {
+      if (confirmation.expiresAt <= now) this.calendarConfirmations.delete(id)
     }
   }
 }
@@ -1019,6 +1276,47 @@ function workoutDefinitionHash(definition: WorkoutDef): string {
   return createHash('sha256')
     .update(canonicalJson(definition))
     .digest('hex')
+}
+
+function hashRequest(request: unknown): string {
+  return createHash('sha256').update(canonicalJson(request)).digest('hex')
+}
+
+function validateOpaqueId(label: string, value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 128) {
+    throw new PublicToolError(`Invalid ${label}: expected a non-empty identifier`)
+  }
+  return value.trim()
+}
+
+function validateTimezone(value: unknown): string {
+  const timezone = value === undefined ? Intl.DateTimeFormat().resolvedOptions().timeZone : value
+  if (typeof timezone !== 'string' || !timezone.trim() || timezone.length > 100) {
+    throw new PublicToolError('Invalid timezone: expected an IANA timezone such as Asia/Shanghai')
+  }
+  try {
+    Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format()
+  } catch {
+    throw new PublicToolError('Invalid timezone: expected an IANA timezone such as Asia/Shanghai')
+  }
+  return timezone
+}
+
+function todayInTimezone(timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date())
+  const byType = new Map(parts.map(part => [part.type, part.value]))
+  return `${byType.get('year')}-${byType.get('month')}-${byType.get('day')}`
+}
+
+function workoutName(workout: unknown): string | null {
+  if (!workout || typeof workout !== 'object') return null
+  const name = (workout as Record<string, unknown>).workoutName
+  return typeof name === 'string' ? name : null
 }
 
 function canonicalJson(value: unknown): string {

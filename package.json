@@ -1,5 +1,5 @@
 {
-  "name": "dsh-plugin-garmin-connect",
+  "name": "garmin-connect-mcp",
   "version": "0.1.7",
   "description": "A TypeScript-based Garmin Connect plugin and MCP server with secure browser-based MFA for DeepSeek Harness and other AI agents",
   "main": "lib/index.js",
@@ -41,13 +41,13 @@
     "TEST_REPORT.md",
     "TEST_REPORT.zh-CN.md",
     "cordis.patch.yml",
-    "skills/garmin-connect"
+    "skills/garmin-connect-mcp"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Likenttt/garmin-connect-plugin-for-dsh.git"
+    "url": "git+https://github.com/xcbbc21/garmin-connect-mcp.git"
   },
-  "homepage": "https://github.com/Likenttt/garmin-connect-plugin-for-dsh#readme",
+  "homepage": "https://github.com/xcbbc21/garmin-connect-mcp#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"

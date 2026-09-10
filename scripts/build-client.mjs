@@ -1,6 +1,6 @@
 import { build } from 'esbuild'
 
-const id = 'dsh-plugin-garmin-connect'
+const id = 'garmin-connect-mcp'
 
 await build({
   entryPoints: ['src/client/index.tsx'],

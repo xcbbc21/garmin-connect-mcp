@@ -158,6 +158,21 @@ describe('GarminClient', () => {
     })).toThrow('Garmin password, session token, or session token file is required')
   })
 
+  it('posts the local calendar date to Garmin schedule endpoint without retrying the write', async () => {
+    const client = new GarminClient(createContext(), baseConfig)
+    latestGarmin().client.client.request.mockResolvedValue({
+      data: { workoutScheduleId: 'schedule-42' },
+    })
+
+    await expect((client as any).scheduleWorkout('workout-42', '2026-09-15'))
+      .resolves.toEqual({ workoutScheduleId: 'schedule-42' })
+    expect(latestGarmin().client.client.request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'POST',
+      url: expect.stringContaining('workout-service/schedule/workout-42'),
+      data: { date: '2026-09-15' },
+    }))
+  })
+
   it('loads without a username so the local auth UI can report configuration', async () => {
     const client = new GarminClient(createContext(), {
       ...baseConfig,

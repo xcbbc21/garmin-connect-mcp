@@ -14,11 +14,15 @@ import {
 } from '../tool-service'
 import type {
   ActivityArgs,
+  BatchScheduleWorkoutArgs,
+  CreateAndScheduleWorkoutArgs,
   CreateWorkoutArgs,
   DateRangeArgs,
   DownloadActivityFitArgs,
   PaginationArgs,
   RunningAdviceArgs,
+  ScheduleWorkoutArgs,
+  UnscheduleWorkoutArgs,
 } from '../tool-service'
 
 export { getDatesInRange, todayLocal } from '../tool-service'
@@ -399,7 +403,148 @@ export function registerTools(ctx: Context, client: GarminClient, config: Config
   })
 
   // ------------------------------------------------------------------
-  // 10. download_garmin_activity_fit
+  // 10. schedule_garmin_workout
+  // ------------------------------------------------------------------
+  tools.register({
+    name: 'schedule_garmin_workout',
+    description:
+      'Preview then schedule one existing Garmin workout-library entry on a local Garmin Calendar date. ' +
+      'The same workout may be scheduled on different dates, but duplicate workout/date entries are rejected. ' +
+      'This is a non-idempotent write: after a timeout, inspect Garmin Calendar before retrying.',
+    parameters: {
+      type: 'object',
+      required: ['workoutId', 'date'],
+      additionalProperties: false,
+      properties: calendarScheduleParameters,
+    },
+    output: flexibleOutput,
+    execute: async (args: ScheduleWorkoutArgs) => {
+      try {
+        return await service.scheduleWorkout(args)
+      } catch (error) {
+        return toolError(error, 'Failed to schedule Garmin workout')
+      }
+    },
+  })
+
+  // ------------------------------------------------------------------
+  // 11. batch_schedule_garmin_workouts
+  // ------------------------------------------------------------------
+  tools.register({
+    name: 'batch_schedule_garmin_workouts',
+    description:
+      'Preview then schedule 1–100 existing workouts over future days or weeks. ' +
+      'All entries are validated before writing; confirmed writes continue after an individual failure and return a result for every entry. ' +
+      'Omit rest days: do not create a Garmin workout for a rest day.',
+    parameters: {
+      type: 'object',
+      required: ['schedules'],
+      additionalProperties: false,
+      properties: {
+        schedules: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: 'object',
+            required: ['workoutId', 'date'],
+            additionalProperties: false,
+            properties: {
+              workoutId: calendarScheduleParameters.workoutId,
+              date: calendarScheduleParameters.date,
+            },
+          },
+        },
+        timezone: calendarScheduleParameters.timezone,
+        confirmed: calendarScheduleParameters.confirmed,
+        confirmationId: calendarScheduleParameters.confirmationId,
+      },
+    },
+    output: flexibleOutput,
+    execute: async (args: BatchScheduleWorkoutArgs) => {
+      try {
+        return await service.batchScheduleWorkouts(args)
+      } catch (error) {
+        return toolError(error, 'Failed to batch schedule Garmin workouts')
+      }
+    },
+  })
+
+  // ------------------------------------------------------------------
+  // 12. create_and_schedule_garmin_workout
+  // ------------------------------------------------------------------
+  tools.register({
+    name: 'create_and_schedule_garmin_workout',
+    description:
+      'Preview then create a structured Garmin workout and add it to Garmin Calendar in one confirmed operation. ' +
+      'If creation succeeds but scheduling fails, the partial result is reported and must not be blindly retried.',
+    parameters: {
+      type: 'object',
+      required: ['workout', 'date'],
+      additionalProperties: false,
+      properties: {
+        workout: {
+          type: 'object',
+          required: ['name', 'steps'],
+          additionalProperties: false,
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 80 },
+            description: { type: 'string', maxLength: 1024 },
+            sport: { type: 'string', enum: ['running', 'cycling', 'swimming', 'strength'] },
+            steps: { type: 'array', minItems: 1, maxItems: 100, items: workoutStepParameters },
+          },
+        },
+        date: calendarScheduleParameters.date,
+        timezone: calendarScheduleParameters.timezone,
+        confirmed: calendarScheduleParameters.confirmed,
+        confirmationId: calendarScheduleParameters.confirmationId,
+      },
+    },
+    output: flexibleOutput,
+    execute: async (args: CreateAndScheduleWorkoutArgs) => {
+      try {
+        return await service.createAndScheduleWorkout(args)
+      } catch (error) {
+        return toolError(error, 'Failed to create and schedule Garmin workout')
+      }
+    },
+  })
+
+  // ------------------------------------------------------------------
+  // 13. unschedule_garmin_workout
+  // ------------------------------------------------------------------
+  tools.register({
+    name: 'unschedule_garmin_workout',
+    description:
+      'Preview then remove one Garmin Calendar entry by its workoutScheduleId returned by a prior schedule operation. ' +
+      'This removes only the Calendar entry, not the reusable workout-library template.',
+    parameters: {
+      type: 'object',
+      required: ['workoutScheduleId'],
+      additionalProperties: false,
+      properties: {
+        workoutScheduleId: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description: 'Calendar entry ID returned by schedule_garmin_workout or batch_schedule_garmin_workouts.',
+        },
+        confirmed: calendarScheduleParameters.confirmed,
+        confirmationId: calendarScheduleParameters.confirmationId,
+      },
+    },
+    output: flexibleOutput,
+    execute: async (args: UnscheduleWorkoutArgs) => {
+      try {
+        return await service.unscheduleWorkout(args)
+      } catch (error) {
+        return toolError(error, 'Failed to remove Garmin Calendar entry')
+      }
+    },
+  })
+
+  // ------------------------------------------------------------------
+  // 14. download_garmin_activity_fit
   // ------------------------------------------------------------------
   tools.register({
     name: 'download_garmin_activity_fit',
@@ -432,7 +577,7 @@ export function registerTools(ctx: Context, client: GarminClient, config: Config
     },
   })
 
-  ctx.logger.info('[garmin] Registered 10 tools.')
+  ctx.logger.info('[garmin] Registered 14 tools.')
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +687,35 @@ const repeatWorkoutStepParameters = {
 
 const workoutStepParameters = {
   oneOf: [simpleWorkoutStepParameters, repeatWorkoutStepParameters],
+}
+
+const calendarScheduleParameters = {
+  workoutId: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 128,
+    description: 'Existing Garmin workout-library ID.',
+  },
+  date: {
+    type: 'string',
+    pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+    description: 'Local Garmin Calendar date in YYYY-MM-DD format.',
+  },
+  timezone: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 100,
+    description: 'IANA timezone used to interpret date, e.g. Asia/Shanghai. Defaults to the MCP host timezone.',
+  },
+  confirmed: {
+    type: 'boolean',
+    description: 'Set true only after the user explicitly approves the returned preview.',
+  },
+  confirmationId: {
+    type: 'string',
+    format: 'uuid',
+    description: 'One-time ID returned by the matching preview call.',
+  },
 }
 
 /**

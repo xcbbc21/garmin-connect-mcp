@@ -749,6 +749,33 @@ export class GarminClient {
     return this.getCachedForCurrentAuth(key, () => this.gc.getWorkouts(start, limit))
   }
 
+  /** Read one workout before a calendar write so invalid library IDs fail safely. */
+  async getWorkoutDetail(workoutId: string): Promise<unknown> {
+    if (!workoutId.trim()) throw new PublicToolError('Invalid workoutId')
+    return this.getCachedForCurrentAuth(`workout:${workoutId}`, () =>
+      (this.gc as any).getWorkoutDetail({ workoutId }))
+  }
+
+  /**
+   * Schedule one library workout on Garmin Calendar.
+   *
+   * garmin-connect@1.6.2 does not expose this endpoint, so this is a small
+   * adapter over its authenticated Axios transport. This non-idempotent POST
+   * is deliberately never sent through withRetry: a timeout can still have
+   * created a calendar entry.
+   */
+  async scheduleWorkout(
+    workoutId: string,
+    date: string,
+  ): Promise<Record<string, unknown>> {
+    return this.calendarWrite('POST', workoutId, date)
+  }
+
+  /** Remove one calendar entry using the workoutScheduleId Garmin returned. */
+  async unscheduleWorkout(workoutScheduleId: string): Promise<void> {
+    await this.calendarWrite('DELETE', workoutScheduleId)
+  }
+
   /** Create a workout in Garmin Connect. Returns the created workout object. */
   async addWorkout(workout: Record<string, unknown>): Promise<Record<string, unknown>> {
     await this.ensureConnected()
@@ -790,6 +817,57 @@ export class GarminClient {
         throw new PublicToolError(
           'Garmin authentication expired before workout creation; ' +
           'request a new preview and confirmation before trying again',
+        )
+      }
+      throw error
+    }
+  }
+
+  private async calendarWrite(
+    method: 'POST' | 'DELETE',
+    id: string,
+    date?: string,
+  ): Promise<Record<string, unknown>> {
+    if (!id.trim()) {
+      throw new PublicToolError(
+        method === 'POST' ? 'Invalid workoutId' : 'Invalid workoutScheduleId',
+      )
+    }
+    await this.ensureConnected()
+    const attemptEpoch = this.authEpoch
+    const escapedId = encodeURIComponent(id)
+    const host = this.config.region === 'cn' ? 'connectapi.garmin.cn' : 'connectapi.garmin.com'
+    const url = `https://${host}/workout-service/schedule/${escapedId}`
+    try {
+      const response = await this.withRequestTimeout(
+        () => this.gc.client.client.request({
+          method,
+          url,
+          ...(method === 'POST' ? { data: { date } } : {}),
+        }),
+        `Garmin calendar ${method === 'POST' ? 'scheduling' : 'removal'} timed out; ` +
+          'outcome is unknown; check Garmin Calendar before retrying',
+      )
+      if (attemptEpoch !== this.authEpoch) {
+        throw new PublicToolError(
+          'Garmin authentication changed during calendar update; outcome is unknown; ' +
+            'check Garmin Calendar before retrying',
+        )
+      }
+      this.log('info', `[garmin] Calendar ${method === 'POST' ? 'schedule' : 'removal'} completed.`)
+      return (response as any)?.data ?? {}
+    } catch (error) {
+      const status = getHttpStatus(error)
+      if (status === 401 || status === 403) {
+        if (this.hasConfiguredSession() && !this.sessionTokenRejected) {
+          this.rejectConfiguredSessionToken()
+        } else {
+          this.connected = false
+          this.authenticatedAccount = undefined
+        }
+        throw new PublicToolError(
+          'Garmin authentication expired before calendar update; request a new preview ' +
+            'and confirmation before trying again',
         )
       }
       throw error

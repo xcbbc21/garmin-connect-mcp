@@ -580,7 +580,7 @@ describe('Garmin interactive auth CLI', () => {
   it('uses an account-isolated default path', () => {
     expect(defaultAccountSessionPath('work', {
       XDG_CONFIG_HOME: '/private/config',
-    })).toBe('/private/config/dsh-plugin-garmin-connect/accounts/work.session.json')
+    })).toBe('/private/config/garmin-connect-mcp/accounts/work.session.json')
   })
 
   it('prefers local Windows app data over redirected roaming app data', () => {
@@ -588,7 +588,7 @@ describe('Garmin interactive auth CLI', () => {
       LOCALAPPDATA: '/local/appdata',
       APPDATA: '//server/redirected/roaming',
     })).toBe(
-      '/local/appdata/dsh-plugin-garmin-connect/accounts/work.session.json',
+      '/local/appdata/garmin-connect-mcp/accounts/work.session.json',
     )
   })
 
@@ -691,7 +691,7 @@ describe('Garmin interactive auth CLI', () => {
       account: 'work',
       region: 'global',
       sessionTokenFile:
-        '/private/config/dsh-plugin-garmin-connect/accounts/work.session.json',
+        '/private/config/garmin-connect-mcp/accounts/work.session.json',
     })
 
     expect(prompt).toHaveBeenCalledTimes(1)
@@ -922,7 +922,7 @@ describe('Garmin interactive auth CLI', () => {
       account: 'work',
       region: 'global',
       sessionTokenFile:
-        '/private/config/dsh-plugin-garmin-connect/accounts/work.session.json',
+        '/private/config/garmin-connect-mcp/accounts/work.session.json',
     })
 
     expect(prompt).toHaveBeenCalledTimes(1)
@@ -931,7 +931,7 @@ describe('Garmin interactive auth CLI', () => {
       username: 'runner@example.test',
       region: 'global',
       sessionTokenFile:
-        '/private/config/dsh-plugin-garmin-connect/accounts/work.session.json',
+        '/private/config/garmin-connect-mcp/accounts/work.session.json',
       signal: undefined,
       confirmIdentity: expect.any(Function),
       onStage: expect.any(Function),

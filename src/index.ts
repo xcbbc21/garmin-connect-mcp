@@ -7,7 +7,7 @@ import {
 } from './embedded-auth-rpc'
 import { registerTools } from './tools'
 
-export const name = 'garmin-connect'
+export const name = 'garmin-connect-mcp'
 export { Config, resolveConfig }
 export const inject = ['tools']
 

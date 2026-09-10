@@ -1,10 +1,10 @@
-# dsh-plugin-garmin-connect
+# garmin-connect-mcp
 
 > 一个基于 TypeScript、包含**安全浏览器 MFA 认证**的 Garmin Connect 插件与 MCP 服务器：为 DeepSeek Harness 打造，也适用于更多 AI Agent。
 
-[![npm version](https://img.shields.io/npm/v/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)
-[![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)
-[![CI](https://github.com/Likenttt/garmin-connect-plugin-for-dsh/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Likenttt/garmin-connect-plugin-for-dsh/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/garmin-connect-mcp.svg?logo=npm)](https://www.npmjs.com/package/garmin-connect-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/garmin-connect-mcp.svg?logo=npm)](https://www.npmjs.com/package/garmin-connect-mcp)
+[![CI](https://github.com/xcbbc21/garmin-connect-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xcbbc21/garmin-connect-mcp/actions/workflows/ci.yml)
 [![测试报告](https://img.shields.io/badge/%E6%B5%8B%E8%AF%95%E6%8A%A5%E5%91%8A-%E6%9F%A5%E7%9C%8B-blue.svg)](TEST_REPORT.zh-CN.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -66,9 +66,8 @@
 
 ### 注册的工具
 
-插件共注册 **10 个工具**。其中 8 个只返回 Garmin 数据；
-`download_garmin_activity_fit` 会在 MCP/dsh 所在主机写入一个本地文件，
-`create_garmin_workout` 会修改用户的 Garmin 训练库。
+插件共注册 **14 个工具**。其中 8 个只返回 Garmin 数据；
+其余包括一个本地 FIT 写入工具和五个需要明确确认的 Garmin 训练库/日历写入工具。
 
 | 工具名 | 用途 | 参数示例 |
 |---|---|---|
@@ -82,10 +81,39 @@
 | `get_running_skill_advice` | 讲解 8 种课型与 4 套训练理念，或先完成必问信息再提供个性化建议 | `{"mode": "explain", "query": "丹尼尔斯", "language": "zh-CN"}` |
 | `download_garmin_activity_fit` | 下载活动的原始归档，并把其中唯一的 FIT 文件安全提取到所配置父目录下的账号目录 | `{"activityId": 123456789}` |
 | `create_garmin_workout` | 预览结构化训练；仅在显式确认后创建 | `{"name": "门槛巡航3×8分钟", "steps": [...]}` |
+| `schedule_garmin_workout` | 预览后把已有训练库模板排入某个日历日期 | `{"workoutId": "123", "date": "2026-09-15", "timezone": "Asia/Shanghai"}` |
+| `batch_schedule_garmin_workouts` | 预览后一次排入未来多天/多周的 1–100 个已有训练 | `{"schedules": [{"workoutId": "123", "date": "2026-09-15"}, ...]}` |
+| `create_and_schedule_garmin_workout` | 一次确认后创建训练并排入日历 | `{"workout": {"name": "轻松跑6km", "steps": [...]}, "date": "2026-09-15"}` |
+| `unschedule_garmin_workout` | 预览后删除一条日历排期，不删除训练库模板 | `{"workoutScheduleId": "456"}` |
 
 创建训练采用两次调用流程。首次调用只返回预览和一次性
 `confirmationId`；用户确认未更改的预览后，再使用相同训练定义、
 `confirmed: true` 及该 `confirmationId` 调用。确认 ID 10 分钟后失效，且不可复用。
+
+### 训练日历排期
+
+所有 Garmin 日历写入沿用“预览 → 用户明确确认 → 一次性 `confirmationId`”流程。
+`date` 是日历本地日期；可提供 IANA `timezone`（如 `Asia/Shanghai`），省略时使用 MCP
+主机时区。过去日期、无效时区、同一批次中相同的 `(workoutId, date)`、以及无效训练 ID 都会在写入前拒绝。
+
+同一训练可以安排在不同日期重复执行。休息日不是训练：批量计划中直接省略，不能创建一个“休息日 workout”。批量确认后按顺序写入，每条均返回结果；失败或超时不会自动重试，因为 Garmin 可能已经写入日历。
+
+示例：预览下周 5 次跑步（把占位训练 ID 换成 `get_garmin_workouts` 返回的 ID），用户确认后用原参数、返回的 `confirmationId` 和 `confirmed: true` 再调用：
+
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "schedules": [
+    {"workoutId": "easy-6k", "date": "2026-09-14"},
+    {"workoutId": "threshold-3x8", "date": "2026-09-16"},
+    {"workoutId": "easy-8k", "date": "2026-09-18"},
+    {"workoutId": "long-16k", "date": "2026-09-20"},
+    {"workoutId": "recovery-5k", "date": "2026-09-21"}
+  ]
+}
+```
+
+当前锁定的 `garmin-connect@1.6.2` 实际没有导出日历排期方法，尽管旧 README 有相关示例。本插件因此通过其已认证传输层调用已观察到的 Garmin 非官方接口：`POST /workout-service/schedule/{workoutId}` 和 `DELETE /workout-service/schedule/{workoutScheduleId}`。后者只删除日历排期，必须使用成功排期返回的 `workoutScheduleId`，不会删除训练库模板。
 
 ### 个性化跑步训练问询
 
@@ -123,7 +151,7 @@ Garmin 活动；它只建议先取得医疗专业人员许可，不自行诊断�
   不是必须精确凑出的比例。
 
 近期 Garmin 跑步数据只能补充上述问询，不能代替用户回答。方法来源、证据边界和
-适用限制见[训练方法研究说明](https://github.com/Likenttt/garmin-connect-plugin-for-dsh/blob/main/docs/research/running-training-methods.md)。
+适用限制见[训练方法研究说明](https://github.com/xcbbc21/garmin-connect-mcp/blob/main/docs/research/running-training-methods.md)。
 每条训练理念和课型卡还会把相应内容标成 `system_principle`（体系理念）、
 `research_evidence`（研究证据）或 `application_inference`（应用推断），避免把
 方法定义误写成优越性证据。
@@ -135,7 +163,7 @@ Garmin 活动；它只建议先取得医疗专业人员许可，不自行诊断�
 ### 1. 安装本插件 — 从 npm registry(推荐)
 
 ```bash
-npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add dsh-plugin-garmin-connect
+npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add garmin-connect-mcp
 ```
 
 这一条命令会同时安装依赖并激活插件层,首次运行会自动初始化 `web` profile。你只需要 `pnpm` 在你的 `PATH` 中:
@@ -156,7 +184,7 @@ npx --legacy-peer-deps=false @deepseek-ai/dsh --profile web --dump-config | grep
 
 ```bash
 # 本地源码调试
-cd garmin-connect-plugin-for-dsh && npm install
+cd garmin-connect-mcp && npm install
 npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add .
 
 # GitHub 源码安装
@@ -259,7 +287,7 @@ HTTP 401、普通登录页、网络错误或仅标题像 MFA 的页面都不会�
 打开对话框前必须配置 `GARMIN_USERNAME` 和正确的 `GARMIN_REGION`。该 Web 流程可不设置
 `GARMIN_SESSION_TOKEN_FILE`：Host 会使用 `GARMIN_ACCOUNT`（默认 `default`），在通常的
 POSIX 配置路径写入
-`~/.config/dsh-plugin-garmin-connect/accounts/<alias>.session.json`（其他平台使用对应配置
+`~/.config/garmin-connect-mcp/accounts/<alias>.session.json`（其他平台使用对应配置
 目录）。用户确认并成功落盘后，当前插件会清除之前的 session 拒绝状态；下一次工具调用
 即可读取新文件，不需要重启 dsh。
 
@@ -299,7 +327,7 @@ npm run auth:serve -- --account personal-cn --region cn
 
 未配置 `GARMIN_SESSION_TOKEN_FILE` 时，输出路径由 `GARMIN_ACCOUNT`/`--account` 推导：
 POSIX 常规配置路径为
-`~/.config/dsh-plugin-garmin-connect/accounts/<alias>.session.json`（其他平台使用对应配置根
+`~/.config/garmin-connect-mcp/accounts/<alias>.session.json`（其他平台使用对应配置根
 目录）。随后进程只需下列非密码配置：
 
 ```dotenv
@@ -411,7 +439,7 @@ Garmin 的“原始文件”并不保证一定是 FIT。如果归档中没有唯
 npx --legacy-peer-deps=false @deepseek-ai/dsh web
 ```
 
-打开 `http://127.0.0.1:3080`。当 **设置 → 插件 → 插件列表** 中显示 `plugin-garmin-connect` 为 *已挂载、已启用* 时,说明插件已成功加载。然后直接对话:*"我昨晚睡得怎么样?"* 或 *"帮我看一下最近 5 次跑步。"*
+打开 `http://127.0.0.1:3080`。当 **设置 → 插件 → 插件列表** 中显示 `plugin-garmin-connect-mcp` 为 *已挂载、已启用* 时,说明插件已成功加载。然后直接对话:*"我昨晚睡得怎么样?"* 或 *"帮我看一下最近 5 次跑步。"*
 
 ### 5. 集成测试（可选，仅限源码目录）
 
@@ -523,13 +551,13 @@ username、region 和 `profileIdHash`；为兼容旧版本，无绑定的 `oauth
 先构建本地服务器：
 
 ```bash
-git clone https://github.com/Likenttt/garmin-connect-plugin-for-dsh.git
-cd garmin-connect-plugin-for-dsh
+git clone https://github.com/xcbbc21/garmin-connect-mcp.git
+cd garmin-connect-mcp
 npm install
 npm run build
 ```
 
-请把示例中的 `/absolute/path/to/garmin-connect-plugin-for-dsh` 替换为本地源码目录的
+请把示例中的 `/absolute/path/to/garmin-connect-mcp` 替换为本地源码目录的
 真实绝对路径。
 
 MCP 进程需要邮箱、显式区域和本地账号别名。session 文件路径可以不配置；此时服务会
@@ -579,9 +607,9 @@ garmin-connect-auth serve --account personal-cn --region cn --open
 内容加入 `~/.codex/config.toml`：
 
 ```toml
-[mcp_servers.garmin-connect]
+[mcp_servers.garmin-connect-mcp]
 command = "node"
-args = ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"]
+args = ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"]
 env_vars = ["GARMIN_USERNAME", "GARMIN_REGION", "GARMIN_ACCOUNT", "GARMIN_SESSION_TOKEN_FILE", "GARMIN_FIT_DOWNLOAD_DIR"]
 
 # 只读工具可正常运行；写本地文件或 Garmin 数据前由 Codex 请求批准。
@@ -604,7 +632,7 @@ Codex 进程必须继承上面导出的变量。如果桌面端不是从该终�
 
 ```bash
 codex mcp list
-codex mcp get garmin-connect
+codex mcp get garmin-connect-mcp
 ```
 
 在 Codex CLI 内输入 `/mcp`，确认服务器已经连接并查看工具。设置界面及
@@ -617,8 +645,8 @@ Garmin 通常属于个人服务，因此推荐使用 user scope。下面的 bash
 session 内容写入 `~/.claude.json`，只配置 owner-only 文件路径：
 
 ```bash
-claude mcp add-json --scope user garmin-connect \
-  '{"type":"stdio","command":"node","args":["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],"env":{"GARMIN_USERNAME":"${GARMIN_USERNAME}","GARMIN_REGION":"${GARMIN_REGION:-global}","GARMIN_ACCOUNT":"${GARMIN_ACCOUNT:-default}","GARMIN_SESSION_TOKEN_FILE":"${GARMIN_SESSION_TOKEN_FILE}","GARMIN_FIT_DOWNLOAD_DIR":"${GARMIN_FIT_DOWNLOAD_DIR}"}}'
+claude mcp add-json --scope user garmin-connect-mcp \
+  '{"type":"stdio","command":"node","args":["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],"env":{"GARMIN_USERNAME":"${GARMIN_USERNAME}","GARMIN_REGION":"${GARMIN_REGION:-global}","GARMIN_ACCOUNT":"${GARMIN_ACCOUNT:-default}","GARMIN_SESSION_TOKEN_FILE":"${GARMIN_SESSION_TOKEN_FILE}","GARMIN_FIT_DOWNLOAD_DIR":"${GARMIN_FIT_DOWNLOAD_DIR}"}}'
 ```
 
 该服务器使用单独分配给此 Claude Code 进程的 session。客户端若未显示 MCP URL
@@ -631,7 +659,7 @@ elicitation，就用可信终端 `serve` 命令初始化；密码/MFA 仍只进�
 Claude Code 时都要保证这些路径变量可用，然后检查连接：
 
 ```bash
-claude mcp get garmin-connect
+claude mcp get garmin-connect-mcp
 claude mcp list
 ```
 
@@ -641,16 +669,17 @@ claude mcp list
 
 ### 在 Codex 或 Claude Code 中实际使用
 
-当 `garmin-connect` 显示已连接后，直接用自然语言提问即可，客户端会自动选择 MCP
-工具。如果工具选择不明确，可以明确说“使用 garmin-connect MCP 服务器”。例如：
+当 `garmin-connect-mcp` 显示已连接后，直接用自然语言提问即可，客户端会自动选择 MCP
+工具。如果工具选择不明确，可以明确说“使用 garmin-connect-mcp MCP 服务器”。例如：
 
-- “使用 garmin-connect 查看我最近五次跑步。”
+- “使用 garmin-connect-mcp 查看我最近五次跑步。”
 - “对比我最近七天的睡眠和静息心率。”
 - “把 activity 123456789 的 FIT 下载到我配置的 Garmin FIT 父目录下。”
 - “预览一个门槛跑训练，把步骤展示给我；在我确认前不要创建。”
+- “预览我下周 5 次已有训练，时区 Asia/Shanghai；休息日不创建任何训练，确认前不要排期。”
 
-创建训练仍然执行强制的两次调用确认流程：第一次只返回预览；只有用户批准并带上返回的
-一次性 `confirmationId` 后，第二次调用才会创建。
+创建训练和所有日历写入均执行强制的两次调用确认流程：第一次只返回预览；只有用户批准并带上返回的
+一次性 `confirmationId` 后，第二次调用才会写入。
 
 ### Claude Desktop
 
@@ -659,9 +688,9 @@ claude mcp list
 ```json
 {
   "mcpServers": {
-    "garmin-connect": {
+    "garmin-connect-mcp": {
       "command": "node",
-      "args": ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],
+      "args": ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],
       "env": {
         "GARMIN_USERNAME": "你的佳明邮箱",
         "GARMIN_REGION": "cn",
@@ -678,14 +707,14 @@ claude mcp list
 
 ### Cursor
 
-把上方相同的 `mcpServers.garmin-connect` 对象写入工作区
+把上方相同的 `mcpServers.garmin-connect-mcp` 对象写入工作区
 `.cursor/mcp.json`，并使用 `lib/mcp.js` 的绝对路径。
 
 ### Windsurf
 
 打开 **Windsurf Settings → Cascade → MCP Servers**，或编辑
 `~/.codeium/windsurf/mcp_config.json`，加入上方相同的
-`mcpServers.garmin-connect` 对象。
+`mcpServers.garmin-connect-mcp` 对象。
 
 ### WorkBuddy
 
@@ -696,9 +725,9 @@ WorkBuddy 桌面端支持用户级和项目级的本地 MCP。Garmin 属于个�
 ```json
 {
   "mcpServers": {
-    "garmin-connect": {
+    "garmin-connect-mcp": {
       "command": "/absolute/path/to/node",
-      "args": ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],
+      "args": ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],
       "env": {
         "GARMIN_USERNAME": "你的佳明邮箱",
         "GARMIN_REGION": "cn",
@@ -724,8 +753,8 @@ session 文件；多个条目可共享同一个 FIT 父目录，“区域+邮箱
 
 #### 随包附带的技能
 
-从 **0.1.7** 起，npm 包内附带 `skills/garmin-connect/`。将这个完整目录复制到
-`~/.workbuddy/skills/garmin-connect/`，保留其中的 `references/`。如果已安装该技能，
+从 **0.1.7** 起，npm 包内附带 `skills/garmin-connect-mcp/`。将这个完整目录复制到
+`~/.workbuddy/skills/garmin-connect-mcp/`，保留其中的 `references/`。如果已安装该技能，
 也需要同步更新已安装副本；仅升级 npm 包不会自动更新技能。重新加载 WorkBuddy 的
 技能与 MCP 服务，再新开会话使用。
 
@@ -744,7 +773,7 @@ session 文件；多个条目可共享同一个 FIT 父目录，“区域+邮箱
 参数代替本地 checkout 的 `lib/mcp.js`：
 
 ```text
--y --package dsh-plugin-garmin-connect garmin-connect-mcp
+-y --package garmin-connect-mcp garmin-connect-mcp
 ```
 
 不要配置 `GARMIN_PASSWORD`；在 session 缺失时，第一次只读工具调用即可验证 ZCode
@@ -754,9 +783,9 @@ session 文件；多个条目可共享同一个 FIT 父目录，“区域+邮箱
 {
   "mcp": {
     "servers": {
-      "garmin-connect": {
+      "garmin-connect-mcp": {
         "command": "/absolute/path/to/node",
-        "args": ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],
+        "args": ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],
         "env": {
           "GARMIN_USERNAME": "你的佳明邮箱",
           "GARMIN_REGION": "cn",
@@ -794,7 +823,7 @@ session 文件路径，但不会保存 session 内容、密码或 MFA 验证码�
 使用 npm `0.1.5` 或之后版本时，可以把本地的 `node …/lib/mcp.js` 替换为：
 
 ```bash
-npx -y --package dsh-plugin-garmin-connect garmin-connect-mcp
+npx -y --package garmin-connect-mcp garmin-connect-mcp
 ```
 
 ### 手动运行
@@ -808,9 +837,9 @@ GARMIN_FIT_DOWNLOAD_DIR=/absolute/path/to/garmin-fit-parent \
 node lib/mcp.js
 ```
 
-MCP 服务器通过标准协议暴露与 dsh 插件**相同的 10 个工具及参数语义**：运动记录、
-睡眠、步数、心率、体重、训练库模板、个人资料、跑步技能、本地 FIT 下载，以及训练
-预览/创建。任何 AI 可调用工具都不接收密码/MFA，也不导出 Session Token；浏览器认证
+MCP 服务器通过标准协议暴露与 dsh 插件**相同的 14 个工具及参数语义**：运动记录、
+睡眠、步数、心率、体重、训练库模板、个人资料、跑步技能、本地 FIT 下载、训练
+预览/创建、单条或批量日历排期与删除。任何 AI 可调用工具都不接收密码/MFA，也不导出 Session Token；浏览器认证
 通过对话之外的本机 URL elicitation 完成，完成后由用户重试原工具。
 
 ---
@@ -822,7 +851,7 @@ MCP 服务器通过标准协议暴露与 dsh 插件**相同的 10 个工具及�
 │         DeepSeek Harness (dsh)          │
 │                                         │
 │  ┌───────────────────────────────────┐  │
-│  │     dsh-plugin-garmin-connect     │  │
+│  │     garmin-connect-mcp     │  │
 │  │                                   │  │
 │  │  ┌─────────┐    ┌─────────────┐  │  │
 │  │  │  配置    │───▶│ Garmin 客户端│  │  │
@@ -921,8 +950,8 @@ Garmin 凭据与 AI 对话彻底分开：
 
 ```bash
 # 克隆仓库
-git clone https://github.com/Likenttt/garmin-connect-plugin-for-dsh.git
-cd garmin-connect-plugin-for-dsh
+git clone https://github.com/xcbbc21/garmin-connect-mcp.git
+cd garmin-connect-mcp
 npm install
 
 # 编译
@@ -961,7 +990,7 @@ src/
 │   ├── running-skills.ts  # 8 种课型 + 4 套精简训练理念
 │   └── workout-schema.ts  # 训练定义 → Garmin JSON 构建器
 ├── tools/
-│   └── index.ts      # 工具定义与注册（10 个工具）
+│   └── index.ts      # 工具定义与注册（14 个工具）
 └── utils/
     ├── errors.ts      # 安全错误输出与上游日志脱敏
     ├── cache.ts       # 内存 TTL/LRU 缓存与 single-flight 刷新
@@ -984,7 +1013,7 @@ npm publish
 发布后,用户只需一条命令即可安装:
 
 ```bash
-npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add dsh-plugin-garmin-connect
+npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add garmin-connect-mcp
 ```
 
 分发说明:

@@ -23,7 +23,7 @@ export function defaultAccountSessionPath(
     || path.join(env.HOME?.trim() || homedir(), '.config')
   return path.resolve(
     configRoot,
-    'dsh-plugin-garmin-connect',
+    'garmin-connect-mcp',
     'accounts',
     `${account}.session.json`,
   )

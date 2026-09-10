@@ -1,10 +1,10 @@
-# dsh-plugin-garmin-connect
+# garmin-connect-mcp
 
 > A TypeScript-based Garmin Connect plugin and MCP server with **secure browser-based MFA**, built for DeepSeek Harness and designed to work with other AI agents.
 
-[![npm version](https://img.shields.io/npm/v/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)
-[![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-garmin-connect.svg?logo=npm)](https://www.npmjs.com/package/dsh-plugin-garmin-connect)
-[![CI](https://github.com/Likenttt/garmin-connect-plugin-for-dsh/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Likenttt/garmin-connect-plugin-for-dsh/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/garmin-connect-mcp.svg?logo=npm)](https://www.npmjs.com/package/garmin-connect-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/garmin-connect-mcp.svg?logo=npm)](https://www.npmjs.com/package/garmin-connect-mcp)
+[![CI](https://github.com/xcbbc21/garmin-connect-mcp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xcbbc21/garmin-connect-mcp/actions/workflows/ci.yml)
 [![Test Report](https://img.shields.io/badge/test_report-view-blue.svg)](TEST_REPORT.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -62,9 +62,9 @@ This plugin connects [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-
 
 ### Registered Tools
 
-The plugin registers **10 tools**. Eight return Garmin data without writing;
-`download_garmin_activity_fit` writes one local file on the MCP/dsh host, and
-`create_garmin_workout` changes the user's Garmin workout library.
+The plugin registers **14 tools**. Eight return Garmin data without writing;
+one writes a local FIT file and five perform confirmed Garmin workout/calendar
+writes.
 
 | Tool | Description | Example Args |
 |---|---|---|
@@ -78,11 +78,53 @@ The plugin registers **10 tools**. Eight return Garmin data without writing;
 | `get_running_skill_advice` | Explain 8 workout types and 4 training philosophies, or collect the mandatory intake for personalized coaching | `{"mode": "explain", "query": "Daniels", "language": "en"}` |
 | `download_garmin_activity_fit` | Download an activity's original archive and safely extract its single FIT file to the account directory under the configured host parent | `{"activityId": 123456789}` |
 | `create_garmin_workout` | Preview a structured workout; create it only after explicit confirmation | `{"name": "Threshold 3×8min", "steps": [...]}` |
+| `schedule_garmin_workout` | Preview then put one existing library workout on a Calendar date | `{"workoutId": "123", "date": "2026-09-15", "timezone": "Asia/Shanghai"}` |
+| `batch_schedule_garmin_workouts` | Preview then schedule 1–100 existing workouts over multiple days/weeks | `{"schedules": [{"workoutId": "123", "date": "2026-09-15"}, ...]}` |
+| `create_and_schedule_garmin_workout` | Preview then create a workout and schedule it in one confirmed write | `{"workout": {"name": "Easy 6km", "steps": [...]}, "date": "2026-09-15"}` |
+| `unschedule_garmin_workout` | Preview then remove one Calendar entry, retaining its workout template | `{"workoutScheduleId": "456"}` |
 
 Workout creation is a two-call flow. The preview response includes a one-time
 `confirmationId`; after the user approves the unchanged preview, call the tool
 again with the same definition, `confirmed: true`, and that `confirmationId`.
 An ID expires after 10 minutes and cannot be reused.
+
+### Calendar scheduling
+
+Every Garmin Calendar write uses the same preview → explicit approval → one-time
+`confirmationId` flow. Dates are local calendar dates in the supplied IANA
+`timezone` (for example `Asia/Shanghai`), or in the MCP host timezone when it
+is omitted. Past dates, malformed timezones, duplicate `(workoutId, date)`
+entries within a batch, and invalid workout IDs are rejected before a write.
+
+The same workout may deliberately recur on different days. Rest days are not
+workouts: omit them from a batch rather than creating an empty Garmin entry.
+For a confirmed batch, Garmin calls are sequential and every entry gets a
+result; a timeout or other failure is never automatically retried because
+Garmin may already have created a Calendar entry.
+
+Example: preview five runs for next week (replace the placeholder IDs with IDs
+from `get_garmin_workouts`), then repeat the exact request with the returned
+`confirmationId` and `confirmed: true` after approval:
+
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "schedules": [
+    {"workoutId": "easy-6k", "date": "2026-09-14"},
+    {"workoutId": "threshold-3x8", "date": "2026-09-16"},
+    {"workoutId": "easy-8k", "date": "2026-09-18"},
+    {"workoutId": "long-16k", "date": "2026-09-20"},
+    {"workoutId": "recovery-5k", "date": "2026-09-21"}
+  ]
+}
+```
+
+`garmin-connect@1.6.2` does not export calendar scheduling methods despite an
+old README example. This plugin therefore uses its authenticated transport for
+the observed Garmin endpoints `POST /workout-service/schedule/{workoutId}` and
+`DELETE /workout-service/schedule/{workoutScheduleId}`. The latter removes only
+the scheduled Calendar entry and requires the `workoutScheduleId` returned by
+a successful schedule operation; it does not delete the workout library item.
 
 ### Personalized running coaching
 
@@ -125,7 +167,7 @@ The compact philosophy layer contains:
 
 Recent Garmin runs may supplement this intake but never replace the athlete's
 answers. The method notes and evidence boundaries are summarized in
-[the training-method research note](https://github.com/Likenttt/garmin-connect-plugin-for-dsh/blob/main/docs/research/running-training-methods.md).
+[the training-method research note](https://github.com/xcbbc21/garmin-connect-mcp/blob/main/docs/research/running-training-methods.md).
 Each philosophy and workout-card output labels its statements as
 `system_principle`, `research_evidence`, or `application_inference` so a method
 definition or coaching inference is not misrepresented as comparative proof.
@@ -137,7 +179,7 @@ definition or coaching inference is not misrepresented as comparative proof.
 ### 1. Install this plugin — from the npm registry (recommended)
 
 ```bash
-npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add dsh-plugin-garmin-connect
+npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add garmin-connect-mcp
 ```
 
 This single command installs the dependency **and** activates the plugin layer — the first run automatically initializes the `web` profile. You only need `pnpm` on your `PATH`:
@@ -158,7 +200,7 @@ Other install sources:
 
 ```bash
 # Local checkout (development)
-cd garmin-connect-plugin-for-dsh && npm install
+cd garmin-connect-mcp && npm install
 npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add .
 
 # GitHub source install
@@ -283,7 +325,7 @@ second; after login it returns to the 15-second account refresh.
 Configure `GARMIN_USERNAME` and the correct `GARMIN_REGION` before opening the
 dialog. `GARMIN_SESSION_TOKEN_FILE` is optional for this Web flow: when omitted,
 the Host uses `GARMIN_ACCOUNT` (default `default`) and writes
-`~/.config/dsh-plugin-garmin-connect/accounts/<alias>.session.json` on the usual
+`~/.config/garmin-connect-mcp/accounts/<alias>.session.json` on the usual
 POSIX configuration path (or the platform configuration root). After a confirmed
 write, the running plugin clears any earlier rejected-session state; the next
 tool call reads the new file without requiring a dsh restart.
@@ -332,7 +374,7 @@ after that, start a new flow.
 
 When `GARMIN_SESSION_TOKEN_FILE` is omitted, the output path is derived from
 `GARMIN_ACCOUNT`/`--account`:
-`~/.config/dsh-plugin-garmin-connect/accounts/<alias>.session.json` on the usual
+`~/.config/garmin-connect-mcp/accounts/<alias>.session.json` on the usual
 POSIX configuration path (or the platform configuration root). The process can
 then use only the non-password configuration below:
 
@@ -481,7 +523,7 @@ format.
 npx --legacy-peer-deps=false @deepseek-ai/dsh web
 ```
 
-Open `http://127.0.0.1:3080`. The plugin is loaded when **Settings → Plugins → Plugin list** shows `plugin-garmin-connect` as *mounted & enabled*. Then try: *"How was my sleep last night?"* or *"Show me my last 5 runs."*
+Open `http://127.0.0.1:3080`. The plugin is loaded when **Settings → Plugins → Plugin list** shows `plugin-garmin-connect-mcp` as *mounted & enabled*. Then try: *"How was my sleep last night?"* or *"Show me my last 5 runs."*
 
 ### 5. Integration Test (optional, source checkout only)
 
@@ -601,13 +643,13 @@ This plugin also ships as a standalone **MCP (Model Context Protocol) server**, 
 Build the local server first:
 
 ```bash
-git clone https://github.com/Likenttt/garmin-connect-plugin-for-dsh.git
-cd garmin-connect-plugin-for-dsh
+git clone https://github.com/xcbbc21/garmin-connect-mcp.git
+cd garmin-connect-mcp
 npm install
 npm run build
 ```
 
-Replace `/absolute/path/to/garmin-connect-plugin-for-dsh` in the examples with
+Replace `/absolute/path/to/garmin-connect-mcp` in the examples with
 the checkout's actual absolute path.
 
 The MCP process needs an email, explicit region, and local account alias. A
@@ -671,9 +713,9 @@ copying their values into TOML. With the variables above available to the Codex
 process, add this entry to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.garmin-connect]
+[mcp_servers.garmin-connect-mcp]
 command = "node"
-args = ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"]
+args = ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"]
 env_vars = ["GARMIN_USERNAME", "GARMIN_REGION", "GARMIN_ACCOUNT", "GARMIN_SESSION_TOKEN_FILE", "GARMIN_FIT_DOWNLOAD_DIR"]
 
 # Read tools can run normally; Codex asks before local-file and Garmin writes.
@@ -702,7 +744,7 @@ inspect the saved configuration:
 
 ```bash
 codex mcp list
-codex mcp get garmin-connect
+codex mcp get garmin-connect-mcp
 ```
 
 Inside Codex CLI, use `/mcp` to verify that the server is active and inspect
@@ -717,8 +759,8 @@ following bash/zsh example keeps the session contents out of `~/.claude.json`;
 only the owner-only file path is configured:
 
 ```bash
-claude mcp add-json --scope user garmin-connect \
-  '{"type":"stdio","command":"node","args":["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],"env":{"GARMIN_USERNAME":"${GARMIN_USERNAME}","GARMIN_REGION":"${GARMIN_REGION:-global}","GARMIN_ACCOUNT":"${GARMIN_ACCOUNT:-default}","GARMIN_SESSION_TOKEN_FILE":"${GARMIN_SESSION_TOKEN_FILE}","GARMIN_FIT_DOWNLOAD_DIR":"${GARMIN_FIT_DOWNLOAD_DIR}"}}'
+claude mcp add-json --scope user garmin-connect-mcp \
+  '{"type":"stdio","command":"node","args":["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],"env":{"GARMIN_USERNAME":"${GARMIN_USERNAME}","GARMIN_REGION":"${GARMIN_REGION:-global}","GARMIN_ACCOUNT":"${GARMIN_ACCOUNT:-default}","GARMIN_SESSION_TOKEN_FILE":"${GARMIN_SESSION_TOKEN_FILE}","GARMIN_FIT_DOWNLOAD_DIR":"${GARMIN_FIT_DOWNLOAD_DIR}"}}'
 ```
 
 This server uses a session assigned specifically to this Claude Code process.
@@ -733,7 +775,7 @@ current project. Keep the path variables available whenever you launch Claude
 Code, then verify the connection:
 
 ```bash
-claude mcp get garmin-connect
+claude mcp get garmin-connect-mcp
 claude mcp list
 ```
 
@@ -744,18 +786,19 @@ a project-scoped configuration.
 
 ### Using the tools in Codex or Claude Code
 
-Once `garmin-connect` reports as connected, ask naturally; the client selects
+Once `garmin-connect-mcp` reports as connected, ask naturally; the client selects
 the MCP tool. If tool selection is ambiguous, explicitly say “use the
-garmin-connect MCP server.” For example:
+garmin-connect-mcp MCP server.” For example:
 
-- “Use garmin-connect to show my last five runs.”
+- “Use garmin-connect-mcp to show my last five runs.”
 - “Compare my sleep and resting heart rate over the last seven days.”
 - “Download the FIT file for activity 123456789 under my configured Garmin FIT parent.”
 - “Preview a threshold workout, show me the steps, and do not create it until I approve.”
+- “Preview five existing workouts for next week in Asia/Shanghai; omit rest days and do not schedule anything until I approve.”
 
-Workout creation still follows the enforced two-call confirmation flow: the
-first call only previews, and creation requires your approval plus the returned
-one-time `confirmationId`.
+Workout creation and all Calendar writes follow the enforced two-call
+confirmation flow: the first call only previews, and a write requires your
+approval plus the returned one-time `confirmationId`.
 
 ### Claude Desktop
 
@@ -764,9 +807,9 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 ```json
 {
   "mcpServers": {
-    "garmin-connect": {
+    "garmin-connect-mcp": {
       "command": "node",
-      "args": ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],
+      "args": ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],
       "env": {
         "GARMIN_USERNAME": "your@email.com",
         "GARMIN_REGION": "global",
@@ -783,14 +826,14 @@ Restart Claude Desktop. You'll see a 🔌 icon indicating the tools are loaded. 
 
 ### Cursor
 
-Add the same `mcpServers.garmin-connect` object shown above to the workspace's
+Add the same `mcpServers.garmin-connect-mcp` object shown above to the workspace's
 `.cursor/mcp.json`, using the absolute `lib/mcp.js` path.
 
 ### Windsurf
 
 Open **Windsurf Settings → Cascade → MCP Servers**, or edit
 `~/.codeium/windsurf/mcp_config.json`, and add the same
-`mcpServers.garmin-connect` object shown above.
+`mcpServers.garmin-connect-mcp` object shown above.
 
 ### WorkBuddy
 
@@ -801,9 +844,9 @@ personal Garmin data, prefer the user-level `~/.workbuddy/mcp.json`. Open
 ```json
 {
   "mcpServers": {
-    "garmin-connect": {
+    "garmin-connect-mcp": {
       "command": "/absolute/path/to/node",
-      "args": ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],
+      "args": ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],
       "env": {
         "GARMIN_USERNAME": "your@email.com",
         "GARMIN_REGION": "global",
@@ -833,8 +876,8 @@ are automatic.
 #### Bundled skill
 
 Starting with version **0.1.7**, the npm package includes
-`skills/garmin-connect/`. Copy this complete directory, including `references/`,
-to `~/.workbuddy/skills/garmin-connect/`. If the skill is already installed,
+`skills/garmin-connect-mcp/`. Copy this complete directory, including `references/`,
+to `~/.workbuddy/skills/garmin-connect-mcp/`. If the skill is already installed,
 update that installed copy as well; upgrading the npm package alone does not
 update it. Reload WorkBuddy's skills and MCP service, then start a new session.
 
@@ -855,7 +898,7 @@ To test this release directly from npm, use an absolute `npx` path
 as the command and these arguments instead of a checkout's `lib/mcp.js`:
 
 ```text
--y --package dsh-plugin-garmin-connect garmin-connect-mcp
+-y --package garmin-connect-mcp garmin-connect-mcp
 ```
 
 Do not configure `GARMIN_PASSWORD`; with a missing session, the first read-only
@@ -866,9 +909,9 @@ owner-only `GARMIN_SESSION_TOKEN_FILE` shown below.
 {
   "mcp": {
     "servers": {
-      "garmin-connect": {
+      "garmin-connect-mcp": {
         "command": "/absolute/path/to/node",
-        "args": ["/absolute/path/to/garmin-connect-plugin-for-dsh/lib/mcp.js"],
+        "args": ["/absolute/path/to/garmin-connect-mcp/lib/mcp.js"],
         "env": {
           "GARMIN_USERNAME": "your@email.com",
           "GARMIN_REGION": "global",
@@ -912,7 +955,7 @@ With npm `0.1.5` or later, the local `node …/lib/mcp.js` command can be replac
 with:
 
 ```bash
-npx -y --package dsh-plugin-garmin-connect garmin-connect-mcp
+npx -y --package garmin-connect-mcp garmin-connect-mcp
 ```
 
 ### Manual Run
@@ -926,9 +969,10 @@ GARMIN_FIT_DOWNLOAD_DIR=/absolute/path/to/garmin-fit-parent \
 node lib/mcp.js
 ```
 
-The MCP server exposes the same **10 tools and argument semantics** as the dsh
+The MCP server exposes the same **14 tools and argument semantics** as the dsh
 plugin: activities, sleep, steps, heart rate, weight, workout-library templates,
-profile, running skills, local FIT download, and workout preview/creation.
+profile, running skills, local FIT download, workout preview/creation, and
+confirmed single/batch Calendar scheduling or removal.
 No AI-callable tool accepts a password/MFA code or exports a session token.
 Browser authentication is an out-of-band local URL elicitation, and the user
 must retry the original tool after completion.
@@ -942,7 +986,7 @@ must retry the original tool after completion.
 │         DeepSeek Harness (dsh)          │
 │                                         │
 │  ┌───────────────────────────────────┐  │
-│  │     dsh-plugin-garmin-connect     │  │
+│  │     garmin-connect-mcp     │  │
 │  │                                   │  │
 │  │  ┌─────────┐    ┌─────────────┐  │  │
 │  │  │  Config  │───▶│ GarminClient│  │  │
@@ -1050,8 +1094,8 @@ The non-negotiable boundaries are:
 
 ```bash
 # Clone & install
-git clone https://github.com/Likenttt/garmin-connect-plugin-for-dsh.git
-cd garmin-connect-plugin-for-dsh
+git clone https://github.com/xcbbc21/garmin-connect-mcp.git
+cd garmin-connect-mcp
 npm install
 
 # Build
@@ -1090,7 +1134,7 @@ src/
 │   ├── running-skills.ts  # 8 workout types + 4 compact training philosophies
 │   └── workout-schema.ts  # Workout definition → Garmin JSON builder
 ├── tools/
-│   └── index.ts      # Tool definitions & registration (10 tools)
+│   └── index.ts      # Tool definitions & registration (14 tools)
 └── utils/
     ├── errors.ts      # Safe public errors and upstream-log redaction
     ├── cache.ts       # In-memory TTL/LRU cache with single-flight refresh
@@ -1113,7 +1157,7 @@ npm publish
 After publishing, users install with a single command:
 
 ```bash
-npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add dsh-plugin-garmin-connect
+npx --legacy-peer-deps=false @deepseek-ai/dsh plugin --profile web add garmin-connect-mcp
 ```
 
 Distribution notes:
@@ -1130,6 +1174,7 @@ Distribution notes:
 - [x] **Body Composition** — weight, BMI, body fat %
 - [x] **Workout Library** — list reusable Garmin workout templates
 - [x] **Workout Creation** — safely preview and create structured workout-library entries
+- [x] **Calendar Scheduling** — safely preview, schedule, batch schedule, and remove Calendar entries
 - [x] **MCP Server** — use with Codex, Claude Code/Desktop, Cursor, Windsurf, WorkBuddy, ZCode
 - [x] **Running Coach** — 8 workout types, 4 training philosophies, and mandatory personalized intake
 - [x] **Browser MFA Bootstrap** — supported for China and International accounts through local dsh Web, system-browser `serve`, and MCP URL elicitation; real MFA passed in both regions, with broader compatibility testing continuing

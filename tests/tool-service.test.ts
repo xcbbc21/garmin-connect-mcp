@@ -31,8 +31,11 @@ function clientWith(overrides: Partial<GarminDataClient> = {}): GarminDataClient
     getHeartRate: jest.fn(),
     getWeight: jest.fn(),
     getWorkouts: jest.fn(),
+    getWorkoutDetail: jest.fn(),
     downloadOriginalActivityZip: jest.fn(),
     addWorkout: jest.fn(),
+    scheduleWorkout: jest.fn(),
+    unscheduleWorkout: jest.fn(),
     getUserProfile: jest.fn(),
     ...overrides,
   }
@@ -1834,5 +1837,167 @@ describe('GarminToolService', () => {
       'Invalid workout confirmation',
     )
     expect(addWorkout).toHaveBeenCalledTimes(1)
+  })
+
+  it('previews a calendar schedule and writes only after its matching confirmation', async () => {
+    const scheduleWorkout = jest.fn().mockResolvedValue({
+      workoutScheduleId: 'schedule-42',
+      calendarDate: '2026-09-15',
+    })
+    const client = clientWith() as any
+    client.getWorkoutDetail = jest.fn().mockResolvedValue({
+      workoutId: 'workout-42',
+      workoutName: 'Easy Run',
+    })
+    client.scheduleWorkout = scheduleWorkout
+    const service = new GarminToolService(client, {
+      activityDetail: 'compact',
+      fitDownloadDir: '/tmp/garmin-fit-service-test-output',
+      accountUsername: 'runner@example.com',
+      accountRegion: 'global',
+    })
+
+    const request = {
+      workoutId: 'workout-42',
+      date: '2026-09-15',
+      timezone: 'Asia/Shanghai',
+    }
+    const preview = await (service as any).scheduleWorkout(request)
+
+    expect(preview).toEqual(expect.objectContaining({
+      requiresConfirmation: true,
+      preview: expect.objectContaining({ workoutName: 'Easy Run' }),
+    }))
+    expect(scheduleWorkout).not.toHaveBeenCalled()
+
+    await expect((service as any).scheduleWorkout({
+      ...request,
+      confirmed: true,
+      confirmationId: preview.confirmationId,
+    })).resolves.toEqual(expect.objectContaining({
+      success: true,
+      workoutScheduleId: 'schedule-42',
+    }))
+    expect(scheduleWorkout).toHaveBeenCalledWith('workout-42', '2026-09-15')
+  })
+
+  it('allows a repeated workout on different days but rejects duplicate calendar entries', async () => {
+    const client = clientWith() as any
+    client.getWorkoutDetail = jest.fn().mockResolvedValue({ workoutName: 'Easy Run' })
+    client.scheduleWorkout = jest.fn()
+    const service = new GarminToolService(client, {
+      activityDetail: 'compact',
+      fitDownloadDir: '/tmp/garmin-fit-service-test-output',
+      accountUsername: 'runner@example.com',
+      accountRegion: 'global',
+    })
+
+    await expect((service as any).batchScheduleWorkouts({
+      timezone: 'Asia/Shanghai',
+      schedules: [
+        { workoutId: 'easy', date: '2026-09-15' },
+        { workoutId: 'easy', date: '2026-09-17' },
+      ],
+    })).resolves.toEqual(expect.objectContaining({ requiresConfirmation: true }))
+
+    await expect((service as any).batchScheduleWorkouts({
+      schedules: [
+        { workoutId: 'easy', date: '2026-09-15' },
+        { workoutId: 'easy', date: '2026-09-15' },
+      ],
+    })).rejects.toThrow('Duplicate schedule entry')
+  })
+
+  it('returns every batch scheduling result when one confirmed write fails', async () => {
+    const scheduleWorkout = jest.fn()
+      .mockResolvedValueOnce({ workoutScheduleId: 'one' })
+      .mockRejectedValueOnce(new Error('Garmin upstream error'))
+      .mockResolvedValueOnce({ workoutScheduleId: 'three' })
+    const client = clientWith() as any
+    client.getWorkoutDetail = jest.fn().mockResolvedValue({ workoutName: 'Run' })
+    client.scheduleWorkout = scheduleWorkout
+    const service = new GarminToolService(client, {
+      activityDetail: 'compact',
+      fitDownloadDir: '/tmp/garmin-fit-service-test-output',
+      accountUsername: 'runner@example.com',
+      accountRegion: 'global',
+    })
+    const request = {
+      schedules: [
+        { workoutId: 'one', date: '2026-09-15' },
+        { workoutId: 'two', date: '2026-09-17' },
+        { workoutId: 'three', date: '2026-09-19' },
+      ],
+    }
+    const preview = await (service as any).batchScheduleWorkouts(request)
+
+    await expect((service as any).batchScheduleWorkouts({
+      ...request,
+      confirmed: true,
+      confirmationId: preview.confirmationId,
+    })).resolves.toEqual(expect.objectContaining({
+      successCount: 2,
+      failureCount: 1,
+      results: expect.arrayContaining([
+        expect.objectContaining({ workoutId: 'one', success: true }),
+        expect.objectContaining({ workoutId: 'two', success: false }),
+        expect.objectContaining({ workoutId: 'three', success: true }),
+      ]),
+    }))
+    expect(scheduleWorkout).toHaveBeenCalledTimes(3)
+  })
+
+  it('creates and schedules one workout in the same confirmed operation', async () => {
+    const addWorkout = jest.fn().mockResolvedValue({ workoutId: 'new-workout' })
+    const scheduleWorkout = jest.fn().mockResolvedValue({ workoutScheduleId: 'new-schedule' })
+    const client = clientWith({ addWorkout }) as any
+    client.scheduleWorkout = scheduleWorkout
+    const service = new GarminToolService(client, {
+      activityDetail: 'compact',
+      fitDownloadDir: '/tmp/garmin-fit-service-test-output',
+      accountUsername: 'runner@example.com',
+      accountRegion: 'global',
+    })
+    const request = {
+      date: '2026-09-15',
+      workout: {
+        name: 'Tuesday Easy',
+        steps: [{ type: 'warmup' as const, endCondition: 'time' as const, endValue: 600 }],
+      },
+    }
+    const preview = await (service as any).createAndScheduleWorkout(request)
+    expect(addWorkout).not.toHaveBeenCalled()
+
+    await expect((service as any).createAndScheduleWorkout({
+      ...request,
+      confirmed: true,
+      confirmationId: preview.confirmationId,
+    })).resolves.toEqual(expect.objectContaining({
+      success: true,
+      workoutId: 'new-workout',
+      workoutScheduleId: 'new-schedule',
+    }))
+    expect(scheduleWorkout).toHaveBeenCalledWith('new-workout', '2026-09-15')
+  })
+
+  it('previews calendar removal and passes the returned schedule id only after confirmation', async () => {
+    const unscheduleWorkout = jest.fn().mockResolvedValue(undefined)
+    const client = clientWith() as any
+    client.unscheduleWorkout = unscheduleWorkout
+    const service = new GarminToolService(client, {
+      activityDetail: 'compact',
+      fitDownloadDir: '/tmp/garmin-fit-service-test-output',
+      accountUsername: 'runner@example.com',
+      accountRegion: 'global',
+    })
+    const preview = await (service as any).unscheduleWorkout({ workoutScheduleId: 'schedule-42' })
+    expect(unscheduleWorkout).not.toHaveBeenCalled()
+
+    await expect((service as any).unscheduleWorkout({
+      workoutScheduleId: 'schedule-42',
+      confirmed: true,
+      confirmationId: preview.confirmationId,
+    })).resolves.toEqual(expect.objectContaining({ success: true }))
+    expect(unscheduleWorkout).toHaveBeenCalledWith('schedule-42')
   })
 })

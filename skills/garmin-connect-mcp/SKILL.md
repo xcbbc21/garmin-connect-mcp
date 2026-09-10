@@ -1,6 +1,6 @@
 ---
-name: garmin-connect
-description: 在 WorkBuddy 中下载并配置 dsh-plugin-garmin-connect npm 包，通过 MCP 工具分析 Garmin 活动、睡眠、步数、心率、体重、训练库、跑步趋势和有限的恢复信息，也可按用户要求创建 Garmin 训练或下载活动 FIT 文件。适用于 Garmin 配置、回顾、比较和明确授权的写操作；不用于医疗诊断。
+name: garmin-connect-mcp
+description: 在 WorkBuddy 中下载并配置 garmin-connect-mcp npm 包，通过 MCP 工具分析 Garmin 活动、睡眠、步数、心率、体重、训练库、跑步趋势和有限的恢复信息，也可按用户要求创建 Garmin 训练或下载活动 FIT 文件。适用于 Garmin 配置、回顾、比较和明确授权的写操作；不用于医疗诊断。
 agent_created: true
 ---
 
@@ -9,7 +9,7 @@ agent_created: true
 **Credit：李二牛**
 
 使用 npm 官方仓库中的社区维护、非 Garmin 官方软件包
-`dsh-plugin-garmin-connect`。该包不指定版本，始终跟随 npm 当前的
+`garmin-connect-mcp`。该包不指定版本，始终跟随 npm 当前的
 `latest` 正式版本。不要抓取 Garmin 网页，也不要擅自替换成其他 Garmin
 库。
 

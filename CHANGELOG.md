@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Confirmed Garmin Calendar scheduling for one existing workout, a 1–100 entry batch, and create-plus-schedule in one operation.
+- Confirmed removal of one Calendar entry by the `workoutScheduleId` returned from scheduling; this never deletes the workout-library template.
+
+### Changed
+- Calendar dates now use explicit IANA timezone validation, reject past dates and duplicate workout/date pairs within a batch, validate library workout IDs before preview, and return all per-entry batch results after partial failures.
+- Calendar writes never automatically retry after a timeout or transient error because Garmin may already have changed the Calendar.
+
 ## [0.1.7] - 2026-09-09
 
 ### Added

@@ -102,7 +102,7 @@ describe('maintenance scripts', () => {
         removeEventListener,
       },
     })
-    expect(definition?.id).toBe('dsh-plugin-garmin-connect')
+    expect(definition?.id).toBe('garmin-connect-mcp')
 
     const createElement = (
       type: unknown,

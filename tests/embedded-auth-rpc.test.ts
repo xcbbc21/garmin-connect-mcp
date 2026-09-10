@@ -56,7 +56,7 @@ describe('DSH embedded Garmin authentication RPC', () => {
     })
 
     expect(config.sessionTokenFile).toBe(
-      '/private/config/dsh-plugin-garmin-connect/accounts/personal.session.json',
+      '/private/config/garmin-connect-mcp/accounts/personal.session.json',
     )
   })
 
