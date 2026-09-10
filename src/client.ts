@@ -1,4 +1,4 @@
-import { Context } from '@deepseek-ai/cordis'
+import { createStderrLogger, type GarminLogger } from './logger'
 import { createHash } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { GarminConnect } from 'garmin-connect'
@@ -27,6 +27,7 @@ import {
   GarminAuthenticationRequiredError,
   type GarminAuthenticationRequiredReason,
   PublicToolError,
+  safeUpstreamLogLine,
 } from './utils/errors'
 
 type LogLevel = Config['logLevel']
@@ -50,7 +51,8 @@ const MISSING_SESSION_FILE_FINGERPRINT = 'missing'
 const UNREADABLE_SESSION_FILE_FINGERPRINT = 'unreadable'
 
 export interface GarminClientOptions {
-  /** Let the local dsh UI load before its out-of-band authentication finishes. */
+  logger?: GarminLogger
+  /** Allow the server to start before out-of-band authentication finishes. */
   allowUnconfigured?: boolean
 }
 
@@ -72,7 +74,7 @@ type SessionFileSnapshot =
 
 /**
  * Thin wrapper around the `garmin-connect` npm package that adds:
- *   - Cordis-aware logging
+ *   - Framework-independent, redacted logging
  *   - Automatic session persistence / restore
  *   - An in-memory cache to reduce API calls and avoid rate limits
  *   - Automatic retries on rate-limit / session expiration
@@ -80,7 +82,7 @@ type SessionFileSnapshot =
 export class GarminClient {
   private gc: GarminConnect
   private cache: MemoryCache
-  private ctx: Context
+  private logger: GarminLogger
   private config: Config
   private requestTimeoutMs: number
   private connected = false
@@ -98,7 +100,6 @@ export class GarminClient {
   private authenticationRequirementRevision = 0
 
   constructor(
-    ctx: Context,
     config: Config,
     options: GarminClientOptions = {},
   ) {
@@ -114,7 +115,7 @@ export class GarminClient {
       throw new Error('Garmin password, session token, or session token file is required')
     }
 
-    this.ctx = ctx
+    this.logger = options.logger ?? createStderrLogger()
     this.config = config
     this.cache = new MemoryCache(config.cacheTtl)
     this.requestTimeoutMs = config.requestTimeoutMs ?? 15_000
@@ -143,8 +144,7 @@ export class GarminClient {
       await this.sessionReplacementGate
     }
     if (!this.connecting) {
-      let tracked!: Promise<void>
-      tracked = this.login().finally(() => {
+      const tracked: Promise<void> = this.login().finally(() => {
         if (this.connecting === tracked) this.connecting = null
       })
       this.connecting = tracked
@@ -620,10 +620,11 @@ export class GarminClient {
   private log(level: LogLevel, message: string): void {
     if (LOG_LEVEL_RANK[level] < LOG_LEVEL_RANK[this.config.logLevel]) return
 
-    if (level === 'debug') this.ctx.logger.debug(message)
-    else if (level === 'info') this.ctx.logger.info(message)
-    else if (level === 'warn') this.ctx.logger.warn(message)
-    else this.ctx.logger.error(message)
+    const safeMessage = safeUpstreamLogLine([message], [
+      this.config.username, this.config.password,
+      this.config.sessionToken, this.config.sessionTokenFile,
+    ])
+    this.logger[level](safeMessage)
   }
 
   private async getCachedForCurrentAuth<T>(

@@ -187,7 +187,7 @@ describe('safe Garmin response interceptor', () => {
   })
 
   it('preserves a retried request failure after refresh succeeds', async () => {
-    const { upstream, reject, request } = upstreamFixture()
+    const { reject, request } = upstreamFixture()
     const rateLimit = Object.assign(new Error('Garmin request failed (HTTP 429)'), {
       status: 429,
     })
@@ -219,7 +219,7 @@ describe('safe Garmin response interceptor', () => {
         error: jest.fn(),
       },
     }
-    const client = new GarminClient(context as any, {
+    const client = new GarminClient({
       username: 'fixture@example.test',
       password: 'fixture-password',
       sessionToken: JSON.stringify({
@@ -232,7 +232,7 @@ describe('safe Garmin response interceptor', () => {
       logLevel: 'error',
       activityDetail: 'compact',
       fitDownloadDir: '/tmp/garmin-fit-test',
-    })
+    }, { logger: context.logger })
     const axiosClient = (client as any).gc.client.client
     let postCount = 0
     axiosClient.defaults.adapter = async (config: any) => {
@@ -264,7 +264,7 @@ describe('safe Garmin response interceptor', () => {
         error: jest.fn(),
       },
     }
-    const client = new GarminClient(context as any, {
+    const client = new GarminClient({
       username: 'fixture@example.test',
       password: 'fixture-password',
       sessionToken: JSON.stringify({
@@ -277,7 +277,7 @@ describe('safe Garmin response interceptor', () => {
       logLevel: 'error',
       activityDetail: 'compact',
       fitDownloadDir: '/tmp/garmin-fit-test',
-    })
+    }, { logger: context.logger })
     await client.connect()
     const upstream = (client as any).gc.client
     upstream.OAUTH_CONSUMER = { key: 'consumer', secret: 'secret' }

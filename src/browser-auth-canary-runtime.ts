@@ -122,7 +122,6 @@ export function createPlaywrightBrowserAdapter(
       let context: PlaywrightContextLike | undefined
       let page: PlaywrightPageLike | undefined
       let closing = false
-      let timer: ReturnType<typeof setTimeout> | undefined
       let captureResolve: (() => void) | undefined
       let controlReject: ((error: Error) => void) | undefined
       let captured = false
@@ -159,7 +158,7 @@ export function createPlaywrightBrowserAdapter(
       )
 
       options.signal?.addEventListener('abort', onAbort, { once: true })
-      timer = setTimeout(
+      const timer = setTimeout(
         () => rejectControl(new BrowserCanaryControlError('TIMED_OUT')),
         timeoutMs,
       )

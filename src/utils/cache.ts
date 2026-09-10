@@ -40,8 +40,7 @@ export class MemoryCache {
     // 2. Data is stale or absent. We need to fetch.
     // Ensure only one background fetch per key.
     if (!this.pending.has(key)) {
-      let fetchPromise: Promise<T>
-      fetchPromise = factory()
+      const fetchPromise: Promise<T> = factory()
         .then((value) => {
           // Invalidating a key detaches its old request. Only the currently
           // registered request may populate the cache.

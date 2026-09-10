@@ -85,7 +85,7 @@ export interface EmbeddedAuthServerAdapter {
  * Dedicated loopback-only bridge for Garmin's embedded GAuth widget.
  *
  * Garmin's service ticket terminates here and is delivered straight to the
- * host-side flow adapter. The containing DSH page receives no ticket, session,
+ * local authentication flow adapter. The MCP caller receives no ticket, session,
  * credential, or identity message from this server.
  */
 export class EmbeddedAuthServer {

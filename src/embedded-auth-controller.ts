@@ -56,7 +56,7 @@ export type EmbeddedAuthCancelResult =
 type NormalizedConfiguration = EmbeddedAuthRuntimeConfig
 
 /**
- * Host-side facade used by a DSH route (or another trusted local caller).
+ * Local authentication facade shared by the MCP server and CLI.
  *
  * It deliberately exposes only an opaque flow handle and coarse status. The
  * account, token path, Garmin ticket, CSRF, profile, and dependency errors stay

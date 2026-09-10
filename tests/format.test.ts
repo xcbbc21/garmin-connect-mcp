@@ -1,4 +1,4 @@
-import { formatActivity, formatSleep, formatSteps, formatHeartRate, formatWeight, formatWorkout, formatProfile } from '../src/utils/format'
+import { formatActivity, formatSleep, formatSteps, formatWeight, formatWorkout, formatProfile } from '../src/utils/format'
 
 describe('Format Utils', () => {
   describe('formatActivity', () => {

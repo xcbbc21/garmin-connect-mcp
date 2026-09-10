@@ -33,8 +33,8 @@ export interface EmbeddedAuthRuntimeOptions {
 /**
  * Assemble the shared loopback authentication runtime.
  *
- * This seam intentionally has no Cordis dependency and does not create a
- * Playwright browser. The Host RPC, CLI, and MCP transports can therefore use
+ * This runtime is independent of the MCP transport and does not create a
+ * Playwright browser. The CLI and MCP transports can therefore use
  * the same controller while deciding independently how the bridge URL opens.
  */
 export function createEmbeddedAuthController(

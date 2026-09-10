@@ -1,175 +1,65 @@
-describe('Config environment defaults', () => {
-  const originalCacheTtl = process.env.GARMIN_CACHE_TTL
-  const originalRequestTimeout = process.env.GARMIN_REQUEST_TIMEOUT_MS
-  const originalUsername = process.env.GARMIN_USERNAME
-  const originalPassword = process.env.GARMIN_PASSWORD
-  const originalSessionToken = process.env.GARMIN_SESSION_TOKEN
-  const originalSessionTokenFile = process.env.GARMIN_SESSION_TOKEN_FILE
-  const originalRegion = process.env.GARMIN_REGION
-  const originalLogLevel = process.env.GARMIN_LOG_LEVEL
-  const originalActivityDetail = process.env.GARMIN_ACTIVITY_DETAIL
-  const originalFitDownloadDir = process.env.GARMIN_FIT_DOWNLOAD_DIR
+import { resolveConfig, resolveAccountAlias, resolveFitDownloadDir } from '../src/config'
 
-  beforeEach(() => {
-    jest.resetModules()
-    jest.doMock('dotenv', () => ({ config: jest.fn() }))
-    jest.doMock('@deepseek-ai/schemastery', () => {
-      const scalar = () => {
-        let fallback: unknown
-        let minimum: number | undefined
-        const schema = ((value?: unknown) => {
-          const resolved = value ?? fallback
-          if (typeof resolved === 'number' && minimum !== undefined && resolved < minimum) {
-            throw new TypeError(`Expected a value greater than or equal to ${minimum}`)
-          }
-          return resolved
-        }) as any
-        schema.default = (value: unknown) => {
-          fallback = value
-          return schema
-        }
-        schema.description = () => schema
-        schema.role = () => schema
-        schema.min = (value: number) => {
-          minimum = value
-          return schema
-        }
-        return schema
-      }
-      const z = {
-        string: scalar,
-        number: scalar,
-        union: scalar,
-        object: (fields: Record<string, (value?: unknown) => unknown>) =>
-          (input: Record<string, unknown> = {}) => Object.fromEntries(
-            Object.entries(fields).map(([key, schema]) => [key, schema(input[key])]),
-          ),
-      }
-      return { __esModule: true, default: z }
-    })
-    delete process.env.GARMIN_CACHE_TTL
-    delete process.env.GARMIN_REQUEST_TIMEOUT_MS
-    delete process.env.GARMIN_USERNAME
-    delete process.env.GARMIN_PASSWORD
-    delete process.env.GARMIN_SESSION_TOKEN
-    delete process.env.GARMIN_SESSION_TOKEN_FILE
-    delete process.env.GARMIN_REGION
-    delete process.env.GARMIN_LOG_LEVEL
-    delete process.env.GARMIN_ACTIVITY_DETAIL
-    delete process.env.GARMIN_FIT_DOWNLOAD_DIR
-  })
+const env = { GARMIN_USERNAME: 'runner@example.test' }
 
-  afterAll(() => {
-    if (originalCacheTtl === undefined) delete process.env.GARMIN_CACHE_TTL
-    else process.env.GARMIN_CACHE_TTL = originalCacheTtl
-    if (originalRequestTimeout === undefined) delete process.env.GARMIN_REQUEST_TIMEOUT_MS
-    else process.env.GARMIN_REQUEST_TIMEOUT_MS = originalRequestTimeout
-    if (originalUsername === undefined) delete process.env.GARMIN_USERNAME
-    else process.env.GARMIN_USERNAME = originalUsername
-    if (originalPassword === undefined) delete process.env.GARMIN_PASSWORD
-    else process.env.GARMIN_PASSWORD = originalPassword
-    if (originalSessionToken === undefined) delete process.env.GARMIN_SESSION_TOKEN
-    else process.env.GARMIN_SESSION_TOKEN = originalSessionToken
-    if (originalSessionTokenFile === undefined) delete process.env.GARMIN_SESSION_TOKEN_FILE
-    else process.env.GARMIN_SESSION_TOKEN_FILE = originalSessionTokenFile
-    if (originalRegion === undefined) delete process.env.GARMIN_REGION
-    else process.env.GARMIN_REGION = originalRegion
-    if (originalLogLevel === undefined) delete process.env.GARMIN_LOG_LEVEL
-    else process.env.GARMIN_LOG_LEVEL = originalLogLevel
-    if (originalActivityDetail === undefined) delete process.env.GARMIN_ACTIVITY_DETAIL
-    else process.env.GARMIN_ACTIVITY_DETAIL = originalActivityDetail
-    if (originalFitDownloadDir === undefined) delete process.env.GARMIN_FIT_DOWNLOAD_DIR
-    else process.env.GARMIN_FIT_DOWNLOAD_DIR = originalFitDownloadDir
-    jest.dontMock('dotenv')
-    jest.dontMock('@deepseek-ai/schemastery')
-  })
-
-  it('allows GARMIN_CACHE_TTL=0 to disable caching', () => {
-    process.env.GARMIN_CACHE_TTL = '0'
-    const { Config } = require('../src/config') as typeof import('../src/config')
-
-    expect(Config({}).cacheTtl).toBe(0)
-  })
-
-  it('reads a finite request timeout from GARMIN_REQUEST_TIMEOUT_MS', () => {
-    process.env.GARMIN_REQUEST_TIMEOUT_MS = '4321'
-    const { Config } = require('../src/config') as typeof import('../src/config')
-
-    expect(Config({}).requestTimeoutMs).toBe(4321)
-  })
-
-  it('falls back safely when enum environment values are invalid', () => {
-    process.env.GARMIN_REGION = 'mars'
-    process.env.GARMIN_LOG_LEVEL = 'verbose'
-    process.env.GARMIN_ACTIVITY_DETAIL = 'everything'
-    const { Config } = require('../src/config') as typeof import('../src/config')
-
-    expect(Config({})).toMatchObject({
-      region: 'global',
-      logLevel: 'info',
-      activityDetail: 'compact',
+describe('runtime configuration', () => {
+  it('resolves defaults without credentials and assigns the default account path', () => {
+    expect(resolveConfig({}, { ...env, XDG_CONFIG_HOME: '/private/config' })).toMatchObject({
+      username: env.GARMIN_USERNAME, password: undefined, sessionToken: undefined,
+      sessionTokenFile: '/private/config/garmin-connect-mcp/accounts/default.session.json',
+      region: 'global', cacheTtl: 300, requestTimeoutMs: 15000,
+      logLevel: 'info', activityDetail: 'compact', fitDownloadDir: '',
     })
   })
-
-  it('keeps environment credentials out of schema defaults', () => {
-    process.env.GARMIN_USERNAME = 'environment-user'
-    process.env.GARMIN_PASSWORD = 'environment-password'
-    process.env.GARMIN_SESSION_TOKEN = 'environment-session'
-    process.env.GARMIN_SESSION_TOKEN_FILE = '/private/session-token.json'
-    const { Config } = require('../src/config') as typeof import('../src/config')
-
-    expect(Config({})).toMatchObject({
-      username: '',
-      password: '',
-      sessionToken: '',
-      sessionTokenFile: '',
+  it.each(['', 'cn ', 'CN', 'mars'])('rejects an explicitly invalid region: %s', region => {
+    expect(() => resolveConfig({}, { ...env, GARMIN_REGION: region }))
+      .toThrow('GARMIN_REGION must be exactly global or cn')
+  })
+  it('requires a username and rejects escaping account aliases', () => {
+    expect(() => resolveConfig({}, {})).toThrow('GARMIN_USERNAME is required')
+    expect(() => resolveConfig({}, { ...env, GARMIN_ACCOUNT: '../escape' })).toThrow('Invalid account alias')
+    expect(resolveAccountAlias({ GARMIN_ACCOUNT: ' personal-cn ' })).toBe('personal-cn')
+  })
+  it('honors explicit non-empty settings over environment values', () => {
+    expect(resolveConfig({
+      username: 'explicit@example.test', password: 'explicit-password',
+      sessionToken: 'explicit-token', sessionTokenFile: '/explicit/session.json',
+      region: 'cn', cacheTtl: 0, logLevel: 'error', activityDetail: 'full',
+    }, { ...env, GARMIN_PASSWORD: 'env-password', GARMIN_SESSION_TOKEN: 'env-token',
+      GARMIN_SESSION_TOKEN_FILE: '/env/session.json' })).toMatchObject({
+      username: 'explicit@example.test', password: 'explicit-password',
+      sessionToken: 'explicit-token', sessionTokenFile: '/explicit/session.json',
+      region: 'cn', cacheTtl: 0, logLevel: 'error', activityDetail: 'full',
     })
   })
-
-  it('resolves credentials at runtime with non-empty plugin values taking priority', () => {
-    process.env.GARMIN_USERNAME = 'environment-user'
-    process.env.GARMIN_PASSWORD = 'environment-password'
-    process.env.GARMIN_SESSION_TOKEN = 'environment-session'
-    process.env.GARMIN_SESSION_TOKEN_FILE = '/environment/session-token.json'
-    const { Config, resolveConfig } = require('../src/config') as typeof import('../src/config')
-
-    expect(resolveConfig(Config({ username: 'plugin-user' }))).toMatchObject({
-      username: 'plugin-user',
-      password: 'environment-password',
-      sessionToken: 'environment-session',
-      sessionTokenFile: '/environment/session-token.json',
+  it('resolves environment values at call time and falls back for blank overrides', () => {
+    const runtime = { ...env, GARMIN_PASSWORD: 'env-password', GARMIN_SESSION_TOKEN: 'env-token' }
+    expect(resolveConfig({ username: '', password: '', sessionToken: '' }, runtime))
+      .toMatchObject({ username: env.GARMIN_USERNAME, password: 'env-password', sessionToken: 'env-token' })
+    runtime.GARMIN_USERNAME = 'changed@example.test'
+    expect(resolveConfig({}, runtime).username).toBe('changed@example.test')
+  })
+  it('retains existing environment numeric and enum fallback semantics', () => {
+    expect(resolveConfig({}, { ...env, GARMIN_CACHE_TTL: '0', GARMIN_REQUEST_TIMEOUT_MS: '4321',
+      GARMIN_LOG_LEVEL: 'warn', GARMIN_ACTIVITY_DETAIL: 'full' })).toMatchObject({
+      cacheTtl: 0, requestTimeoutMs: 4321, logLevel: 'warn', activityDetail: 'full',
     })
+    for (const invalid of ['', '-1', 'NaN', 'Infinity']) {
+      expect(resolveConfig({}, { ...env, GARMIN_CACHE_TTL: invalid, GARMIN_REQUEST_TIMEOUT_MS: invalid,
+        GARMIN_LOG_LEVEL: 'verbose', GARMIN_ACTIVITY_DETAIL: 'everything' })).toMatchObject({
+        cacheTtl: 300, requestTimeoutMs: 15000, logLevel: 'info', activityDetail: 'compact',
+      })
+    }
+    expect(resolveConfig({}, { ...env, GARMIN_REQUEST_TIMEOUT_MS: '0' }).requestTimeoutMs).toBe(15000)
   })
-
-  it('prefers a non-empty plugin session-token file path over the environment', () => {
-    process.env.GARMIN_SESSION_TOKEN_FILE = '/environment/session-token.json'
-    const { Config, resolveConfig } = require('../src/config') as typeof import('../src/config')
-
-    expect(resolveConfig(Config({
-      username: 'plugin-user',
-      sessionTokenFile: '/plugin/session-token.json',
-    })).sessionTokenFile).toBe('/plugin/session-token.json')
+  it('rejects invalid explicit numeric options without exposing credential values', () => {
+    for (const input of [{ cacheTtl: -1 }, { requestTimeoutMs: 0 }, { cacheTtl: Infinity }]) {
+      expect(() => resolveConfig(input, env)).toThrow('Invalid Garmin configuration fields')
+    }
   })
-
-  it('leaves FIT downloads disabled until the user selects a directory', () => {
-    const { resolveFitDownloadDir } = require('../src/config') as typeof import('../src/config')
-
+  it('leaves FIT disabled unless selected and resolves selected paths', () => {
     expect(resolveFitDownloadDir('', '/private/home')).toBe('')
-    expect(resolveFitDownloadDir('~/private-fit', '/private/home'))
-      .toBe('/private/home/private-fit')
-  })
-
-  it('lets GARMIN_FIT_DOWNLOAD_DIR supply an absolute runtime destination', () => {
-    process.env.GARMIN_FIT_DOWNLOAD_DIR = '/private/garmin-fit'
-    const { Config, resolveConfig } = require('../src/config') as typeof import('../src/config')
-
-    expect(resolveConfig(Config({})).fitDownloadDir).toBe('/private/garmin-fit')
-  })
-
-  it('rejects negative cache TTLs and non-positive request timeouts from plugin config', () => {
-    const { Config } = require('../src/config') as typeof import('../src/config')
-
-    expect(() => Config({ cacheTtl: -1 })).toThrow()
-    expect(() => Config({ requestTimeoutMs: 0 })).toThrow()
+    expect(resolveFitDownloadDir('~/private-fit', '/private/home')).toBe('/private/home/private-fit')
+    expect(resolveConfig({}, { ...env, GARMIN_FIT_DOWNLOAD_DIR: '/private/fit' }).fitDownloadDir).toBe('/private/fit')
   })
 })

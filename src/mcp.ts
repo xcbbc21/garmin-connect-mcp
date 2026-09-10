@@ -5,12 +5,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js'
 import { config as loadEnv } from 'dotenv'
 import { z } from 'zod'
-import {
-  assertAccountAlias,
-  defaultAccountSessionPath,
-} from './account-session'
 import { GarminClient } from './client'
-import type { Config } from './config'
+import { resolveConfig, resolveAccountAlias, type Config } from './config'
 import { McpGarminAuthCoordinator } from './mcp-auth'
 import { installMcpShutdownHooks } from './mcp-shutdown'
 import {
@@ -35,11 +31,9 @@ import type {
 } from './tool-service'
 import {
   GarminAuthenticationRequiredError,
-  PublicToolError,
   publicErrorMessage,
   safeUpstreamLogLine,
 } from './utils/errors'
-import { resolveFitDownloadDir } from './utils/path'
 
 type ToolService = Pick<
   GarminToolService,
@@ -163,7 +157,7 @@ class GarminMcpServer extends McpServer {
   }
 }
 
-/** Build an MCP adapter around the same service used by the DSH plugin. */
+/** Register the public Garmin tools on a standard MCP server. */
 export function createMcpServer(
   service: ToolService,
   options: CreateMcpServerOptions = {},
@@ -465,82 +459,11 @@ async function invoke(
   }
 }
 
+/** Compatibility exports for existing programmatic callers. */
 export function standaloneConfig(): Config {
-  const account = standaloneAccountAlias()
-  const username = process.env.GARMIN_USERNAME?.trim() ?? ''
-  const password = process.env.GARMIN_PASSWORD
-  const sessionToken = process.env.GARMIN_SESSION_TOKEN
-  const sessionTokenFile = process.env.GARMIN_SESSION_TOKEN_FILE?.trim()
-    || defaultAccountSessionPath(account, process.env)
-  if (!username) throw new PublicToolError('GARMIN_USERNAME is required')
-
-  const configuredRegion = process.env.GARMIN_REGION
-  if (
-    configuredRegion !== undefined
-    && configuredRegion !== 'global'
-    && configuredRegion !== 'cn'
-  ) {
-    throw new PublicToolError('GARMIN_REGION must be exactly global or cn')
-  }
-  const region = configuredRegion ?? 'global'
-  const activityDetail = process.env.GARMIN_ACTIVITY_DETAIL === 'full' ? 'full' : 'compact'
-  return {
-    username,
-    password,
-    sessionToken,
-    sessionTokenFile,
-    region,
-    activityDetail,
-    fitDownloadDir: resolveFitDownloadDir(process.env.GARMIN_FIT_DOWNLOAD_DIR),
-    cacheTtl: envNumber('GARMIN_CACHE_TTL', 300, true),
-    requestTimeoutMs: envNumber('GARMIN_REQUEST_TIMEOUT_MS', 15_000, false),
-    logLevel: envChoice(
-      process.env.GARMIN_LOG_LEVEL,
-      ['debug', 'info', 'warn', 'error'] as const,
-      'info',
-    ),
-  }
+  return resolveConfig()
 }
-
-export function standaloneAccountAlias(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  const account = env.GARMIN_ACCOUNT?.trim() || 'default'
-  assertAccountAlias(account)
-  return account
-}
-
-function envNumber(name: string, fallback: number, allowZero: boolean): number {
-  const value = process.env[name]
-  if (value === undefined || value.trim() === '') return fallback
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed < 0 || (!allowZero && parsed === 0)) return fallback
-  return parsed
-}
-
-function envChoice<const T extends readonly string[]>(
-  value: string | undefined,
-  allowed: T,
-  fallback: T[number],
-): T[number] {
-  return value !== undefined && allowed.includes(value)
-    ? value as T[number]
-    : fallback
-}
-
-function stderrContext(): any {
-  const write = (level: string) => (message: unknown) => {
-    console.error(`[${level}] ${String(message)}`)
-  }
-  return {
-    logger: {
-      debug: write('debug'),
-      info: write('info'),
-      warn: write('warn'),
-      error: write('error'),
-    },
-  }
-}
+export const standaloneAccountAlias = resolveAccountAlias
 
 async function main(): Promise<void> {
   // Install the stdio guard before dotenv or any other third-party startup
@@ -571,7 +494,7 @@ async function main(): Promise<void> {
     process.env.DOTENV_KEY,
   ]
   const account = standaloneAccountAlias()
-  const client = new GarminClient(stderrContext(), config, { allowUnconfigured: true })
+  const client = new GarminClient(config, { allowUnconfigured: true })
   const service = new GarminToolService(client, {
     activityDetail: config.activityDetail,
     fitDownloadDir: config.fitDownloadDir,

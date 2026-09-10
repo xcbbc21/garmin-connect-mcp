@@ -3,7 +3,7 @@
 import { homedir } from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
-import type { Readable, Writable } from 'node:stream'
+import type { Readable } from 'node:stream'
 import type { GarminAuthOptions, GarminAuthResult } from './auth'
 import {
   assertAccountAlias,

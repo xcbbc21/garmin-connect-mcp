@@ -1,16 +1,9 @@
-import z from '@deepseek-ai/schemastery'
-import * as dotenv from 'dotenv'
+import { z } from 'zod'
+import { assertAccountAlias, defaultAccountSessionPath } from './account-session'
+import { PublicToolError } from './utils/errors'
 import { resolveFitDownloadDir } from './utils/path'
 
 export { resolveFitDownloadDir } from './utils/path'
-
-// Load .env file — only takes effect if the file exists.
-// In production, credentials should be set directly in the shell environment.
-dotenv.config()
-
-// ---------------------------------------------------------------------------
-// Configuration Schema
-// ---------------------------------------------------------------------------
 
 export type GarminRegion = 'global' | 'cn'
 
@@ -37,89 +30,62 @@ export interface Config {
   fitDownloadDir: string
 }
 
-/**
- * DeepSeek Harness plugin configuration schema (schemastery).
- *
- * Credential resolution priority:
- *   1. Values supplied directly in the Harness config file (plugin config)
- *   2. Environment variables resolved by `resolveConfig()` at apply time
- *   3. Empty schema defaults (credentials never enter schema metadata)
- *
- * Passwords and session tokens are NEVER logged, serialized, or written to
- * the Harness trajectory / tool-call history.
- */
-export const Config = z.object({
-  username: z.string()
-    .role('secret')
-    .default('')
-    .description('Garmin account email. Env: GARMIN_USERNAME'),
+export type ConfigEnvironment = Record<string, string | undefined>
 
-  password: z.string()
-    .role('secret')
-    .default('')
-    .description('Garmin password (prefer session token). Env: GARMIN_PASSWORD'),
-
-  sessionToken: z.string()
-    .role('secret')
-    .default('')
-    .description('Pre-auth session token. Env: GARMIN_SESSION_TOKEN'),
-
-  sessionTokenFile: z.string()
-    .role('secret')
-    .default('')
-    .description('Path to a pre-auth session token JSON file. Env: GARMIN_SESSION_TOKEN_FILE'),
-
-  region: z.union(['global', 'cn'] as const)
-    .default(envChoice(process.env.GARMIN_REGION, ['global', 'cn'] as const, 'global'))
-    .description('Server region: global | cn. Env: GARMIN_REGION'),
-
-  cacheTtl: z.number()
-    .min(0)
-    .default(nonNegativeEnvNumber(process.env.GARMIN_CACHE_TTL, 300))
-    .description('Cache TTL in seconds (0 to disable). Env: GARMIN_CACHE_TTL'),
-
-  requestTimeoutMs: z.number()
-    .min(1)
-    .default(positiveEnvNumber(process.env.GARMIN_REQUEST_TIMEOUT_MS, 15_000))
-    .description('Garmin request timeout in milliseconds. Env: GARMIN_REQUEST_TIMEOUT_MS'),
-
-  logLevel: z.union(['debug', 'info', 'warn', 'error'] as const)
-    .default(envChoice(
-      process.env.GARMIN_LOG_LEVEL,
-      ['debug', 'info', 'warn', 'error'] as const,
-      'info',
-    ))
-    .description('Log verbosity. Env: GARMIN_LOG_LEVEL'),
-
-  activityDetail: z.union(['compact', 'full'] as const)
-    .default(envChoice(
-      process.env.GARMIN_ACTIVITY_DETAIL,
-      ['compact', 'full'] as const,
-      'compact',
-    ))
-    .description('Activity detail: compact, or full with expanded fitness/location data and private fields filtered. Env: GARMIN_ACTIVITY_DETAIL'),
-
-  fitDownloadDir: z.string()
-    .default('')
-    .description('User-selected FIT parent; output is separated by region and account. Env: GARMIN_FIT_DOWNLOAD_DIR'),
+// No credentials or environment values are captured in schema metadata.
+const configSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().optional(),
+  sessionToken: z.string().optional(),
+  sessionTokenFile: z.string(),
+  region: z.enum(['global', 'cn']),
+  cacheTtl: z.number().finite().min(0),
+  requestTimeoutMs: z.number().finite().positive(),
+  logLevel: z.enum(['debug', 'info', 'warn', 'error']),
+  activityDetail: z.enum(['compact', 'full']),
+  fitDownloadDir: z.string(),
 })
 
-/** Resolve secrets at runtime so schema metadata never contains credentials. */
-export function resolveConfig(input: Config): Config {
-  return {
-    ...input,
-    username: preferNonEmpty(input.username, process.env.GARMIN_USERNAME),
-    password: preferNonEmpty(input.password, process.env.GARMIN_PASSWORD),
-    sessionToken: preferNonEmpty(input.sessionToken, process.env.GARMIN_SESSION_TOKEN),
-    sessionTokenFile: preferNonEmpty(
-      input.sessionTokenFile,
-      process.env.GARMIN_SESSION_TOKEN_FILE,
-    ),
-    fitDownloadDir: resolveFitDownloadDir(preferNonEmpty(
-      input.fitDownloadDir,
-      process.env.GARMIN_FIT_DOWNLOAD_DIR,
-    )),
+export function resolveAccountAlias(env: ConfigEnvironment = process.env): string {
+  const account = env.GARMIN_ACCOUNT?.trim() || 'default'
+  assertAccountAlias(account)
+  return account
+}
+
+/** Resolve explicit options over runtime environment; importing never loads dotenv. */
+export function resolveConfig(
+  input: Partial<Config> = {},
+  env: ConfigEnvironment = process.env,
+): Config {
+  const account = resolveAccountAlias(env)
+  const username = preferNonEmpty(input.username, env.GARMIN_USERNAME).trim()
+  if (!username) throw new PublicToolError('GARMIN_USERNAME is required')
+  const region = input.region ?? env.GARMIN_REGION ?? 'global'
+  if (region !== 'global' && region !== 'cn') {
+    throw new PublicToolError('GARMIN_REGION must be exactly global or cn')
   }
+  const result = configSchema.safeParse({
+    username,
+    password: input.password?.trim() ? input.password : env.GARMIN_PASSWORD,
+    sessionToken: input.sessionToken?.trim() ? input.sessionToken : env.GARMIN_SESSION_TOKEN,
+    sessionTokenFile: preferNonEmpty(input.sessionTokenFile, env.GARMIN_SESSION_TOKEN_FILE).trim()
+      || defaultAccountSessionPath(account, env),
+    region,
+    activityDetail: input.activityDetail
+      ?? (env.GARMIN_ACTIVITY_DETAIL === 'full' ? 'full' : 'compact'),
+    fitDownloadDir: resolveFitDownloadDir(preferNonEmpty(input.fitDownloadDir, env.GARMIN_FIT_DOWNLOAD_DIR)),
+    cacheTtl: input.cacheTtl ?? envNumber(env.GARMIN_CACHE_TTL, 300, true),
+    requestTimeoutMs: input.requestTimeoutMs ?? envNumber(env.GARMIN_REQUEST_TIMEOUT_MS, 15_000, false),
+    logLevel: input.logLevel ?? envChoice(
+      env.GARMIN_LOG_LEVEL, ['debug', 'info', 'warn', 'error'] as const, 'info',
+    ),
+  })
+  if (!result.success) {
+    // Zod issues can contain values supplied by callers; expose field names only.
+    const fields = [...new Set(result.error.issues.map(issue => issue.path[0]))].join(', ')
+    throw new PublicToolError('Invalid Garmin configuration fields: ' + fields)
+  }
+  return result.data
 }
 
 function preferNonEmpty(primary: string | undefined, fallback: string | undefined): string {
@@ -127,23 +93,15 @@ function preferNonEmpty(primary: string | undefined, fallback: string | undefine
   return fallback?.trim() ? fallback : ''
 }
 
-function nonNegativeEnvNumber(value: string | undefined, fallback: number): number {
+function envNumber(value: string | undefined, fallback: number, allowZero: boolean): number {
   if (value === undefined || value.trim() === '') return fallback
   const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
-}
-
-function positiveEnvNumber(value: string | undefined, fallback: number): number {
-  const parsed = nonNegativeEnvNumber(value, fallback)
-  return parsed > 0 ? parsed : fallback
+  if (!Number.isFinite(parsed) || parsed < 0 || (!allowZero && parsed === 0)) return fallback
+  return parsed
 }
 
 function envChoice<const T extends readonly string[]>(
-  value: string | undefined,
-  allowed: T,
-  fallback: T[number],
+  value: string | undefined, allowed: T, fallback: T[number],
 ): T[number] {
-  return value !== undefined && allowed.includes(value)
-    ? value as T[number]
-    : fallback
+  return value !== undefined && allowed.includes(value) ? value as T[number] : fallback
 }
