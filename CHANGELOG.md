@@ -2,7 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-10
+
+### Changed
+- Converted the project to standalone MCP plus an independent authentication CLI.
+- Removed host plugin dependencies, lifecycle, duplicate tool registration, RPC and React UI.
+- Replaced framework logging/configuration with typed standalone interfaces and runtime configuration.
+- Preserved all 14 MCP tools, schemas, session formats and confirmation behavior against a captured baseline.
+- Rewrote installation and optional skill guidance for client-neutral GitHub source distribution.
+- Marked the package private; the unscoped npm name belongs to another project.
+- Added clean builds, non-mutating lint, real stdio subprocess tests and isolated runtime-package checks.
+
+The sections below are preserved history from the previous implementation and
+are not evidence of current release verification. See docs/verification.md.
+
+## Calendar extension before 0.2.0
 
 ### Added
 - Confirmed Garmin Calendar scheduling for one existing workout, a 1–100 entry batch, and create-plus-schedule in one operation.

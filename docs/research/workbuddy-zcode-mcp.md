@@ -1,5 +1,9 @@
 # WorkBuddy / ZCode MCP compatibility research
 
+> Historical research snapshot (2026-08-20), not current setup instructions.
+> Use [client setup](../client-setup.md); old package/credential examples below
+> do not describe the 0.2.0 source distribution or prove current client support.
+
 Research date: 2026-08-20
 
 ## Executive conclusion

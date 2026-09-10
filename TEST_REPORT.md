@@ -1,5 +1,8 @@
 # Release Test Report
 
+> Historical upstream 0.1.6 snapshot. Not a verification report for 0.2.0.
+> Current refactor results: [docs/verification.md](docs/verification.md).
+
 [简体中文](./TEST_REPORT.zh-CN.md)
 
 This page is the static verification snapshot for the `0.1.6` release. It

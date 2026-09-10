@@ -1,5 +1,8 @@
 # 发布测试报告
 
+> 历史上游 0.1.6 快照，不代表当前 0.2.0 验收结果。
+> 当前结果见 [docs/verification.md](docs/verification.md)。
+
 [English](./TEST_REPORT.md)
 
 本页面是 `0.1.6` 正式版的静态验证快照，记录
