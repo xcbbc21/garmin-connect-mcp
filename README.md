@@ -136,6 +136,7 @@ npm run lint
 npm test -- --runInBand
 npm run test:coverage
 npm run pack:smoke
+npm run test:distribution
 ```
 
 Tests build first. Lint never rewrites files. Packaging audits file contents and obsolete dependencies. CI checks Node 20/22 on Linux and platform behavior on macOS/Windows.

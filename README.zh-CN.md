@@ -136,6 +136,7 @@ npm run lint
 npm test -- --runInBand
 npm run test:coverage
 npm run pack:smoke
+npm run test:distribution
 ```
 
 测试前自动构建；lint 只检查，不改写文件。打包审计核对文件和旧依赖。CI 覆盖 Linux Node 20/22，以及 macOS、Windows 平台行为。

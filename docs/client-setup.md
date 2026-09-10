@@ -75,6 +75,10 @@ Client layouts can change between versions. This refactor does not install clien
 
 A client that supports URL elicitation can display the local login flow; otherwise run the independent authentication command above. Do not put passwords or inline tokens in these examples. Session credentials remain in local files with private permissions.
 
+On a cold Windows host, the first native permission check may take over a minute
+(bounded at 120 seconds). Complete the independent login before starting MCP if
+your client's request timeout is shorter; the private-file checks are never skipped.
+
 To enable FIT downloads, add `GARMIN_FIT_DOWNLOAD_DIR` with a trusted, absolute parent directory to that client's env. The returned tool result contains file metadata, not the secret session or complete local path.
 
 After connecting, try “Show my last five runs” or “Preview a workout; wait for confirmation.” Calendar writes always use the server's preview/confirmation mechanism.

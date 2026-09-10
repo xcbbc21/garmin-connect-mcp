@@ -1,6 +1,7 @@
 # Standalone MCP 0.2.0 verification
 
-Date: 2026-09-10. Local environment: macOS arm64, Node v25.2.1, npm 11.19.0.
+Verification started 2026-09-10; final clean-install rerun 2026-09-11.
+Local environment: macOS arm64, Node v25.2.1, npm 11.19.0.
 This report covers the standalone refactor against baseline commit `52b67cd`.
 
 ## Recorded results
@@ -19,6 +20,8 @@ This report covers the standalone refactor against baseline commit `52b67cd`.
 | Package-root import | No dotenv loading, logs or service startup |
 | Packed runtime in an empty consumer directory | Installed with development dependencies omitted; dependency tree, public API import, auth help, 14-tool discovery, preview and process shutdown passed |
 | Package content audit | Passed: only runtime files, selected docs, license/provenance and optional skill; no removed host UI or adapters |
+| Clean source installation | Git archive of `4564f26` installed into a new temporary directory; npm ci, lint, full coverage, pack audit and runtime-only installation all passed |
+| Independent core review | No critical or important findings; separate no-network verification of 6 suites / 51 tests passed |
 
 Adapter-only tests were removed, and standalone/configuration/logging/Calendar
 regressions were added. A smaller total is not a reduction in the retained
@@ -45,6 +48,12 @@ functionality contract.
   a symlinked output directory.
 - Historical reports, changelog and provenance retain upstream references
   intentionally; they are not current setup instructions.
+- Native Windows CI exposed test-loader URL formatting and invalid inherited-ACL
+  temporary fixtures; both were corrected without relaxing the private-directory
+  policy. It also confirmed the first PowerShell invocation was silently killed
+  at 60 seconds, while subsequent real ACL checks succeeded. The bounded native
+  subprocess allowance is now 120 seconds, with sanitized failure metadata in
+  the native smoke test.
 
 ## Evidence boundaries
 
