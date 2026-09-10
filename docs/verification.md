@@ -22,6 +22,7 @@ This report covers the standalone refactor against baseline commit `52b67cd`.
 | Package content audit | Passed: only runtime files, selected docs, license/provenance and optional skill; no removed host UI or adapters |
 | Clean source installation | Git archive of `4564f26` installed into a new temporary directory; npm ci, lint, full coverage, pack audit and runtime-only installation all passed |
 | Independent core review | No critical or important findings; separate no-network verification of 6 suites / 51 tests passed |
+| Remote clean-install CI | All four jobs passed on runtime commit `754e624`: Linux Node 20/22, macOS and Windows, including packed runtime installation |
 
 Adapter-only tests were removed, and standalone/configuration/logging/Calendar
 regressions were added. A smaller total is not a reduction in the retained
@@ -63,8 +64,10 @@ The existing schedule/delete transport uses unofficial Garmin endpoints;
 mocked tests do not establish their current service-side acceptance.
 
 Desktop client configuration examples are not claims of end-to-end client
-validation. CI is configured for Linux Node 20/22 and native macOS/Windows
-checks; a local macOS run alone does not establish remote CI results.
+validation. [Remote CI run 34543981619](https://github.com/xcbbc21/garmin-connect-mcp/actions/runs/34543981619)
+passed all four jobs, including native macOS/Windows permission checks and
+isolated packed-runtime installs. Linux runs the full coverage suite; platform
+jobs run the relevant native permissions and process/protocol tests.
 
 Live read-only checks are available explicitly through `npm run test:integration`
 using the same public client and session configuration. They are excluded from CI.
