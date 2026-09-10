@@ -21,6 +21,7 @@ describe('MCP adapter', () => {
         (require('../package.json') as { version: string }).version,
       )
       const result = await client.listTools()
+      expect(result).toEqual(require('./fixtures/mcp-tools-baseline.json'))
       expect(result.tools.map(tool => tool.name)).toEqual([
         'get_garmin_activities',
         'get_garmin_sleep',

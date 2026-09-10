@@ -1,0 +1,829 @@
+{
+  "tools": [
+    {
+      "name": "get_garmin_activities",
+      "description": "Fetch recent Garmin activities with compact or full detail.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "compact",
+              "full"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_garmin_sleep",
+      "description": "Get sleep data for one date or an inclusive date range.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "startDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Start date in YYYY-MM-DD format (default: today)"
+          },
+          "endDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive end date in YYYY-MM-DD format (maximum 30 days)"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_garmin_steps",
+      "description": "Get step totals for one date or an inclusive date range; goal and distance may be unavailable.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "startDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Start date in YYYY-MM-DD format (default: today)"
+          },
+          "endDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive end date in YYYY-MM-DD format (maximum 30 days)"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_garmin_heart_rate",
+      "description": "Get heart-rate data for one date or an inclusive date range.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "startDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Start date in YYYY-MM-DD format (default: today)"
+          },
+          "endDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive end date in YYYY-MM-DD format (maximum 30 days)"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_garmin_weight",
+      "description": "Get body-composition data for one date or an inclusive date range.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "startDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Start date in YYYY-MM-DD format (default: today)"
+          },
+          "endDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive end date in YYYY-MM-DD format (maximum 30 days)"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_garmin_workouts",
+      "description": "Get workouts from the Garmin workout library.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_garmin_profile",
+      "description": "Get an allow-listed Garmin profile summary.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_running_skill_advice",
+      "description": "Explain 8 running workout types and the Hansons, Jack Daniels, Norwegian threshold, and polarized training philosophies. Set mode=personalized for any athlete-specific recommendation or plan. Personalized mode must collect goal, current performance and its basis, training background, availability, health/recovery constraints and warning-symptom status, plus load, quality-session, and intensity-guidance preferences before returning planning material; missing fields become questions and warning symptoms stop planning.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "explain",
+              "personalized"
+            ],
+            "description": "Use explain for concepts only. Use personalized for any athlete-specific recommendation or plan."
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 100,
+            "description": "Optional workout type or philosophy keyword; omit for the full compact set."
+          },
+          "includeRecentActivities": {
+            "type": "boolean",
+            "description": "Fetch five recent runs only after personalized intake is complete; never a substitute for answers."
+          },
+          "language": {
+            "type": "string",
+            "enum": [
+              "zh-CN",
+              "en"
+            ],
+            "description": "Language for intake questions and coaching material."
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 500,
+            "description": "Target distance or event, future ISO YYYY-MM-DD date, and completion or ideal/minimum time goal."
+          },
+          "currentPerformance": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 500,
+            "description": "Representative result from the past two years, non-future ISO YYYY-MM-DD date, effort, and material conditions; explicitly state when none exists."
+          },
+          "performanceBasis": {
+            "type": "string",
+            "enum": [
+              "recent_race",
+              "time_trial",
+              "no_recent_benchmark"
+            ],
+            "description": "Whether current ability comes from a recent race, time trial, or no recent benchmark."
+          },
+          "trainingBackground": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 1000,
+            "description": "Running history, recent average/peak volume, frequency, long run, quality work, and interruptions."
+          },
+          "availability": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 750,
+            "description": "Available days/time, rest and long-run days, terrain/facility limits, strength-training time, and whether double days are possible."
+          },
+          "healthConstraints": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 750,
+            "description": "Current/past-year injury, relevant disease or medication, sleep, stress, and recovery; state none explicitly."
+          },
+          "hasWarningSymptoms": {
+            "type": "boolean",
+            "description": "True for current chest discomfort, abnormal breathlessness with mild activity, fainting/dizziness, or abnormal palpitations; true stops planning."
+          },
+          "trainingPreference": {
+            "type": "string",
+            "enum": [
+              "steady",
+              "hard_easy",
+              "mixed"
+            ],
+            "description": "Preferred load pattern: steady/even, distinct hard/easy days, or mixed/no preference."
+          },
+          "maxQualitySessionsPerWeek": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 7,
+            "description": "Maximum acceptable quality sessions per week; a ceiling, not a prescription."
+          },
+          "intensityGuidancePreference": {
+            "type": "string",
+            "enum": [
+              "pace",
+              "heart_rate",
+              "rpe",
+              "mixed"
+            ],
+            "description": "Preferred intensity guidance: pace, heart rate, perceived effort, or mixed."
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_garmin_workout",
+      "description": "Preview a user-specified structured workout first and create it only after explicit user confirmation. This execution tool does not generate a training plan. If the assistant derives a personalized workout, it must first complete get_running_skill_advice with mode=personalized; a directly specified workout may be encoded without coaching intake.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "sport": {
+            "type": "string",
+            "enum": [
+              "running",
+              "cycling",
+              "swimming",
+              "strength"
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "warmup",
+                        "interval",
+                        "recovery",
+                        "cooldown",
+                        "rest"
+                      ]
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 20
+                    },
+                    "endCondition": {
+                      "type": "string",
+                      "enum": [
+                        "distance",
+                        "time",
+                        "lapButton"
+                      ]
+                    },
+                    "endValue": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 1000000
+                    },
+                    "target": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "pace",
+                        "heartRate"
+                      ]
+                    },
+                    "paceFrom": {
+                      "type": "string",
+                      "pattern": "^\\d+:[0-5]\\d$"
+                    },
+                    "paceTo": {
+                      "type": "string",
+                      "pattern": "^\\d+:[0-5]\\d$"
+                    },
+                    "hrFrom": {
+                      "type": "integer",
+                      "minimum": 30,
+                      "maximum": 250
+                    },
+                    "hrTo": {
+                      "type": "integer",
+                      "minimum": 30,
+                      "maximum": 250
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "endCondition"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "repeat"
+                    },
+                    "iterations": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 99
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/properties/steps/items/anyOf/0"
+                      },
+                      "minItems": 1,
+                      "maxItems": 100
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "iterations",
+                    "steps"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Set true only after the user explicitly approves the preview."
+          },
+          "confirmationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "One-time ID returned by the matching preview call."
+          }
+        },
+        "required": [
+          "name",
+          "steps"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "schedule_garmin_workout",
+      "description": "Preview then schedule one existing Garmin workout-library entry on a local calendar date. A repeated workout is allowed on different dates, but the same workout/date pair is rejected. The write is non-idempotent: after a timeout, inspect Garmin Calendar before retrying.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workoutId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Existing Garmin workout-library ID."
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Local Garmin Calendar date in YYYY-MM-DD format"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "IANA timezone used to interpret date, e.g. Asia/Shanghai; defaults to the MCP host timezone"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Set true only after the user explicitly approves the returned preview."
+          },
+          "confirmationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "One-time ID returned by the matching preview call."
+          }
+        },
+        "required": [
+          "workoutId",
+          "date"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "batch_schedule_garmin_workouts",
+      "description": "Preview then schedule 1–100 existing Garmin workout-library entries across future days or weeks. The batch continues after an individual failure and returns per-entry results. Do not represent rest days: omit them instead of creating a workout.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "schedules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "workoutId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "date": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                  "description": "Local Garmin Calendar date in YYYY-MM-DD format"
+                }
+              },
+              "required": [
+                "workoutId",
+                "date"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "IANA timezone used to interpret date, e.g. Asia/Shanghai; defaults to the MCP host timezone"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Set true only after the user explicitly approves the returned preview."
+          },
+          "confirmationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "One-time ID returned by the matching preview call."
+          }
+        },
+        "required": [
+          "schedules"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "create_and_schedule_garmin_workout",
+      "description": "Preview then create one structured Garmin workout and schedule it on a local calendar date in one confirmed operation. If creation succeeds but scheduling fails, the result reports the partial outcome and must not be blindly retried.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workout": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "sport": {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "cycling",
+                  "swimming",
+                  "strength"
+                ]
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "warmup",
+                            "interval",
+                            "recovery",
+                            "cooldown",
+                            "rest"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 20
+                        },
+                        "endCondition": {
+                          "type": "string",
+                          "enum": [
+                            "distance",
+                            "time",
+                            "lapButton"
+                          ]
+                        },
+                        "endValue": {
+                          "type": "number",
+                          "exclusiveMinimum": 0,
+                          "maximum": 1000000
+                        },
+                        "target": {
+                          "type": "string",
+                          "enum": [
+                            "open",
+                            "pace",
+                            "heartRate"
+                          ]
+                        },
+                        "paceFrom": {
+                          "type": "string",
+                          "pattern": "^\\d+:[0-5]\\d$"
+                        },
+                        "paceTo": {
+                          "type": "string",
+                          "pattern": "^\\d+:[0-5]\\d$"
+                        },
+                        "hrFrom": {
+                          "type": "integer",
+                          "minimum": 30,
+                          "maximum": 250
+                        },
+                        "hrTo": {
+                          "type": "integer",
+                          "minimum": 30,
+                          "maximum": 250
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "endCondition"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "repeat"
+                        },
+                        "iterations": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 99
+                        },
+                        "steps": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/properties/workout/properties/steps/items/anyOf/0"
+                          },
+                          "minItems": 1,
+                          "maxItems": 100
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "iterations",
+                        "steps"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 100
+              }
+            },
+            "required": [
+              "name",
+              "steps"
+            ],
+            "additionalProperties": false
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Local Garmin Calendar date in YYYY-MM-DD format"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "IANA timezone used to interpret date, e.g. Asia/Shanghai; defaults to the MCP host timezone"
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Set true only after the user explicitly approves the returned preview."
+          },
+          "confirmationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "One-time ID returned by the matching preview call."
+          }
+        },
+        "required": [
+          "workout",
+          "date"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "unschedule_garmin_workout",
+      "description": "Preview then remove one Garmin Calendar entry by the workoutScheduleId returned from a prior schedule operation. This removes the calendar entry, not the reusable workout-library template.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workoutScheduleId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Garmin Calendar entry ID returned as workoutScheduleId by a schedule operation."
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Set true only after the user explicitly approves the returned preview."
+          },
+          "confirmationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "One-time ID returned by the matching preview call."
+          }
+        },
+        "required": [
+          "workoutScheduleId"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "download_garmin_activity_fit",
+      "description": "Download one Garmin activity as a FIT file. GARMIN_FIT_DOWNLOAD_DIR must explicitly select a trusted local parent directory; files are isolated under GARMIN_FIT_<region>_<account-email>. Returns non-sensitive metadata without the local path or binary content.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "activityId": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Positive Garmin activity ID returned by get_garmin_activities."
+          }
+        },
+        "required": [
+          "activityId"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ]
+}
