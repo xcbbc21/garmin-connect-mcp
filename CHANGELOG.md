@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Account-scoped local write journal (`GARMIN_STATE_DIR`, default
+  `<platform config root>/garmin-connect-mcp/state`) that records a Calendar scheduling
+  attempt before it is sent, so an uncertain write is recoverable without being replayed.
+- Account-level cross-process write lock with an owner token, a bounded wait and no
+  time-based preemption.
+- Optional `idempotencyKey` on `schedule_garmin_workout` and `batch_schedule_garmin_workouts`.
+- Structured write results: `status`, `action`, `operationId`, `evidence`,
+  `desiredStateSatisfied`, `canResume`, `manualReviewRequired`, `errorCode`, `nextAction`;
+  batch adds `skippedCount`, `unknownCount`, `notAttemptedCount` and `definiteFailureCount`.
+- `docs/calendar-write-recovery.md`, `docs/calendar-api-verification.md` and
+  `docs/calendar-write-delivery.md`.
+
+### Changed
+- A repeated workout/date is now skipped when Garmin already has it, and blocked when an
+  earlier write for the same workout and date has an unknown outcome. A new preview, a
+  different idempotency key, a restart or a concurrent caller cannot bypass the block.
+- A write timeout returns a durable `unknown` receipt with an `operationId` instead of a bare
+  failure. Calendar writes are never automatically retried.
+- `in_flight` is persisted before the single dispatch; if that persistence fails, nothing is
+  sent. Only `prepared` steps may dispatch, so a superseded preview cannot add a write.
+- Batch entries report their own status; legacy `failureCount` is documented as
+  "not confirmed complete" rather than "definitely failed".
+- Documented that the SDK has no Calendar scheduling or range-query capability: scheduling is
+  a project-owned adapter over unofficial endpoints, and no calendar range query exists, so
+  absence can never be proven.
+
+### Not yet covered
+- `create_garmin_workout`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout`
+  are not journal-backed. Calendar range query, reconcile/resume and the four planned
+  inspection/recovery tools are not implemented.
+
 ## [0.2.0] - 2026-09-10
 
 ### Changed

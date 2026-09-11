@@ -212,6 +212,9 @@ personal-claude.session.json
 | `GARMIN_REQUEST_TIMEOUT_MS` | 否 | 请求超时毫秒数，默认 15000 |
 | `GARMIN_LOG_LEVEL` | 否 | `debug`、`info`、`warn`、`error` |
 | `GARMIN_ACTIVITY_DETAIL` | 否 | `compact` 或 `full`，默认 `compact` |
+| `GARMIN_STATE_DIR` | 否 | 写入日志与写入锁的绝对本地私有目录，默认 `<平台配置根>/garmin-connect-mcp/state`；相对路径会被拒绝 |
+
+`GARMIN_STATE_DIR` 保存的是排期写入记录，用来防止重复写入同一条排期。它与登录别名解耦（同一账号的不同别名共用一个记录），与会话文件无关。请定期备份；**删除该目录会丢掉防止重复排期的依据**，不是修复手段。
 
 注意：MCP 的 stdout 专门用于 JSON-RPC 协议。日志写入 stderr，不要把调试输出重定向到 stdout。
 
@@ -640,7 +643,9 @@ Claude Code、Cursor、Windsurf、WorkBuddy 和 ZCode 都使用同一组 `comman
 4. 用户确认后，使用相同请求加 `confirmed` 和 `confirmationId`。
 5. 保存返回的 `workoutScheduleId`，取消时使用这个 ID。
 
-同一个训练可以安排到不同日期；同一个 `workoutId + date` 组合不能在同一批中重复。服务没有完整的跨请求日历去重能力，超时后要先检查 Garmin Calendar。
+同一个训练可以安排到不同日期；同一个 `workoutId + date` 组合不会被写入两次。重复请求要么因为 Garmin 已有该条目而跳过（`action: "skip_existing"`），要么因为该组合存在结果不确定的历史写入而阻断（`action: "blocked"`）。换新预览、换 `idempotencyKey`、重启服务或并发调用都不能绕过。
+
+超时不会返回笼统失败，而是返回 `status: "unknown"` 与可持久查询的 `operationId`。该写入不会被自动重发：先核对 Garmin 日历，再改用其他日期或模板。
 
 ### 9.11 `batch_schedule_garmin_workouts`：批量安排多天或多周
 
@@ -668,14 +673,35 @@ Claude Code、Cursor、Windsurf、WorkBuddy 和 ZCode 都使用同一组 `comman
 4. 第一次调用只生成批量预览。
 5. 逐条检查日期、训练名称和时区。
 6. 用户确认后，原样提交并补充确认字段。
-7. 查看 `successCount`、`failureCount` 和每条 `results`。
+7. 查看 `successCount`、`skippedCount`、`unknownCount`、`notAttemptedCount`、`definiteFailureCount` 和每条 `results`。
 
 批量操作遇到某一条失败时会继续处理其他条目。因此：
 
 - 不能把部分成功说成全部成功。
 - 不能默认自动撤销已经成功的条目。
-- 超时或不确定时，先检查 Garmin Calendar，再决定是否重试。
-- 同一批中相同训练和相同日期会在预览阶段被拒绝。
+- 超时返回 `status: "unknown"`，该条**不会重发**。先用 `operationId` 核对 Garmin 日历，再决定是否改用其他日期或模板。
+- `successCount` 统计 `succeeded` 与 `skipped`；旧字段 `failureCount` 等于 `总数 − successCount`，表示“未确认完成”，**不是**确定失败数。新调用方应依据逐条 `status` 与 `definiteFailureCount` 判断，绝不能拿 `failureCount` 触发重试。
+- 同一批中相同训练和相同日期会在预览阶段被拒绝，不会发出任何写入。
+- 已确认但尚未发出的条目不会获得永久授权；账号变化、存储不可写、锁丢失或确认过期都会停止后续写入，剩余条目标记为 `not_attempted`。
+
+### 9.11.1 完整流程示例：下周五次跑步（周一、二、四、六、日）
+
+周三和周五是休息日，**不生成任何训练**，而是直接从 `schedules` 中省略。
+
+1. **查模板**：调用 `get_garmin_workouts`，拿到轻松跑、门槛跑、长跑的真实 `workoutId`。
+2. **预览**：调用 `batch_schedule_garmin_workouts`，只带 5 条 `schedules` 和 `timezone`。返回 `requiresConfirmation: true`、`confirmationId` 和 `operationId`，此时**没有发出任何写入**。
+   - 若返回 `requiresConfirmation: false`，说明这 5 条都已存在或被阻断，**不会**签发确认 ID，也不会写入。
+3. **展示并确认**：把 5 条日期 + 训练名 + 时区展示给用户；批准后原样重发，补 `confirmed: true` 和该 `confirmationId`。
+4. **查看结果**：逐条读取 `status`。
+   - `succeeded`：已写入。
+   - `skipped`：Garmin 已有该条目，本次没有写入（也算目标已满足）。
+   - `not_attempted`：被阻断或未发出，可安全重新预览。
+   - `failed`：有证据证明未生效，可重新预览后重试。
+   - `unknown`：**不要重试**。记下 `operationId`。
+5. **超时核对**：对 `unknown` 那条，去 Garmin 日历确认该日是否已出现该训练。
+   - 已出现 → 目标已满足，什么都不做。该条会**保持** `unknown`（因为无法证明是本次请求造成的）。
+   - 未出现且请求早已结束 → 只有两种安全做法：把**同一训练**改到别的日期，或把**别的训练**放到同一日期。
+6. **只恢复安全项**：重新预览时，协调器只会把 `failed` 与 `not_attempted` 的条目标记为可写；`succeeded`、`skipped`、`unknown` 的条目不会被再次发出。逐个分支都可复现：参见 `tests/write-coordinator.test.ts`。
 
 ### 9.12 `create_and_schedule_garmin_workout`：创建并安排一条训练
 
@@ -987,7 +1013,7 @@ npm run test:distribution
 - [ ] 用户明确批准。
 - [ ] 使用原请求、`confirmed: true` 和正确的 `confirmationId`。
 - [ ] 保存返回的训练 ID或排期 ID。
-- [ ] 发生超时后先检查 Garmin，再决定是否重试。
+- [ ] 超时返回 `unknown` 与 `operationId` 时，先核对 Garmin，再改用其他日期或模板；不要重发同一条写入。
 
 第一次批量排期：
 

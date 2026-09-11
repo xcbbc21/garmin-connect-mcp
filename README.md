@@ -2,7 +2,7 @@
 
 A standalone Garmin Connect MCP server for AI agents. Connect any client that supports local MCP stdio to read activity and wellness data, create structured workouts, and schedule training in Garmin Calendar.
 
-[中文说明](README.zh-CN.md) · [Client setup](docs/client-setup.md) · [Migration](docs/migration.md) · [Verification report](docs/verification.md)
+[中文说明](README.zh-CN.md) · [Client setup](docs/client-setup.md) · [Migration](docs/migration.md) · [Verification report](docs/verification.md) · [Write safety and recovery](docs/calendar-write-recovery.md)
 
 No model-provider API key or agent framework is required by this server. Garmin access uses your own account. An optional agent skill provides usage guidance; it is not required to expose tools.
 
@@ -66,7 +66,11 @@ If a client supports MCP URL elicitation, missing/expired sessions can prompt th
 
 There are 14 tools. Workout-library templates describe **what to do**; Calendar entries describe **when to do it**. The guidance tool offers training-method knowledge and athlete-intake checks; it does not independently generate and execute a complete training plan.
 
-Workout creation and Calendar writes use two calls: first preview, then repeat the identical request with `confirmed: true` and the returned `confirmationId` after the user approves. IDs expire after ten minutes and cannot be reused. Restarting the service invalidates pending previews.
+Workout creation and Calendar writes use two calls: first preview, then repeat the identical request with `confirmed: true` and the returned `confirmationId` after the user approves. IDs expire after ten minutes and cannot be reused. Pending previews are process-local: restarting the service invalidates them. The **write journal is not** process-local — Calendar schedule results are recorded on disk and survive a restart. See [write safety and recovery](docs/calendar-write-recovery.md).
+
+`schedule_garmin_workout` and `batch_schedule_garmin_workouts` also accept an optional `idempotencyKey` (1–128 characters from `A-Z a-z 0-9 . _ : -`). It is a request label, not a permission token: reusing the same key with the same request returns the recorded receipt instead of writing again, and a different key never bypasses an in-flight or unknown write. `confirmationId` and `idempotencyKey` are never interchangeable.
+
+Calendar writes are recorded under an account-scoped local directory, `GARMIN_STATE_DIR` (absolute, local, private; default `<platform config root>/garmin-connect-mcp/state`). It is independent of your login alias, so two aliases for the same account share one recovery record while session files stay separate. Back it up; deleting it destroys the records that prevent duplicate scheduling.
 
 ### Five runs next week
 
@@ -92,11 +96,13 @@ The agent resolves real workout IDs and dates first. Example batch preview (repl
 After approval, send the same request to `batch_schedule_garmin_workouts`, adding `confirmed: true` and the returned ID. A batch accepts 1–100 entries, so it can span multiple weeks.
 
 - Dates are local `YYYY-MM-DD` values; the timezone defaults to the server host if omitted. Past or impossible dates and invalid IANA timezones are rejected.
-- Reusing a template on different dates is supported. Duplicate workout/date pairs within a batch are rejected. There is no full Calendar-reading/global duplicate-detection tool; do not assume that re-submitting a separately confirmed request is deduplicated.
+- Reusing a template on different dates is supported. Duplicate workout/date pairs within one batch are rejected before anything is sent.
+- The same template and date pair is never written twice. A repeated request is either skipped because Garmin already has that entry, or blocked because an earlier write for the same template and date has an unknown outcome. This holds across a new preview, a different `idempotencyKey`, a service restart and concurrent callers.
 - Rest days are omitted; a workout's internal recovery/rest step is still valid.
-- Preview checks existing template IDs. If one confirmed batch entry fails, later entries still run and every outcome is reported.
-- A timeout may have happened after Garmin accepted a write. Check Calendar before retrying. Creation followed by failed scheduling reports the created workout ID when available.
+- Preview checks existing template IDs. Each confirmed entry is committed separately and reports its own `status`. A batch continues after an individual failure: `successCount` counts `succeeded` + `skipped`, and the legacy `failureCount` means "not confirmed complete", not "definitely failed" — branch on per-entry `status` and `definiteFailureCount`, never on `failureCount`.
+- A timeout is reported as `status: "unknown"` together with a durable `operationId`, not as a plain failure. It is never re-sent. Check Garmin Calendar, then schedule a different date or template. Creation followed by failed scheduling reports the created workout ID when available.
 - Cancellation needs the `workoutScheduleId` from the scheduling result, not the template ID. If Garmin does not return that ID, do not invent one.
+- `create_garmin_workout`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout` do not yet use the write journal and do not accept `idempotencyKey`. See [remaining limitations](docs/calendar-write-recovery.md#remaining-limitations).
 
 The pinned `garmin-connect@1.6.2` does not export schedule/cancel helpers. The existing adapter uses authenticated `POST /workout-service/schedule/{workoutId}` and `DELETE /workout-service/schedule/{workoutScheduleId}` requests. These are unofficial endpoints; mocked protocol/transport tests are not proof of current live Garmin acceptance or watch synchronization.
 
@@ -118,6 +124,8 @@ See [.env.example](.env.example) for all environment variables. MCP reads `.env`
 | Session missing or expired | Login with the same alias/region and exact destination. |
 | Session permissions rejected | Use a private, locally owned destination; keep the runtime's owner-only permissions. |
 | Confirmation expired or changed | Request a new preview and obtain approval again. |
+| Schedule blocked, `status: "unknown"` | An earlier write for that template/date is unresolved. Do not retry: check Garmin Calendar with the returned `operationId`, then use a different date or template. |
+| New writes refused / state unavailable | Verify `GARMIN_STATE_DIR` is absolute and writable and the journal is under 32 MiB. Do not delete the state directory — see [recovery](docs/calendar-write-recovery.md). |
 | FIT export unavailable | Choose a trusted absolute `GARMIN_FIT_DOWNLOAD_DIR`; existing files are never overwritten. |
 
 Activity detail defaults to compact. Full detail may include precise routes/locations. Health estimates are not medical diagnoses. Keep credentials, sessions and personal data outside Git.

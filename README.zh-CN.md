@@ -2,7 +2,7 @@
 
 面向智能体的独立 Garmin Connect MCP 服务。任何支持本地 MCP stdio 的客户端，都可以通过它读取运动数据、创建结构化训练，并把训练安排到 Garmin 日历。
 
-[English](README.md) · [完整中文说明书](docs/manual.zh-CN.md) · [客户端配置](docs/client-setup.md) · [迁移说明](docs/migration.md) · [验证报告](docs/verification.md)
+[English](README.md) · [完整中文说明书](docs/manual.zh-CN.md) · [客户端配置](docs/client-setup.md) · [迁移说明](docs/migration.md) · [验证报告](docs/verification.md) · [写入安全与恢复](docs/calendar-write-recovery.md)
 
 服务自身不需要模型 API Key 或智能体框架。访问佳明使用你自己的账号。随包技能是可选的使用说明，连接 MCP 不需要先安装技能。
 
@@ -66,7 +66,11 @@ macOS 没有设置配置根目录覆盖时，默认会话位置是：
 
 共 14 个工具。训练库记录“练什么”，训练日历记录“哪天练”。知识工具提供训练方法说明和个性化训练前的信息收集，不会自行生成并执行完整计划。
 
-创建训练和日历写入均采用两次调用：第一次返回预览，用户确认后，用完全相同的请求，加上 `confirmed: true` 和返回的 `confirmationId` 再次调用。确认 ID 十分钟内有效、只能使用一次；重启服务后待确认预览失效。
+创建训练和日历写入均采用两次调用：第一次返回预览，用户确认后，用完全相同的请求，加上 `confirmed: true` 和返回的 `confirmationId` 再次调用。确认 ID 十分钟内有效、只能使用一次；重启服务后待确认预览失效。但**写入日志不会失效**：日历排期结果记录在本地磁盘上，重启后仍然有效。详见[写入安全与恢复](docs/calendar-write-recovery.md)。
+
+`schedule_garmin_workout` 与 `batch_schedule_garmin_workouts` 还接受可选 `idempotencyKey`（1–128 个字符，只允许 `A-Z a-z 0-9 . _ : -`）。它是请求标签，不是权限凭证：同键同请求会直接返回已有回执而不再写入，换一个键也不能绕过进行中或结果不确定的写入。`confirmationId` 与 `idempotencyKey` 不能互相替代。
+
+日历写入记录在账号级本地目录 `GARMIN_STATE_DIR`（绝对、本地、私有路径；默认 `<平台配置根>/garmin-connect-mcp/state`）。它与登录别名解耦：同一账号的不同别名共用一个恢复记录，而会话文件仍然互相隔离。请备份该目录；删除它会丢掉防止重复排期的记录。
 
 ### 一次安排下周五次跑步
 
@@ -92,11 +96,13 @@ macOS 没有设置配置根目录覆盖时，默认会话位置是：
 用户确认后，向 `batch_schedule_garmin_workouts` 发送原请求，并补充确认字段。单批接受 1–100 条，可以跨多天、多周。
 
 - 日期是当地日历日期 `YYYY-MM-DD`；省略时区时使用服务所在电脑的时区。过去日期、不存在的日期和无效 IANA 时区会被拒绝。
-- 同一训练可安排在不同日期；同一批中的相同训练与日期组合会被拒绝。目前没有完整日历读取与跨请求全局去重，不应认为再次预览确认后会自动识别已有排期。
+- 同一训练可安排在不同日期；同一批中的相同训练与日期组合在预览阶段就会被拒绝，不会发出任何写入。
+- 同一个训练与日期组合不会被写入两次。重复请求要么因为 Garmin 已有该条目而跳过，要么因为该组合存在结果不确定的历史写入而阻断。换新预览、换 `idempotencyKey`、重启服务、并发调用都不能绕过。
 - 休息日留空，不创建 workout；一节训练内部的休息、恢复步骤仍可使用。
-- 预览时核对训练库 ID；批量确认后某条失败仍继续后续条目，逐条报告结果。
-- 超时可能发生在 Garmin 已接收写入之后，应先检查日历再重试。创建成功但排期失败会尽可能报告已创建的训练 ID。
+- 预览时核对训练库 ID；批量确认后每条独立提交并各自报告 `status`。某条失败不影响后续条目：`successCount` 统计 `succeeded` 与 `skipped`，旧字段 `failureCount` 表示“未确认完成”而非“确定失败”——新调用方应依据逐条 `status` 与 `definiteFailureCount` 判断，不要用 `failureCount` 触发重试。
+- 超时返回 `status: "unknown"` 和可持久查询的 `operationId`，而不是笼统失败。该写入不会被重发：先核对 Garmin 日历，然后改用其他日期或模板。创建成功但排期失败时，会尽可能报告已创建的训练 ID。
 - 取消排期需要返回的 `workoutScheduleId`，不能拿训练库 ID 代替；未返回排期 ID 时不得编造。
+- `create_garmin_workout`、`create_and_schedule_garmin_workout`、`unschedule_garmin_workout` 目前尚未接入写入日志，也不接受 `idempotencyKey`。详见[剩余限制](docs/calendar-write-recovery.md#remaining-limitations)。
 
 锁定的 `garmin-connect@1.6.2` 没有导出排期与取消方法。现有适配通过已认证请求调用 `POST /workout-service/schedule/{workoutId}` 和 `DELETE /workout-service/schedule/{workoutScheduleId}`。它们是非官方接口；模拟测试通过不等于已经验证当前真实 Garmin 接口或手表同步。
 
@@ -118,6 +124,8 @@ macOS 没有设置配置根目录覆盖时，默认会话位置是：
 | 会话缺失或过期 | 用同一别名、区域和目标路径重新登录。 |
 | 会话权限不符合要求 | 使用本地私有目录，保留运行时要求的仅所有者权限。 |
 | 预览过期或内容变化 | 重新预览，重新确认。 |
+| 排期被阻断、`status: "unknown"` | 该训练与日期存在未决写入。不要重试：用返回的 `operationId` 核对 Garmin 日历，然后改用其他日期或模板。 |
+| 新写入被拒绝 / 状态不可用 | 确认 `GARMIN_STATE_DIR` 是绝对可写路径，且日志未超过 32 MiB。不要删除状态目录，见[恢复步骤](docs/calendar-write-recovery.md)。 |
 | FIT 无法导出 | 指定可信的绝对父目录；程序不覆盖已有文件。 |
 
 活动数据默认简略模式。完整模式可能包含精确路线和位置。健康估算不能作为医学诊断。密码、会话和个人数据不要提交 Git。

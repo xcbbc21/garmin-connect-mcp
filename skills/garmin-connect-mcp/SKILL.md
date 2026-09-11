@@ -37,14 +37,16 @@ description: 通过已连接的 Garmin Connect MCP 读取运动和恢复数据�
 2. 首次省略 confirmed 或设为 false，取得预览及 confirmationId。
 3. 展示已配置的目标账号别名、训练内容、日期、时区和操作范围；目标账号信息来自配置上下文，不要假定每种预览响应都包含账号字段。
 4. 用户批准后，原样发送请求，补充 confirmed=true 和该 confirmationId。
-5. ID 十分钟内有效且只能用一次。请求改变、服务重启或预览过期后，重新预览并确认。
-6. 返回失败或结果不确定时，不自动重放；先核对 Garmin 的实际状态。
+5. ID 十分钟内有效且只能用一次。请求改变、服务重启或预览过期后，重新预览并确认。注意：预览凭证是进程内的，但**写入日志是持久的**——日历排期结果跨重启保留。
+6. 结果不确定时（`status: "unknown"`）不自动重放：记下返回的 `operationId`，先核对 Garmin 的实际状态，再改用其他日期或模板。
+
+`schedule_garmin_workout` 和 `batch_schedule_garmin_workouts` 另接受可选 `idempotencyKey`（请求标签，不是权限凭证）。可选，省略即可；不要把它当确认凭证使用。
 
 训练库是“练什么”，日历是“哪天练”。已有训练安排到单日使用 schedule；一次跨多天或多周使用 batch（1–100 条）；新建并安排单次训练使用 create_and_schedule。
 
-先读取训练库获取真实 workoutId。日期使用 YYYY-MM-DD，优先显式填写 IANA 时区，例如 Asia/Shanghai。同一训练可安排在不同日期；同一批中相同 workoutId/date 会被拒绝。工具不提供跨请求全局去重，不能承诺重试不会重复排期。
+先读取训练库获取真实 workoutId。日期使用 YYYY-MM-DD，优先显式填写 IANA 时区，例如 Asia/Shanghai。同一训练可安排在不同日期；同一批中相同 workoutId/date 会被拒绝。服务本地有账号级写入日志：同一训练与日期不会被写入两次；重复请求会返回跳过（`action: "skip_existing"`）或因存在不确定的历史写入而阻断（`action: "blocked"`）。换新预览、换 `idempotencyKey`、重启服务或并发调用都不能绕过——**不要**试图用这些方式绕过阻断。
 
-休息日省略，不创建 workout。训练内部的 rest/recovery 步骤仍然合法。批量失败逐条报告，不能把部分成功说成全部成功，也不能默认撤销成功条目。创建成功但排期失败时保留并报告返回的 workoutId，避免重新创建同一模板。
+休息日省略，不创建 workout。训练内部的 rest/recovery 步骤仍然合法。批量逐条报告：`succeeded`、`skipped`（已存在，未写入）、`failed`（有证据未生效）、`not_attempted`（未发出）、`unknown`（结果不确定，**禁止重试**）。`failureCount` 是“未确认完成”数，不是确定失败数；判断要看逐条 `status` 与 `definiteFailureCount`。不能把部分成功说成全部成功，也不能默认撤销成功条目。创建成功但排期失败时保留并报告返回的 workoutId，避免重新创建同一模板。
 
 取消排期需要排期结果的 workoutScheduleId；它不是 workoutId。没有返回排期 ID 时不能编造。取消移除日历记录，不删除训练库模板。
 
