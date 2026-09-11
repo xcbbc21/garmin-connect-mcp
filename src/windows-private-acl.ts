@@ -329,7 +329,10 @@ function windowsCommandOptions(
   systemRoot: string,
   operation: WindowsAclOperation,
   target: string,
-  allowMissing = false,
+  // Required, not defaulted: the only caller (`invoke`) always resolves
+  // `allowMissing` before building the environment. A default here would be
+  // a silently-dead branch that no call path can ever take.
+  allowMissing: boolean,
 ): WindowsAclCommandOptions {
   return {
     encoding: 'utf8',
