@@ -21,7 +21,9 @@ describe('built MCP over child-process stdio', () => {
     const transport = new StdioClientTransport({
       command: process.execPath, args: [path.resolve(__dirname, '../lib/mcp.js')], cwd,
       env: { GARMIN_USERNAME: 'fixture@example.test', GARMIN_REGION: 'cn',
-        GARMIN_ACCOUNT: 'test', GARMIN_SESSION_TOKEN_FILE: path.join(sessionDirectory, 'missing.session.json') },
+        GARMIN_ACCOUNT: 'test', GARMIN_SESSION_TOKEN_FILE: path.join(sessionDirectory, 'missing.session.json'),
+        PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '',
+        GARMIN_STATE_DIR: path.join(sessionDirectory, 'state') },
       stderr: 'pipe',
     })
     const errors: Error[] = []
@@ -51,9 +53,18 @@ describe('built MCP over child-process stdio', () => {
   }, process.platform === 'win32' ? 120_000 : 15_000)
 
   it('executes a simulated Calendar write only after confirmation and rejects replay over stdio', async () => {
+    // StdioClientTransport sanitizes the child environment, so the write journal
+    // must be pointed at a private directory explicitly instead of letting the
+    // child fall back to the platform default.
+    const stateDirectory = await mkdtemp(path.join(tmpdir(), 'garmin-stdio-state-'))
     const client = new Client({ name: 'generic-client', version: '1' })
     const transport = new StdioClientTransport({
       command: process.execPath, args: [path.join(__dirname, 'fixtures/stdio-server.cjs')],
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: process.env.HOME ?? '',
+        GARMIN_STATE_DIR: stateDirectory,
+      },
       stderr: 'pipe',
     })
     const errors: Error[] = []
@@ -68,10 +79,16 @@ describe('built MCP over child-process stdio', () => {
       expect(result).toMatchObject({ success: true, workoutScheduleId: '1' })
       const replay = await client.callTool({ name: 'schedule_garmin_workout', arguments: confirmed })
       expect(replay.isError).toBe(true)
+      // A second preview for the same workout and date is deduplicated.
+      const deduped = toolJson(await client.callTool({
+        name: 'schedule_garmin_workout', arguments: request,
+      }))
+      expect(deduped).toMatchObject({ requiresConfirmation: false, action: 'skip_existing' })
       expect(errors).toEqual([])
     } finally {
       await client.close()
       expect(transport.pid).toBeNull()
+      await rm(stateDirectory, { recursive: true, force: true })
     }
   })
 })

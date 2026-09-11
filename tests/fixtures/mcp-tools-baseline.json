@@ -474,7 +474,7 @@
     },
     {
       "name": "schedule_garmin_workout",
-      "description": "Preview then schedule one existing Garmin workout-library entry on a local calendar date. A repeated workout is allowed on different dates, but the same workout/date pair is rejected. The write is non-idempotent: after a timeout, inspect Garmin Calendar before retrying.",
+      "description": "Preview then schedule one existing Garmin workout-library entry on a local calendar date. A workout may repeat on different dates. A repeated workout/date is skipped when Garmin already has it, and is blocked when a previous write for the same workout and date has an unknown outcome, so the same target is never written twice. The write is non-idempotent: after a timeout, query the operation and reconcile before retrying.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -503,6 +503,13 @@
             "type": "string",
             "format": "uuid",
             "description": "One-time ID returned by the matching preview call."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Optional stable request label for this account. Reuse the same value to retrieve the durable operation instead of writing again; a different value never bypasses an in-flight or unknown write. Not a permission token."
           }
         },
         "required": [
@@ -524,7 +531,7 @@
     },
     {
       "name": "batch_schedule_garmin_workouts",
-      "description": "Preview then schedule 1–100 existing Garmin workout-library entries across future days or weeks. The batch continues after an individual failure and returns per-entry results. Do not represent rest days: omit them instead of creating a workout.",
+      "description": "Preview then schedule 1-100 existing Garmin workout-library entries across future days or weeks. Each entry is committed separately and reports its own status (succeeded, skipped, failed, not_attempted or unknown). A timeout is reported as unknown and is never re-sent; entries that share an unknown or in-flight target are blocked. Do not represent rest days: omit them instead of creating a workout.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -567,6 +574,13 @@
             "type": "string",
             "format": "uuid",
             "description": "One-time ID returned by the matching preview call."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Optional stable request label for this account. Reuse the same value to retrieve the durable operation instead of writing again; a different value never bypasses an in-flight or unknown write. Not a permission token."
           }
         },
         "required": [

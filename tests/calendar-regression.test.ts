@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
 import { PublicToolError } from '../src/utils/errors'
 
@@ -10,6 +13,9 @@ function fixture() {
   }
   const service = new GarminToolService(data as unknown as GarminDataClient, {
     activityDetail: 'compact', fitDownloadDir: '', accountUsername: 'runner@example.test', accountRegion: 'cn',
+    // Each fixture gets a private journal: write records intentionally outlive
+    // a single service instance, so a shared directory would leak across tests.
+    stateDirectory: mkdtempSync(join(tmpdir(), 'garmin-calendar-regression-')),
   })
   return { data, service }
 }
@@ -75,7 +81,17 @@ describe('Calendar compatibility and failure boundaries', () => {
     data.scheduleWorkout.mockRejectedValue(new PublicToolError('Outcome unknown; inspect Garmin Calendar'))
     const preview = await service.scheduleWorkout(request)
     const confirmed = { ...request, confirmed: true, confirmationId: preview.confirmationId as string }
-    await expect(service.scheduleWorkout(confirmed)).rejects.toThrow('Outcome unknown')
+    // The uncertain outcome is now a durable receipt rather than a bare failure.
+    expect(await service.scheduleWorkout(confirmed)).toMatchObject({
+      success: false,
+      status: 'unknown',
+      evidence: 'none',
+      desiredStateSatisfied: false,
+      manualReviewRequired: true,
+      errorCode: 'WRITE_OUTCOME_UNKNOWN',
+      nextAction: 'reconcile_garmin_write_operation',
+      operationId: expect.any(String),
+    })
     await expect(service.scheduleWorkout(confirmed)).rejects.toThrow('Invalid calendar confirmation')
     expect(data.scheduleWorkout).toHaveBeenCalledTimes(1)
   })

@@ -27,7 +27,9 @@
     "docs/manual.zh-CN.md",
     "docs/migration.md",
     "docs/verification.md",
-    "docs/client-setup.md"
+    "docs/client-setup.md",
+    "docs/calendar-api-verification.md",
+    "docs/calendar-write-recovery.md"
   ],
   "repository": {
     "type": "git",

@@ -22,6 +22,7 @@ import {
 } from './session-store'
 import { MemoryCache } from './utils/cache'
 import { parseLocalDate } from './utils/date'
+import { GarminWriteTransportError, WRITE_ERROR_CODES } from './write-operations/errors'
 import {
   GARMIN_BROWSER_AUTH_COMMAND,
   GarminAuthenticationRequiredError,
@@ -808,19 +809,21 @@ export class GarminClient {
       }
       const status = getHttpStatus(error)
       if (status === 401 || status === 403) {
-        if (this.diSessionSelected && status === 403) throw error
+        if (this.diSessionSelected && status === 403) throw toWriteTransportError(error)
         if (this.hasConfiguredSession() && !this.sessionTokenRejected) {
           this.rejectConfiguredSessionToken()
         } else {
           this.connected = false
           this.authenticatedAccount = undefined
         }
-        throw new PublicToolError(
+        throw new GarminWriteTransportError(
+          'unknown',
+          WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN,
           'Garmin authentication expired before workout creation; ' +
           'request a new preview and confirmation before trying again',
         )
       }
-      throw error
+      throw toWriteTransportError(error)
     }
   }
 
@@ -866,12 +869,14 @@ export class GarminClient {
           this.connected = false
           this.authenticatedAccount = undefined
         }
-        throw new PublicToolError(
+        throw new GarminWriteTransportError(
+          'unknown',
+          WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN,
           'Garmin authentication expired before calendar update; request a new preview ' +
             'and confirmation before trying again',
         )
       }
-      throw error
+      throw toWriteTransportError(error)
     }
   }
 
@@ -1061,6 +1066,23 @@ function normalizedHttpError(
   if (status !== undefined) error.status = status
   if (timedOut) error.timedOut = true
   return error
+}
+
+/**
+ * Wrap a write failure so callers can branch on a typed outcome instead of
+ * message text. Every write failure that reached the network is `unknown`:
+ * without endpoint evidence we never claim a non-idempotent request was not
+ * applied.
+ */
+function toWriteTransportError(error: unknown): GarminWriteTransportError {
+  const message = error instanceof PublicToolError
+    ? error.message
+    : 'Garmin write failed without a determinate outcome; check Garmin before retrying'
+  return new GarminWriteTransportError(
+    'unknown',
+    WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN,
+    message,
+  )
 }
 
 function validHttpStatus(value: unknown): number | undefined {

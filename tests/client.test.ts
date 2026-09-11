@@ -1344,17 +1344,25 @@ describe('GarminClient', () => {
 
   it('does not retry a workout creation rejected with HTTP 429', async () => {
     jest.useFakeTimers()
-    const client = new GarminClient(baseConfig, { logger: createContext().logger })
-    const rateLimitError = Object.assign(new Error('rate limited'), { status: 429 })
-    latestGarmin().addWorkout.mockRejectedValue(rateLimitError)
+    try {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+      const rateLimitError = Object.assign(new Error('rate limited'), { status: 429 })
+      latestGarmin().addWorkout.mockRejectedValue(rateLimitError)
 
-    const request = client.addWorkout({ workoutName: 'Single write' })
-    const rejection = expect(request).rejects.toBe(rateLimitError)
-    await jest.runAllTimersAsync()
+      // A non-idempotent write failure is surfaced as a typed `unknown` outcome;
+      // the raw upstream error is not re-exposed and nothing is retried.
+      const rejection = expect(client.addWorkout({ workoutName: 'Single write' })).rejects.toMatchObject({
+        name: 'GarminWriteTransportError',
+        outcome: 'unknown',
+        code: 'WRITE_OUTCOME_UNKNOWN',
+      })
+      await jest.runAllTimersAsync()
 
-    await rejection
-    expect(latestGarmin().addWorkout).toHaveBeenCalledTimes(1)
-    jest.useRealTimers()
+      await rejection
+      expect(latestGarmin().addWorkout).toHaveBeenCalledTimes(1)
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it('marks a rejected session token after a workout write receives HTTP 401', async () => {
