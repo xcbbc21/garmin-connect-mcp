@@ -40,18 +40,23 @@ wrong, and are corrected here rather than left standing:
 
 ## Calendar write-safety and recovery, continuation round (2026-09-12)
 
-Verified at commit `ff128b6`, baselines for comparison `e091d1b` (round start) and `ede191f`
-(the commit this report previously described; `ff128b6` supersedes it). Local environment:
-macOS arm64 (darwin), Node v25.2.1, npm 11.19.0. Every command below was run from a clean
-`npm ci` install on this machine, in this order, with no pre-script bypassed.
+Verified at commit `2f40cce`, baselines for comparison `e091d1b` (round start) and `ff128b6`
+(the commit at which the product defect below was fixed). Local environment: macOS arm64
+(darwin), Node v25.2.1, npm 11.19.0. Every command below was run from a clean `npm ci` install
+on this machine, in this order, with no pre-script bypassed.
+
+`2f40cce` is the final commit of the round. No file under `src/` has changed since `ff128b6`:
+the commits in between add documentation and `scripts/demo-write-recovery.ts`, which `tsconfig`
+does not compile (`include: ["src"]`). The full command set was therefore re-measured at the
+final commit and returned the identical figures reported below; the re-run is the source of the
+macOS rows, not a copy of the earlier ones.
 
 The packaged-artifact rows are reported **per measured tree**, because the two trees differ by
-one file and are not interchangeable: the macOS rows were measured on the release tree — commit
-`ff128b6`'s source plus the documentation update that adds this section, which is also the change
-that adds `docs/calendar-write-delivery.md` to `package.json` `files` — while the Linux rows were
-measured on a clean `git archive ff128b6` export, whose `package.json` predates that addition.
-Source-level results (`lint`, `test`, coverage, `build`) are identical on both because no source
-file differs. The audited properties of the release tree are that every required document is
+one file and are not interchangeable: the macOS rows were measured on the release tree at
+`2f40cce`, which includes the documentation changes and the `package.json` entry that adds
+`docs/calendar-write-delivery.md` to `files`, while the Linux rows were measured on a clean
+`git archive ff128b6` export, whose `package.json` predates that addition. Source-level results
+(`lint`, `test`, coverage, `build`) are identical on both because no source file differs. The audited properties of the release tree are that every required document is
 present, the file count is 204, and no forbidden content is included. Exact packed byte totals are
 deliberately **not** recorded: `package.json` ships in every tarball whether or not `files` names
 it, so any edit to a script or to this document moves the totals, and a number quoted here would
@@ -79,8 +84,9 @@ macOS-only: `refuses a journal carrying a granting macOS ACL` runs only where `c
 | Live account integration | `npm run test:integration` | **not run** — no authorized real credentials were available; see limitations |
 
 `demo:recovery` is a source-tree command: `scripts/` is deliberately not in `package.json` `files`,
-so it runs from a repository checkout, like `test`, `lint` and `pack:smoke`. It was run twice on
-two independent invocations with identical results.
+so it runs from a repository checkout, like `test`, `lint` and `pack:smoke`. It was run three times
+on three independent invocations with identical results — twice standalone and once as the last
+step of the standard battery recorded above.
 
 Tool surface after this round: **18 tools** (14 read/preview tools plus
 `get_garmin_calendar`, `get_garmin_write_operation`, `reconcile_garmin_write_operation`,
@@ -299,11 +305,11 @@ jobs run the relevant native permissions and process/protocol tests.
 That CI run predates the continuation round. The workflow has since been extended
 so the macOS and Windows jobs also run the write journal, account lock, migration,
 private-state and stdio recovery suites; the extension has been verified on macOS
-locally and has **not** been run on a Windows or Linux runner for commit `ff128b6`.
-No push was performed for this round either, so the commits it reports —
-`e091d1b` through `ff128b6` — have no CI result at all. The Linux, macOS and
-Windows platform claims in this report rest on the local and container evidence
-described in the platform section above, not on CI.
+locally and has **not** been run on a Windows or Linux runner for any commit of this
+round. No push was performed either, so the commits it reports —
+`e091d1b` through `2f40cce`, the final commit — have no CI result at all. The Linux,
+macOS and Windows platform claims in this report rest on the local and container
+evidence described in the platform section above, not on CI.
 
 Live read-only checks are available explicitly through `npm run test:integration`
 using the same public client and session configuration. They are excluded from CI.
