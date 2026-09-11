@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileAccountLock } from '../src/write-operations/lock'
+import { FileAccountLock, type LockFileSystem } from '../src/write-operations/lock'
 import { GarminWriteError, WRITE_ERROR_CODES } from '../src/write-operations/errors'
 
 const CANCELLED = 'Waiting for the account write lock was cancelled; no new write was sent'
@@ -241,4 +241,98 @@ describe('FileAccountLock', () => {
     release()
     await holding
   })
+
+  // -------------------------------------------------------------------------
+  // Contention evidence (C10). A refused exclusive create and the follow-up
+  // existence check are two separate observations, and a holder can release
+  // between them. Both observations describe the same instant differently, so
+  // the decision must not rest on the racy one alone.
+  // -------------------------------------------------------------------------
+
+  it('treats a refused exclusive create as contention when the holder releases before the check', async () => {
+    const fake = contentionThenRelease()
+
+    const lock = new FileAccountLock(base, ACCOUNT, fake.fs, {
+      waitTimeoutMs: 1_000,
+      pollIntervalMs: 5,
+    })
+    // The create was refused by a live holder, and by the time the existence
+    // check would have run the lock was gone. Retrying is correct: nothing was
+    // sent, and the very next create wins.
+    await expect(lock.runExclusive(async () => 'acquired')).resolves.toBe('acquired')
+    expect(fake.creates()).toBe(2)
+    // The racy check is not consulted at all once the create itself proves
+    // contention, which is what removes the window.
+    expect(fake.existenceChecks()).toBe(0)
+  })
+
+  it('still fails closed when the create fails for a reason that is not contention', async () => {
+    const fake = refusingCreate('EACCES')
+
+    const lock = new FileAccountLock(base, ACCOUNT, fake.fs, {
+      waitTimeoutMs: 1_000,
+      pollIntervalMs: 5,
+    })
+    // A storage failure is not a waiter: it must never be retried into a
+    // dispatch, and the caller must be told the state is unusable.
+    await expect(lock.runExclusive(async () => 'never')).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_UNAVAILABLE,
+      message: expect.stringContaining('EACCES') as unknown as string,
+    })
+    expect(fake.writes()).toEqual([])
+  })
 })
+
+function errno(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: injected`), { code })
+}
+
+/**
+ * Models the exact interleaving behind the spurious `STATE_UNAVAILABLE`: the
+ * exclusive create is refused while a holder owns the lock, and the holder
+ * releases before the follow-up existence check observes anything.
+ */
+function contentionThenRelease(): {
+  fs: LockFileSystem
+  creates: () => number
+  existenceChecks: () => number
+} {
+  let creates = 0
+  let existenceChecks = 0
+  const files = new Map<string, string>()
+  const fs: LockFileSystem = {
+    mkdir: async (_path, options) => {
+      if (options.recursive) return
+      creates += 1
+      if (creates === 1) throw errno('EEXIST')
+    },
+    writeFile: async (path, data) => { files.set(path, data) },
+    readFile: async path => {
+      const value = files.get(path)
+      if (value === undefined) throw errno('ENOENT')
+      return value
+    },
+    unlink: async path => { files.delete(path) },
+    rmdir: async () => undefined,
+    lstat: async () => {
+      existenceChecks += 1
+      throw errno('ENOENT')
+    },
+  }
+  return { fs, creates: () => creates, existenceChecks: () => existenceChecks }
+}
+
+function refusingCreate(code: string): { fs: LockFileSystem; writes: () => string[] } {
+  const written: string[] = []
+  const fs: LockFileSystem = {
+    mkdir: async (_path, options) => {
+      if (!options.recursive) throw errno(code)
+    },
+    writeFile: async path => { written.push(path) },
+    readFile: async () => { throw errno('ENOENT') },
+    unlink: async () => undefined,
+    rmdir: async () => undefined,
+    lstat: async () => { throw errno('ENOENT') },
+  }
+  return { fs, writes: () => written }
+}

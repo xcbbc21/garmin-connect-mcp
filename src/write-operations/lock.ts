@@ -274,7 +274,14 @@ export class FileAccountLock implements AccountLock {
         // Decide contention from evidence, not from a single error code: if the
         // lock directory exists we are simply contending; otherwise the create
         // genuinely failed and we must not send a write.
-        if (!(await this.heldBySomeone())) {
+        //
+        // `EEXIST` is itself that evidence. The directory existed at the moment
+        // the exclusive create was refused, which is contention even when the
+        // holder releases before the existence check below runs — the next
+        // attempt simply wins the create. Deciding from the existence check
+        // alone turned that release window into a spurious STATE_UNAVAILABLE
+        // while the state was in fact available.
+        if (errorCode(error) !== 'EEXIST' && !(await this.heldBySomeone())) {
           throw new GarminWriteError(
             WRITE_ERROR_CODES.STATE_UNAVAILABLE,
             'not_applied',
@@ -363,9 +370,13 @@ function waitAborted(): GarminWriteError {
   )
 }
 
-function describe(error: unknown): string {
-  if (typeof error === 'object' && error !== null && typeof (error as { code?: string }).code === 'string') {
+function errorCode(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string') {
     return (error as { code: string }).code
   }
-  return error instanceof Error ? error.name : 'unknown error'
+  return undefined
+}
+
+function describe(error: unknown): string {
+  return errorCode(error) ?? (error instanceof Error ? error.name : 'unknown error')
 }

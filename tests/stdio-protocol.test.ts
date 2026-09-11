@@ -259,6 +259,14 @@ describe('stdlib stdio protocol and secrets boundary', () => {
       self => self.standardError.includes('upstream-noise-marker'),
       'the injected upstream noise on stderr',
     )
+    // The injector emits its three lines from one callback, but they reach the
+    // pipe one write at a time. Sync on the last line before asserting on the
+    // whole buffer, or a slower run reads the buffer mid-flush and reports a
+    // redaction failure that is really a missing write.
+    await peer.waitFor(
+      self => self.standardError.includes('upstream password'),
+      'the injected password line on stderr',
+    )
 
     // stdout stays reserved: one frame, and it is the handshake.
     expect(peer.stdoutLines()).toHaveLength(1)

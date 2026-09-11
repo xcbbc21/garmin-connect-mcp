@@ -48,5 +48,12 @@ jobs:
       - run: npm ci
       - name: Verify platform permissions, command startup and stdio protocol
         run: npm test -- --runInBand ${{ matrix.acl-tests }} tests/stdio.test.ts tests/scripts.test.ts tests/index.test.ts
+      # The journal, the account lock and the recovery entry points are the
+      # parts most likely to behave differently per platform: private paths,
+      # atomic rename, DACL/ACL enforcement, lock-worker spawn and exit, and
+      # the bytes a killed stdio peer leaves behind. They are part of the core
+      # matrix, so they run here as well rather than only on Linux.
+      - name: Verify write journal, account lock and recovery across platforms
+        run: npm test -- --runInBand tests/write-operation-store.test.ts tests/write-operation-lock.test.ts tests/write-operation-migration.test.ts tests/write-state-security.test.ts tests/write-stdio-recovery.test.ts tests/stdio-protocol.test.ts
       - run: npm run pack:smoke
       - run: npm run test:distribution
