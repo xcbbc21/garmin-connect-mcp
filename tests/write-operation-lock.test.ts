@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,11 +13,106 @@ function tick(ms = 20): Promise<void> {
 
 const WORKER = join(__dirname, 'fixtures', 'write-lock-worker.ts')
 const ACCOUNT = 'lock-account'
+/** Upper bound on a whole fixture run, so a hung child fails instead of stalling the suite. */
+const WORKER_EXIT_TIMEOUT_MS = 20_000
+
+type WorkerEventName = 'ready' | 'start' | 'end' | 'busy' | 'error' | 'signal' | 'timeout'
 
 interface WorkerEvent {
-  event: 'start' | 'end' | 'busy' | 'error'
+  event: WorkerEventName
   pid: number
   t: number
+  message?: string
+}
+
+interface WorkerHandle {
+  child: ChildProcess
+  exit: Promise<number | null>
+}
+
+interface WorkerOptions {
+  /** Override the executable, so a spawn that cannot start is testable. */
+  command?: string
+  /** Override the account argument, so a credential can be passed through argv. */
+  account?: string
+  /** Child environment additions, e.g. a shortened watchdog budget. */
+  env?: NodeJS.ProcessEnv
+  /** How long the parent waits before killing a child that never exits. */
+  timeoutMs?: number
+}
+
+/**
+ * Start the fixture and resolve with both the process and its exit code.
+ *
+ * Every way the child can fail becomes a rejection, because a parent test must
+ * never mistake "the child never got anywhere" for "the child finished": a
+ * spawn failure, a signal, an unexpected exit code, and a child that simply
+ * never exits are all failures of the fixture run.
+ */
+function startWorker(
+  stateDir: string,
+  holdMs: number,
+  waitMs: number,
+  eventsFile: string,
+  options: WorkerOptions = {},
+): WorkerHandle {
+  const timeoutMs = options.timeoutMs ?? WORKER_EXIT_TIMEOUT_MS
+  const child = spawn(
+    options.command ?? process.execPath,
+    [
+      '--import',
+      'tsx',
+      WORKER,
+      stateDir,
+      options.account ?? ACCOUNT,
+      String(holdMs),
+      String(waitMs),
+      eventsFile,
+    ],
+    {
+      cwd: join(__dirname, '..'),
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, ...options.env },
+    },
+  )
+
+  const exit = new Promise<number | null>((resolve, reject) => {
+    let stderr = ''
+    let settled = false
+    let timer: NodeJS.Timeout | undefined
+
+    const finish = (action: () => void): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      action()
+    }
+
+    child.stderr.on('data', chunk => { stderr += String(chunk) })
+    child.on('error', error => {
+      finish(() => reject(new Error(`worker could not start: ${error.message}`)))
+    })
+    child.on('close', (code, signal) => {
+      finish(() => {
+        // A killed child reports a signal and a null code; neither is a result.
+        if (signal !== null) {
+          reject(new Error(`worker was killed by ${signal}; stderr: ${stderr.trim()}`))
+          return
+        }
+        if (code === 0 || code === 3) {
+          resolve(code)
+          return
+        }
+        reject(new Error(`worker exited with code ${String(code)}; stderr: ${stderr.trim()}`))
+      })
+    })
+    timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish(() => reject(new Error(`worker did not exit within ${timeoutMs}ms; stderr: ${stderr.trim()}`)))
+    }, timeoutMs)
+  })
+
+  return { child, exit }
 }
 
 function runWorker(
@@ -25,26 +120,61 @@ function runWorker(
   holdMs: number,
   waitMs: number,
   eventsFile: string,
+  options: WorkerOptions = {},
 ): Promise<number | null> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      ['--import', 'tsx', WORKER, stateDir, ACCOUNT, String(holdMs), String(waitMs), eventsFile],
-      { cwd: join(__dirname, '..'), stdio: ['ignore', 'ignore', 'pipe'] },
-    )
-    let stderr = ''
-    child.stderr.on('data', chunk => { stderr += String(chunk) })
-    child.on('error', reject)
-    child.on('close', code => {
-      if (code === 4) reject(new Error(`worker failed: ${stderr}`))
-      else resolve(code)
-    })
-  })
+  return startWorker(stateDir, holdMs, waitMs, eventsFile, options).exit
 }
 
 async function readEvents(eventsFile: string): Promise<WorkerEvent[]> {
   const raw = await readFile(eventsFile, 'utf8').catch(() => '')
   return raw.split('\n').filter(Boolean).map(line => JSON.parse(line) as WorkerEvent)
+}
+
+/** The message a run rejected with; fails the test if it resolved instead. */
+async function rejectionMessage(run: Promise<unknown>): Promise<string> {
+  const settled = await run.then(
+    value => ({ resolved: value }),
+    (error: unknown) => ({ rejected: error }),
+  )
+  if ('resolved' in settled) {
+    throw new Error(`expected the run to fail, but it resolved with ${String(settled.resolved)}`)
+  }
+  return settled.rejected instanceof Error ? settled.rejected.message : String(settled.rejected)
+}
+
+/**
+ * Wait for the child to report its own progress.
+ *
+ * A fixed sleep only guesses that a child got as far as acquiring the lock;
+ * this waits for the event the child records *inside* the critical section. If
+ * the child settles first the handshake fails loudly, so a handshake that can
+ * never succeed cannot be mistaken for a working one.
+ */
+async function waitForEvent(
+  eventsFile: string,
+  event: WorkerEventName,
+  child: Promise<number | null>,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let code: number | null | undefined
+  let failure: unknown
+  void child.then(
+    value => { code = value },
+    error => { failure = error },
+  )
+
+  for (;;) {
+    if (failure !== undefined) throw failure
+    if (code !== undefined) {
+      throw new Error(`worker exited with code ${String(code)} before reporting "${event}"`)
+    }
+    if ((await readEvents(eventsFile)).some(candidate => candidate.event === event)) return
+    if (Date.now() > deadline) {
+      throw new Error(`timed out after ${timeoutMs}ms waiting for "${event}"`)
+    }
+    await tick(5)
+  }
 }
 
 describe('FileAccountLock', () => {
@@ -70,15 +200,25 @@ describe('FileAccountLock', () => {
     expect(second).toBe(0)
 
     const events = await readEvents(eventsFile)
+    const ordered = [...events].sort((a, b) => a.t - b.t)
     const starts = events.filter(event => event.event === 'start')
     const ends = events.filter(event => event.event === 'end')
     expect(starts).toHaveLength(2)
     expect(ends).toHaveLength(2)
     expect(new Set(starts.map(event => event.pid)).size).toBe(2)
 
+    // `ready` is recorded before the lock is attempted and `start` only inside
+    // the critical section, so this ordering is what a parent handshake rests
+    // on: waiting for `start` cannot be satisfied by a child that is merely up.
+    for (const pid of new Set(starts.map(event => event.pid))) {
+      const mine = ordered.filter(event => event.pid === pid)
+      expect(mine.findIndex(event => event.event === 'ready'))
+        .toBeLessThan(mine.findIndex(event => event.event === 'start'))
+    }
+
     // No critical section may begin before the previous one has ended.
     let active = 0
-    for (const event of [...events].sort((a, b) => a.t - b.t)) {
+    for (const event of ordered) {
       active += event.event === 'start' ? 1 : event.event === 'end' ? -1 : 0
       expect(active).toBeLessThanOrEqual(1)
     }
@@ -88,13 +228,122 @@ describe('FileAccountLock', () => {
     const eventsFile = join(base, 'events.jsonl')
     await writeFile(eventsFile, '', 'utf8')
 
-    const holder = runWorker(base, 1_500, 5_000, eventsFile)
-    await new Promise(resolve => setTimeout(resolve, 250))
+    const holder = startWorker(base, 3_000, 10_000, eventsFile)
+    // The handshake below reports the holder's own failure; this handler only
+    // keeps that rejection from also surfacing as unhandled.
+    holder.exit.catch(() => undefined)
+    // A handshake, not a fixed sleep: `start` is recorded while the holder owns
+    // the lock, so the contender provably meets a held lock. Guessing with a
+    // sleep would let a slow start turn this into a lock nobody holds.
+    await waitForEvent(eventsFile, 'start', holder.exit)
     const contender = await runWorker(base, 0, 250, eventsFile)
-    await holder
+    expect(await holder.exit).toBe(0)
 
     expect(contender).toBe(3)
     expect((await readEvents(eventsFile)).some(event => event.event === 'busy')).toBe(true)
+  })
+
+  it('fails the handshake when the child exits before it ever holds the lock', async () => {
+    const lock = new FileAccountLock(base, ACCOUNT)
+    await mkdir(lock.path, { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(lock.path, 'owner.json'),
+      JSON.stringify({ ownerToken: 'foreign', pid: 1, startedAt: '2000-01-01T00:00:00.000Z' }),
+      'utf8',
+    )
+    const eventsFile = join(base, 'events.jsonl')
+    await writeFile(eventsFile, '', 'utf8')
+
+    const worker = startWorker(base, 0, 200, eventsFile)
+    worker.exit.catch(() => undefined)
+
+    // A parent that slept here would cheerfully contend against a lock nobody
+    // holds; waiting for `start` turns that into a visible failure.
+    await expect(waitForEvent(eventsFile, 'start', worker.exit)).rejects.toThrow(
+      /exited with code 3 before reporting "start"/,
+    )
+    // It really did start and really did give up on a held lock.
+    expect((await readEvents(eventsFile)).map(event => event.event)).toEqual(['ready', 'busy'])
+    expect(await worker.exit).toBe(3)
+  })
+
+  it('surfaces an unexpected worker exit with redacted stderr and a redacted event', async () => {
+    const eventsFile = join(base, 'events.jsonl')
+    await writeFile(eventsFile, '', 'utf8')
+    const secret = 'Bearer super-secret-token'
+
+    // An empty state directory is refused before any lock work, and the
+    // credential travels as an argument, so the diagnostic can only be safe if
+    // it is redacted on the way out — the fixture quotes its own inputs.
+    const message = await rejectionMessage(runWorker('', 0, 100, eventsFile, { account: secret }))
+
+    expect(message).toContain('exited with code 4')
+    expect(message).toContain('Bearer [REDACTED]')
+    expect(message).not.toContain('super-secret-token')
+
+    const events = await readEvents(eventsFile)
+    expect(events.map(event => event.event)).toEqual(['error'])
+    expect(events[0].message).toContain('Bearer [REDACTED]')
+    expect(JSON.stringify(events)).not.toContain('super-secret-token')
+  })
+
+  it('kills a worker that outlives the parent timeout and reports it', async () => {
+    const eventsFile = join(base, 'events.jsonl')
+    await writeFile(eventsFile, '', 'utf8')
+
+    const worker = startWorker(base, 5_000, 5_000, eventsFile, { timeoutMs: 400 })
+    worker.exit.catch(() => undefined)
+    // Proves the timeout really interrupted a run that owned the lock, rather
+    // than a child that had not got anywhere.
+    await waitForEvent(eventsFile, 'start', worker.exit)
+
+    const message = await rejectionMessage(worker.exit)
+    expect(message).toContain('did not exit within 400ms')
+  })
+
+  it('reports a worker that never finishes instead of waiting forever', async () => {
+    const eventsFile = join(base, 'events.jsonl')
+    await writeFile(eventsFile, '', 'utf8')
+
+    // The fixture's own watchdog, shortened so this test does not wait 30 s.
+    const message = await rejectionMessage(
+      runWorker(base, 5_000, 5_000, eventsFile, { env: { GARMIN_LOCK_WORKER_WATCHDOG_MS: '300' } }),
+    )
+
+    expect(message).toContain('exited with code 5')
+    expect(message).toContain('the run did not finish within 300ms')
+    expect((await readEvents(eventsFile)).some(event => event.event === 'timeout')).toBe(true)
+  })
+
+  it('reports a worker that could not start at all', async () => {
+    const eventsFile = join(base, 'events.jsonl')
+    await writeFile(eventsFile, '', 'utf8')
+
+    const message = await rejectionMessage(
+      runWorker(base, 0, 100, eventsFile, { command: join(base, 'no-such-node') }),
+    )
+
+    expect(message).toContain('worker could not start')
+    expect(await readEvents(eventsFile)).toEqual([])
+  })
+
+  it('surfaces a holder that is killed while it owns the lock', async () => {
+    const eventsFile = join(base, 'events.jsonl')
+    await writeFile(eventsFile, '', 'utf8')
+
+    const worker = startWorker(base, 5_000, 5_000, eventsFile)
+    worker.exit.catch(() => undefined)
+    await waitForEvent(eventsFile, 'start', worker.exit)
+
+    worker.child.kill('SIGTERM')
+
+    // POSIX runs the fixture's own signal handler, which reports exit code 4;
+    // Windows terminates the process outright. Whichever happens, an
+    // interrupted holder must be a failure the parent can see, never a run
+    // that looks like it completed.
+    const message = await rejectionMessage(worker.exit)
+    expect(message).toMatch(/killed by|exited with code/)
+    expect((await readEvents(eventsFile)).some(event => event.event === 'start')).toBe(true)
   })
 
   it('never preempts a stale lock left by an interrupted owner', async () => {
