@@ -258,6 +258,12 @@ one row: `src/index.ts` functions moved 0% → 16.66%, because the probe's tests
 exercise a re-export wrapper there. Every other row of the coverage table is identical, so this is
 a reported change in one counter and not a general drift in the figures.
 
+The battery above was exported from `90ae9a8`. The delivered commit is later than that export by
+documentation and one test comment, and by nothing under `src/` — `git diff --stat 90ae9a8..HEAD
+-- src/` is one of the mechanical checks recorded with the round. The host rows were re-measured at
+the delivered commit afterwards and reproduce the same figures, so the numbers here describe the
+delivered tree rather than only its export.
+
 **What this battery found.** Before the fix, the Linux Node 20 run aborted at
 `tests/write-state-security.test.ts:613`, `refuses to treat a different inode as the file it
 committed`. That was a genuine product defect on Linux, not a test artifact, and it is described

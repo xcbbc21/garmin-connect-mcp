@@ -240,6 +240,11 @@ it('does not fail a read that resolved cleanly but could not understand an item'
   expect(report.mock.calls[0][2]).toMatchObject({ complete: false, readFailures: [] })
 })
 
+// The rejection below is a defensive shape rather than the one a real account
+// produces: the adapter converts a transport failure into a resolved snapshot
+// carrying a read-failure warning, and that reachable shape has its own test
+// above. This case pins what happens if a read rejects anyway — reported as a
+// failure, attempted once, and without echoing the rejection text anywhere.
 it('reports a failed calendar read as a failure without leaking or retrying', async () => {
   const service = calendarService({
     getCalendarRange: jest.fn().mockRejectedValue(new Error('secret calendar response')),
