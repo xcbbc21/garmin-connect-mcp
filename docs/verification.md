@@ -344,3 +344,10 @@ above, not on CI.
 
 Live read-only checks are available explicitly through `npm run test:integration`
 using the same public client and session configuration. They are excluded from CI.
+That script's default checks never touch the calendar, so authorising it alone
+closes no calendar question; the calendar read is exercised only when
+`GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD` names one range. With it
+unset the probe reports `skipped`, which is not a pass. The minimum
+authorisation this project would need, and the `§6` question each reported field
+answers, are stated in
+[calendar API verification, §7](calendar-api-verification.md#7-the-minimum-read-only-authorisation-that-would-close-6).

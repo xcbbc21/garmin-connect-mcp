@@ -163,6 +163,6 @@ npm run test:distribution
 
 Tests build first. Lint never rewrites files. Packaging audits file contents and obsolete dependencies. CI checks Node 20/22 on Linux and platform behavior on macOS/Windows.
 
-`npm run test:integration` is an explicitly invoked, read-only live check using the same client/session flow. Configure an authenticated account first. It is not run by CI; `GARMIN_INTEGRATION_VERBOSE=true` prints normalized personal data and should only be used deliberately.
+`npm run test:integration` is an explicitly invoked, read-only live check using the same client/session flow. Configure an authenticated account first. It is not run by CI; `GARMIN_INTEGRATION_VERBOSE=true` prints normalized personal data and should only be used deliberately. Setting `GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD` additionally reads that one calendar range, which is the only check that exercises the calendar read; without it the calendar probe reports `skipped`, which is not a pass. See [calendar API verification](docs/calendar-api-verification.md#7-the-minimum-read-only-authorisation-that-would-close-6).
 
 For this refactor's actual results and limits, see [verification](docs/verification.md). License and upstream attribution are retained in [LICENSE](LICENSE) and [NOTICE](NOTICE.md).

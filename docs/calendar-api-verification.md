@@ -209,3 +209,56 @@ Until these are exercised with explicit user authorisation, delivery status is
 read remains unverified"**. A read adapter exists behind a two-layer evidence gate, it is wired
 into `GarminClient`, it is reachable from the `get_garmin_calendar` tool and from the reconcile
 pass, and the whole read side is still backed by **no live observation in either region**.
+
+## 7. The minimum read-only authorisation that would close §6
+
+§4.1 names one-hand implementations that were actually read; §6 names the contracts that are
+still uncertain. What was missing is the third thing: the smallest authorisation that would
+settle them. It is now a runnable artefact rather than a request in prose —
+`runCalendarReadProbe` in `scripts/integration-test.ts`.
+
+**Why the existing read-only check does not close it.** `runReadOnlyChecks` covers activities,
+sleep, steps, heart rate, weight, workouts and profile. It never touches the calendar. A green
+`npm run test:integration` therefore says the session works and says **nothing** about the read
+adapter described in §4, so authorising that command alone would not move a single row of §6.
+
+**What the probe is authorised to do.** Read one inclusive range, once:
+
+```sh
+GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD npm run test:integration
+```
+
+The range has no default on purpose. A probe that picked its own dates would manufacture
+evidence about days the operator never chose, so with the variable unset the outcome is
+`skipped` — which is not a pass, is printed as its own outcome, and never increments the pass
+count. A malformed range fails closed (`failed`) without echoing the supplied value, because the
+reporting path is shared with account responses. A format-valid but reversed range is passed
+through **verbatim**: ordering is the service's judgement (`validateCalendarQuery`), not the
+probe's, and silently sorting the pair would read back as evidence about an unauthorised range.
+
+**What it does not do.** No write, no delete, no retry, no local state, no schema cache, no
+second query. It issues exactly the reads the adapter decides are needed for that one range and
+stores nothing.
+
+**What each reported field settles.** The probe reports observations, not verdicts, so a row of
+§6 can be read off directly:
+
+| Reported field | §6 question it answers |
+| --- | --- |
+| reachability (pass/fail) | "that the query is reachable at all for a given account" |
+| `entries` plus per-day shape | "what it answers for an empty day (an array, an omitted field, or `null`)" |
+| `probedRange` vs `range` | "whether the answered range is inclusive at both ends" |
+| `requestsIssued` | "whether any response ever carries a cursor or a truncation flag" |
+| `entryScheduleIds` | "whether `scheduledWorkoutId` is present and correct on every item shape" |
+| — (raw id values) | "whether read and write really use two different field names" |
+| `complete` / `missingRanges` | the distinction behind "完整读取时未发现" vs "unknown 写一定没发生" |
+| `warnings` | boundary padding and any other adapter-side note |
+
+**Region.** A `cn` answer needs the probe run with the `cn` region configured; a `global` run
+settles nothing about `cn`. This follows §4.2's rule that the two regions are recorded
+separately rather than inferred from a hostname swap.
+
+**Still out of scope even with this authorisation.** The month feed, the by-id read, and the
+cursor failure mode stay unobserved — the probe deliberately exercises the range query only.
+Everything under "Open about writes" is unaffected: the probe is read-only and cannot establish
+whether a repeated `POST` creates a second entry or whether `DELETE` is idempotent.
