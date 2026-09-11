@@ -222,11 +222,19 @@ sleep, steps, heart rate, weight, workouts and profile. It never touches the cal
 `npm run test:integration` therefore says the session works and says **nothing** about the read
 adapter described in §4, so authorising that command alone would not move a single row of §6.
 
-**What the probe is authorised to do.** Read one inclusive range, once:
+**What the probe is authorised to do.** Read one inclusive range, once. The payload below is
+only printed with `GARMIN_INTEGRATION_VERBOSE=true`, so the command that actually produces
+evidence is:
 
 ```sh
-GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD npm run test:integration
+GARMIN_INTEGRATION_VERBOSE=true \
+GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD \
+npm run test:integration
 ```
+
+Without `GARMIN_INTEGRATION_VERBOSE=true` the probe still runs and still reports
+`PASS`/`FAIL`, but the fields the table below reads are not printed — the run would answer §6's
+reachability question and nothing else.
 
 The range has no default on purpose. A probe that picked its own dates would manufacture
 evidence about days the operator never chose, so with the variable unset the outcome is
@@ -236,27 +244,58 @@ reporting path is shared with account responses. A format-valid but reversed ran
 through **verbatim**: ordering is the service's judgement (`validateCalendarQuery`), not the
 probe's, and silently sorting the pair would read back as evidence about an unauthorised range.
 
-**What it does not do.** No write, no delete, no retry, no local state, no schema cache, no
-second query. It issues exactly the reads the adapter decides are needed for that one range and
-stores nothing.
+**What it does not do.** No write, no delete, **no retry**, no local state, no schema cache. It
+issues exactly the reads the adapter decides are needed for that one range and stores nothing.
+That is one query **per calendar-month slice** the range touches — a 3-day range inside one month
+is one request, and a range spanning a month boundary is two — each padded by one day on each
+side. `requestsIssued` reports how many were sent, which is why it answers the cursor question
+below: any count above one is a slice boundary, not a pagination step.
 
-**What each reported field settles.** The probe reports observations, not verdicts, so a row of
-§6 can be read off directly:
+**How to read the outcome.** The probe reports observations, not verdicts, and the three
+outcomes are not interchangeable:
+
+| Outcome | What produced it | What it proves |
+| --- | --- | --- |
+| `passed` | the call resolved **and** no read-failure warning code is present | this range came back readable. An empty `entries` with `passed` is a real empty-day observation |
+| `failed` | the call rejected, **or** it resolved carrying a read-failure warning code | this attempt did not come back usable. It says nothing about whether the calendar has entries, and one failure is evidence about one attempt, not about permanent reachability |
+| `refused` | `CalendarCapabilityError` | nothing was sent at all — an account/region capability answer, not a read result |
+
+The middle row is the subtle one, and it is why "the call resolved" is not treated as "the read
+worked". The adapter does **not** reject on a transport failure: it catches it, records
+`[CHUNK_READ_FAILED]` and resolves a snapshot with `complete:false`
+(`src/calendar/adapter.ts:818-822`, `:908-916`). A gateway 500 therefore arrives at the probe as
+a perfectly successful promise. Keying the verdict on `complete` would be wrong in the other
+direction too — one unreadable item clears it as well, and that is an observation about the data
+rather than a failed read. So the verdict keys on the warning code, and both `failed` and
+`refused` exit non-zero. `skipped` exits zero but is printed as its own outcome, so a zero exit
+code is never read as "the calendar was observed".
+
+**What each reported field settles.** A row of §6 can be read off directly:
 
 | Reported field | §6 question it answers |
 | --- | --- |
-| reachability (pass/fail) | "that the query is reachable at all for a given account" |
+| `passed` vs `failed` | "whether the query is reachable for a given account/region at all" |
 | `entries` plus per-day shape | "what it answers for an empty day (an array, an omitted field, or `null`)" |
 | `probedRange` vs `range` | "whether the answered range is inclusive at both ends" |
 | `requestsIssued` | "whether any response ever carries a cursor or a truncation flag" |
 | `entryScheduleIds` | "whether `scheduledWorkoutId` is present and correct on every item shape" |
 | — (raw id values) | "whether read and write really use two different field names" |
-| `complete` / `missingRanges` | the distinction behind "完整读取时未发现" vs "unknown 写一定没发生" |
+| `complete` / `missingRanges` | `true` on a complete empty read is "this read of this range showed nothing"; it is never evidence that a write attempt did not happen |
+| `readFailures` | the resolved-but-unusable case, named by code rather than inferred from `complete` |
 | `warnings` | boundary padding and any other adapter-side note |
 
-**Region.** A `cn` answer needs the probe run with the `cn` region configured; a `global` run
-settles nothing about `cn`. This follows §4.2's rule that the two regions are recorded
-separately rather than inferred from a hostname swap.
+**Region: `global` only, and `cn` needs a source before it needs a run.** This matters because
+§4.2 records the two regions separately, and the separation cuts both ways. A `global` run
+settles nothing about `cn`. But a `cn` run settles nothing either, and not for lack of
+authorisation: `CALENDAR_SUPPORTED_REGIONS` is `['global']`
+(`src/calendar/adapter.ts:94`), and the region is refused with `CALENDAR_QUERY_UNSUPPORTED`
+before any request is built — at the adapter's capability gate (`:746-755`) and again at the
+transport (`src/client.ts:942-949`). Configuring `cn` and running this probe produces
+`refused` and nothing else; no request is sent, so the run cannot observe a `cn` response even
+in principle. What would close the `cn` column is not a broader authorisation but a first-hand
+source for a `cn` calendar response shape — the same standard §4.2 already applies, where the
+only `cn` evidence found is a routing/configuration claim. Widening the gate first would replace
+verified-refusal with an unverified read, which is the opposite trade from the one §4.2 makes.
 
 **Still out of scope even with this authorisation.** The month feed, the by-id read, and the
 cursor failure mode stay unobserved — the probe deliberately exercises the range query only.

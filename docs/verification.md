@@ -187,7 +187,10 @@ What the continuation round added, each backed by committed tests:
 - **Read-side live evidence is zero.** The calendar read adapter is exercised only against the
   mocked adapter and the simulated Garmin service in the test fixtures. No single live
   response from the real endpoint has been captured, so the adapter's field mapping and
-  pagination assumptions remain unconfirmed against the service.
+  pagination assumptions remain unconfirmed against the service. A runnable read-only probe now
+  exists (`runCalendarReadProbe`) and is what would close this; it has **not** been run, because
+  no live Garmin authorisation was given. Its contract is covered by tests against a fake
+  service, which is a statement about the probe's own logic and not about Garmin.
 - **Windows was not exercised in this round.** This machine has no Windows execution
   capability. The Windows job in `.github/workflows/ci.yml` now includes the write journal,
   account lock, migration, private-state and stdio recovery suites, but the job has not been
@@ -216,12 +219,17 @@ process model or permission semantics: `session-store`, `session-store-write`, `
 `index`, `darwin-private-acl`, `stdio-protocol`, `write-stdio-recovery`, `write-operation-lock`,
 `write-state-security`, `write-operation-store` and `write-operation-migration`.
 
-**macOS arm64 (darwin), Node v25.2.1.** Run in two batches on the host at `3a82e4f`; both exited
-0: 6 suites / 55 tests, then 6 suites / 134 tests — 12 suites / 189 tests in total. The second
-batch is one test larger than the pre-fix count because the inode-reuse regression test was added.
+**macOS arm64 (darwin), Node v25.2.1.** The full suite runs on the host at the
+probe-repair commit: 59 suites / 1205 tests, all passing, with no platform skip — the
+darwin-only ACL case runs rather than skips. Host coverage there is All files
+87.73% / 78.13% / 88.08% / 90.33% and `src/write-operations`
+86.52% / 74.39% / 87.93% / 88.79%. The 12-suite cross-platform set was additionally
+run in two batches at `3a82e4f`; both exited 0: 6 suites / 55 tests, then
+6 suites / 134 tests — 12 suites / 189 tests in total. The second batch is one test
+larger than the pre-fix count because the inode-reuse regression test was added.
 
 **Linux aarch64, container `arm64v8/ubuntu:22.04`, kernel `6.12.76-linuxkit`, Ubuntu 22.04.5 LTS.**
-Exported with `git archive 3a82e4f` into a tree carrying neither `node_modules` nor `.git`, so
+Exported with `git archive 6bc16d6` into a tree carrying neither `node_modules` nor `.git`, so
 `npm ci` is a genuine clean install. Node 20 and Node 22 were run serially, to remove CPU
 contention as a source of lock-test flakiness.
 
@@ -229,17 +237,16 @@ contention as a source of lock-test flakiness.
 | --- | --- | --- |
 | `npm ci` | exit 0 | exit 0 |
 | `npm run lint` | exit 0, 0 warnings | exit 0, 0 warnings |
-| `npm test -- --runInBand` | exit 0, 58 suites / 1143 tests, 1142 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
-| `npm run test:coverage` | exit 0. All files 87.15% statements / 77.45% branches / 87.20% functions / 89.75% lines; `src/write-operations` 85.32 / 72.62 / 87.30 / 87.71 | exit 0, same figures |
+| `npm test -- --runInBand` | exit 0, 59 suites / 1193 tests, 1192 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
+| `npm run test:coverage` | exit 0. All files 87.59% statements / 78.01% branches / 87.6% functions / 90.16% lines | exit 0, same figures |
 | `npm run build` | exit 0 | exit 0 |
 | `npm run pack:smoke` | exit 0, 204 files, `"audit": "passed"` | exit 0, same figures |
 | `npm run test:distribution` | exit 0, `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` | exit 0, same figures |
 | `npm run demo:recovery` | exit 0, `DEMO 1 OK` / `DEMO 2 OK` / `DEMO 3 OK` / `ALL THREE DEMOS OK` | exit 0, same figures |
 
-The container coverage figures are lower than the macOS host figures (87.15 / 77.45 / 87.20 / 89.75
-against 87.29 / 77.59 / 87.44 / 89.92) because platform-conditional branches differ per host — the
-affected counter is `src/write-operations` branches, 72.62 on Linux against 72.73 on macOS. Every
-set clears every configured gate, and nothing here is an average across hosts.
+The container coverage figures are lower than the macOS host figures (87.59 / 78.01 / 87.6 / 90.16
+against 87.73 / 78.13 / 88.08 / 90.33) because platform-conditional branches differ per host.
+Every set clears every configured gate, and nothing here is an average across hosts.
 
 **What this battery found.** Before the fix, the Linux Node 20 run aborted at
 `tests/write-state-security.test.ts:613`, `refuses to treat a different inode as the file it
@@ -247,6 +254,11 @@ committed`. That was a genuine product defect on Linux, not a test artifact, and
 in the continuation-round list above. After the fix, both Node versions complete the whole
 command set with exit 0, including the three demos. The macOS host never failed this case, which
 is exactly why the defect shipped.
+
+The one skip in the container row is not a platform gap: `tests/write-state-security.test.ts:282`
+is guarded to darwin because it exercises a real POSIX ACL through `/bin/chmod +a`, which Linux
+does not provide. The macOS host runs it, so the ACL path is exercised on exactly one platform and
+skipped on the other rather than mocked on either.
 
 **Channel caveat.** Node in the container is the official `linux-arm64` tarball, mounted
 read-only and prepended to `PATH`, on an `arm64v8/ubuntu:22.04` base image. This exercises real
@@ -336,18 +348,27 @@ private-state and stdio recovery suites, and so the Linux jobs also run
 `npm run demo:recovery`. Both extensions have been exercised locally on macOS and,
 for the Linux job, as the exact command sequence it runs — but the workflow itself
 has **not** been run on any runner for any commit of this round. No push was
-performed either, so no commit of the round — `e091d1b` through the final commit,
-the last of which changed only `docs/` after `3a82e4f` changed the last `src/` file
-— has a CI result at all. The Linux, macOS and Windows platform claims in this
-report rest on the local and container evidence described in the platform section
-above, not on CI.
+performed either, so no commit of the round has a CI result at all.
+
+The last commit of the round that touched `src/` is `3a82e4f`; every commit after it
+changes only `scripts/`, `tests/`, `docs/`, `README.md` or `.github/workflows/ci.yml`.
+That is checked mechanically rather than asserted: `git diff --stat 3a82e4f..HEAD -- src/`
+prints nothing. So the calendar read probe added in this round is a `scripts/`-side
+artefact and cannot have altered the behaviour the platform section records. The Linux,
+macOS and Windows platform claims in this report rest on the local and container
+evidence described in the platform section above, not on CI.
 
 Live read-only checks are available explicitly through `npm run test:integration`
 using the same public client and session configuration. They are excluded from CI.
 That script's default checks never touch the calendar, so authorising it alone
 closes no calendar question; the calendar read is exercised only when
-`GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD` names one range. With it
-unset the probe reports `skipped`, which is not a pass. The minimum
+`GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD` names one range, and its
+fields are printed only with `GARMIN_INTEGRATION_VERBOSE=true`. With the range
+unset the probe reports `skipped`, which is not a pass. The probe's outcome is
+`passed`, `failed`, `refused` or `skipped`: a resolved call that carries a
+read-failure warning code is `failed`, not `passed`, because the adapter resolves
+on a transport failure; `refused` means the region is not queryable and nothing
+was sent. `failed` and `refused` exit non-zero. The minimum
 authorisation this project would need, and the `§6` question each reported field
 answers, are stated in
 [calendar API verification, §7](calendar-api-verification.md#7-the-minimum-read-only-authorisation-that-would-close-6).

@@ -34,6 +34,12 @@ All notable changes to this project will be documented in this file.
   cross-process reconcile without a resend. It drives the real built MCP server as a child
   process against the out-of-process fake Garmin service, so every write count it asserts on is
   observed rather than composed. It is a source-tree command; `scripts/` is not shipped.
+- A read-only calendar probe in `npm run test:integration`, enabled only by
+  `GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD`, which is the one check that would move
+  the live-evidence gap on the calendar read. It reports `passed`, `failed`, `refused` or
+  `skipped`; `failed` (including a call that resolves carrying a read-failure warning code) and
+  `refused` exit non-zero, and `skipped` is never a pass. `docs/calendar-api-verification.md` §7
+  states the minimum read-only authorisation and the question each reported field answers.
 
 ### Changed
 - The server exposes 18 tools. The previous 14 names, required arguments and success fields
@@ -69,7 +75,10 @@ All notable changes to this project will be documented in this file.
 ### Known limitations
 - Calendar reads and writes are exercised only against the simulated Garmin service. No live
   response from the real endpoints has been captured, so a Calendar read cannot prove absence
-  and the adapter's field mapping remains unconfirmed against the service.
+  and the adapter's field mapping remains unconfirmed against the service. The read probe above
+  is what would close the read half of this; it has not been run, and for a `cn`-region account
+  it cannot be, because `CALENDAR_SUPPORTED_REGIONS` is `['global']` and the region is refused
+  before a request is built.
 - Deleting the state directory removes the only record that prevents duplicate scheduling; a
   journal with no archive refuses new writes past 32 MiB.
 - The macOS and Windows jobs in CI carry the journal, lock, migration, state and stdio

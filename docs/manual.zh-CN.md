@@ -1097,14 +1097,19 @@ npm run test:distribution
 本地集成检查不会创建训练、排期或删除排期。真实 Garmin 写入仍应由用户在 MCP 客户端中逐次确认。
 
 该脚本默认只读 activities/sleep/steps/heartRate/weight/workouts/profile，**不读日历**。若要验证日历读取，
-须显式授权一个区间：
+须显式授权一个区间，并开启 verbose 才会打印字段（否则只回答"能否读到"）：
 
 ```sh
-GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD npm run test:integration
+GARMIN_INTEGRATION_VERBOSE=true \
+GARMIN_CALENDAR_PROBE_RANGE=YYYY-MM-DD..YYYY-MM-DD \
+npm run test:integration
 ```
 
-未设置时日历探针输出 `skipped`，**这不等于通过**。区间没有默认值，避免对未选定的日期制造证据；
-格式非法的区间会直接判失败且不回显原值。详见
+未设置区间时日历探针输出 `skipped`，**这不等于通过**。区间没有默认值，避免对未选定的日期制造证据；
+格式非法的区间会直接判失败且不回显原值。探针结果为 `passed` / `failed` / `refused` / `skipped` 四种：
+**调用返回不代表读取成功**——适配器把传输失败 catch 成 `[CHUNK_READ_FAILED]` 后正常 resolve，因此带读取失败
+warning 的快照判 `failed` 而非 `passed`；`refused` 表示该账号/区域不可查询，**没有发出任何请求**。
+`failed` 与 `refused` 都会让退出码非零。详见
 [calendar API verification](calendar-api-verification.md#7-the-minimum-read-only-authorisation-that-would-close-6)。
 
 ## 15. 功能边界
