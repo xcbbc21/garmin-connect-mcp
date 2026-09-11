@@ -47,12 +47,17 @@ Verified at commit `3a82e4f`, baselines for comparison `e091d1b` (round start) a
 this machine, in this order, with no pre-script bypassed; the Linux rows were measured on the
 same commit inside a container (see the platform section).
 
-`3a82e4f` is the final commit of the round. No file under `src/` has changed since `ff128b6`:
-the commits in between add documentation, `scripts/demo-write-recovery.ts` and one test file,
-none of which `tsconfig` compiles (`include: ["src"]`, so `scripts/` and `tests/` are outside the
-build). The full command set was nevertheless re-measured at the final commit on both platforms.
-Every number below comes from that re-run; none of them is carried over from an earlier commit,
-and the suite and test counts moved by the five cases the new guard test adds.
+`3a82e4f` is the last commit of that round that touched `src/`. The round did not stop there:
+later commits added tests, the calendar read probe under `scripts/` and documentation, and the
+whole command set was re-measured at the round's actual final commit — see **Final-commit
+re-measurement** below, which supersedes the suite, test and coverage figures in this section.
+The table here is kept as the record of what was measured at `3a82e4f`, not as the current state.
+
+At `3a82e4f`, no file under `src/` had changed since `ff128b6`: the commits in between added
+documentation, `scripts/demo-write-recovery.ts` and one test file, none of which `tsconfig`
+compiles (`include: ["src"]`, so `scripts/` and `tests/` are outside the build). Every number in
+this section comes from a run made at `3a82e4f` rather than carried over from `ff128b6`, and it
+moved by the five cases the new guard test added at that point.
 
 The packaged-artifact rows are reported **per measured tree**: the macOS rows were measured on the
 release tree at `3a82e4f`, and the Linux rows on a clean `git archive 3a82e4f` export carrying
@@ -87,6 +92,36 @@ macOS-only: `refuses a journal carrying a granting macOS ACL` runs only where `c
 | Linux write-state platform battery, Node 22 | same container and channel | exit 0, all eight commands. See the platform section below |
 | Windows write-state platform battery | — | **not run** — no Windows host is available here; see limitations |
 | Live account integration | `npm run test:integration` | **not run** — no authorized real credentials were available; see limitations |
+
+### Final-commit re-measurement
+
+The round's last commit that touches `src/` or `tests/` is `db66d01`. The delivered commit is the
+documentation-only commit immediately after it, so the figures below were measured on a tree whose
+compiled and tested content is `db66d01`'s; `git diff --stat db66d01..HEAD` prints nothing outside
+`docs/`, which is what makes that statement checkable rather than asserted. They were measured on
+this machine (macOS arm64, Node v25.2.1, npm 11.19.0) after every source and test change of the
+round had landed. Nothing here is carried over from `3a82e4f`.
+
+| Check | Command | Result at the delivered commit |
+| --- | --- | --- |
+| Type check | `npx tsc --noEmit` | exit 0 |
+| Lint | `npx eslint src tests scripts --max-warnings 0` | exit 0, 0 warnings |
+| Full suite | `npm test -- --runInBand` | exit 0, 59 suites / 1215 tests, **1215 passed, 0 skipped** |
+| Coverage with all gates | `npm run test:coverage` | exit 0. All files 87.73% statements / 78.13% branches / 88.08% functions / 90.33% lines; `src/write-operations` 86.52 / 74.39 / 87.93 / 88.79; `src/calendar` 96.69 / 93.42 / 97.50 / 98.06. Gates 75/70/65/78 |
+| Packaged build | `npm run build` (`clean` + `tsc`) | exit 0 |
+| Package content audit | `npm run pack:smoke` | exit 0, 204 files, `"audit": "passed"` |
+| Runtime-only distribution install | `npm run test:distribution` | exit 0, `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` |
+| Three required demos, end to end | `npm run demo:recovery` | exit 0, `DEMO 1 OK` / `DEMO 2 OK` / `DEMO 3 OK` / `ALL THREE DEMOS OK` |
+
+The suite grew from the 1205 tests the platform section records at the probe-repair commit to
+1215. Exactly ten `it` cases were added after `90ae9a8`, and `90ae9a8`, `67ec561` and `458e8d2` add
+none of them relative to each other, so the count is the same whichever of those three the earlier
+figure was taken at: three shapes in the `it.each` trio that refuses the next write at the tool
+path for a corrupted journal, the reversed-order history case, and six new cross-process lock
+cases (that suite went from 14 to 20 tests). Coverage is unchanged to every recorded decimal
+because no file under `src/` has changed since `3a82e4f` and no added case reaches a source line
+that was not already covered — a reported absence of movement, not a re-quoted figure. That claim
+is mechanical: `git diff --stat 3a82e4f..HEAD -- src/` prints nothing.
 
 `demo:recovery` is a source-tree command: `scripts/` is deliberately not in `package.json` `files`,
 so it runs from a repository checkout, like `test`, `lint` and `pack:smoke`. It was run repeatedly
@@ -146,6 +181,47 @@ What the continuation round added, each backed by committed tests:
   holder, closing a window in which a holder releasing between two observations was reported
   as `STATE_UNAVAILABLE` ("Write lock could not be created: EEXIST"). Non-`EEXIST` failures
   still fail closed.
+- **The cross-process lock tests synchronise on a handshake, and a worker that dies is reported
+  rather than mistaken for a finished run.** The plan asks the lock-contention tests to wait for a
+  `ready` handshake instead of guessing from a fixed delay, and to surface any unexpected worker
+  exit with the captured, redacted stderr. `tests/fixtures/write-lock-worker.ts` now reports
+  `ready` after argument parsing and before the lock is contended, `start` from inside the
+  critical section, then `end` or `busy`, plus `error`, `signal` and `timeout` for abnormal
+  endings; the parent's `waitForEvent` polls that log while watching the child, so a child that
+  exits early, exits non-zero or never reports fails the test instead of hanging until the suite
+  timeout. `start` is the stronger of the two conditions because it can only be written while the
+  lock is held, and one case asserts the per-`pid` order `ready` before `start`, so the handshake
+  cannot quietly degrade into an event that always fires. The previous
+  `await new Promise(resolve => setTimeout(resolve, 250))` in the `OPERATION_BUSY` case is gone.
+  Diagnostics are redacted through the production `redactSensitiveText`
+  (`src/utils/errors.ts:73`) rather than a second, weaker implementation, and are written to both
+  `events.jsonl` and fd 2 with `writeSync`, because a process that is about to die cannot be
+  relied on to flush a buffered stream. The worker echoes its own argv into that diagnostic, which
+  is what makes the redaction falsifiable: the test supplies a `Bearer` token as the account and
+  asserts the literal appears in neither stderr nor the event log. Error, close, signal and
+  timeout are funnelled into a single rejection, and the worker carries a watchdog
+  (`GARMIN_LOCK_WORKER_WATCHDOG_MS`) plus `SIGINT`/`SIGTERM`/`SIGHUP` and
+  uncaught-exception/unhandled-rejection handlers. Seven cases were added; the suite is 20 tests
+  and passes. Three mutation proofs were run and reverted: moving `ready` after `start` fails two
+  cases, dropping the redaction fails exactly the redaction case, and letting the handshake read
+  an early non-zero exit as success fails exactly the handshake case. Both files returned
+  byte-identical afterwards — `tests/fixtures/write-lock-worker.ts` sha256 `fb1ace52…`,
+  `tests/write-operation-lock.test.ts` `eec6ef21…`.
+- **The journal history verdict is pinned for both insertion orders, not only the one that
+  happens to be scanned first.** The journal is consulted by reducing *all* records that share a
+  business key instead of taking the first hit, because object iteration order is insertion order
+  and is not a statement about which record is newest. The suite already covered a permissive
+  record in front of a newer `unknown` / `succeeded` / `in_flight`, and had one reversed case, but
+  that reversed case used `succeeded` / `not_attempted` only — so the reversed combination with an
+  `unknown` step, which is the ordering a *last*-match scan gets wrong, had no case of its own.
+  It does now, in `tests/write-history-regression.test.ts`, and the two orderings together pin the
+  verdict in both directions. Three mutation proofs against `collectBusinessHistory`
+  (`src/write-operations/types.ts`), each reverted: first-match over iteration order fails the
+  five permissive-first cases and passes both reversed ones; last-match fails the two reversed
+  ones; and a "satisfied is sticky but blocking is clearable" reduction — a later permissive
+  record treated as superseding the earlier uncertainty — fails **only** the new case,
+  1 failed / 7 passed. That last result is what shows the gap was previously unguarded rather than
+  merely restated. `src/write-operations/types.ts` returned byte-identical (`d11d8aa6…`).
 - **All five write tools accept `idempotencyKey` at the real MCP parameter layer.** Having the
   parameter on the service signature is not the same as a client being able to send it: the
   input schemas of `create_and_schedule_garmin_workout` (`src/mcp.ts:455`) and
@@ -237,7 +313,11 @@ process model or permission semantics: `session-store`, `session-store-write`, `
 probe-repair commit: 59 suites / 1205 tests, all passing, with no platform skip — the
 darwin-only ACL case runs rather than skips. Host coverage there is All files
 87.73% / 78.13% / 88.08% / 90.33% and `src/write-operations`
-86.52% / 74.39% / 87.93% / 88.79%. The 12-suite cross-platform set was additionally
+86.52% / 74.39% / 87.93% / 88.79%. The same host was re-measured at the delivered commit
+after the round's six additional lock cases, the reversed-order history case and the
+tool-path corruption trio landed: **59 suites / 1215 tests, 1215 passed, 0 skipped**, with
+the coverage figures above reproducing to every recorded decimal (see **Final-commit
+re-measurement**). The 12-suite cross-platform set was additionally
 run in two batches at `3a82e4f`; both exited 0: 6 suites / 55 tests, then
 6 suites / 134 tests — 12 suites / 189 tests in total. The second batch is one test
 larger than the pre-fix count because the inode-reuse regression test was added.
