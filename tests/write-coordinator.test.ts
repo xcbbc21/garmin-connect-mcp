@@ -2,6 +2,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 import { WriteCoordinator, previewRevisionOf } from '../src/write-operations/coordinator'
 import { GarminWriteError, WRITE_ERROR_CODES } from '../src/write-operations/errors'
 import { accountKey, decodeConfirmationId, requestHash } from '../src/write-operations/identity'
@@ -29,6 +30,9 @@ function makeService(stateDirectory: string, writer: jest.Mock) {
     accountUsername: 'runner@example.test',
     accountRegion: 'cn',
     stateDirectory,
+    // Explicit precondition: the account can read its calendar and the day is
+    // empty. A missing read capability would refuse the write instead.
+    calendarReader: new FakeCalendar(),
   })
   return { data, service }
 }
@@ -249,6 +253,10 @@ function makeCoordinator(store: OperationStore, writer: { schedule: jest.Mock })
     lock: new FileAccountLock(freshState(), ACCOUNT),
     accountKey: ACCOUNT,
     writer,
+    // Explicit precondition: the account can read its calendar and the day is
+    // empty. Without a reader the fail-closed preflight would refuse the write
+    // instead of previewing it, which is a different contract.
+    calendarReader: new FakeCalendar(),
     newOperationId: (() => {
       let n = 0
       return () => `op-${++n}`

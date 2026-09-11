@@ -36,16 +36,41 @@ import {
   type JournalMigrationReport,
 } from './migration'
 import {
+  BLOCKING_STEP_STATUSES,
   REBUILDABLE_STEP_STATUS,
   RETRYABLE_STEP_STATUSES,
   SATISFIED_STEP_STATUSES,
   findStepByBusinessKeySafe,
+  type DuplicatePolicy,
   type OperationDocument,
   type StepStatus,
   type WriteEvidence,
   type WriteOperation,
   type WriteStep,
 } from './types'
+import {
+  RECONCILE_BUDGET_MS,
+  RECONCILE_MAX_READS,
+  RECONCILE_TIMEZONE,
+  applyObservation,
+  buildStepReport,
+  isCalendarObservedSkip,
+  nextActionFor,
+  planReconcile,
+  planResumeCandidates,
+  preflightTarget,
+  runReconcileReads,
+  type CalendarLookup,
+  type ClassifiedObservation,
+  type PreflightOutcome,
+  type ReconcileReport,
+  type ResumeCandidateReason,
+} from './reconcile'
+
+// Re-exported so callers (the tool service, the MCP layer, tests) depend on the
+// coordinator as the single entry point for write coordination instead of
+// reaching into its internals.
+export type { DuplicatePolicy, ReconcileReport, ReconcileStepReport } from './reconcile'
 
 export interface CalendarWriter {
   schedule(workoutId: string, date: string): Promise<{ workoutScheduleId?: string | null }>
@@ -101,7 +126,7 @@ export interface ScheduleStepInput {
 
 export type WriteKindExtended = 'create' | 'schedule' | 'unschedule' | 'batch-schedule'
 
-export type ScheduleAction = 'write' | 'skip_existing' | 'blocked'
+export type ScheduleAction = 'write' | 'skip_existing' | 'duplicate_existing' | 'blocked'
 
 export interface SchedulePreviewStep {
   stepId: string
@@ -118,6 +143,12 @@ export interface SchedulePreviewStep {
   resolvedWorkoutId?: string
   errorCode?: string
   reason?: string
+  /**
+   * Set when this step only exists because a durable `succeeded` receipt was
+   * falsified: a complete read of the target day did not show the entry, so the
+   * earlier operation is being replaced rather than treated as still true.
+   */
+  supersedesOperationId?: string
 }
 
 export interface SchedulePreview {
@@ -159,6 +190,36 @@ export interface ScheduleExecution {
   receipts: ScheduleStepReceipt[]
 }
 
+/** One step a `resume` may arm, with the journal evidence that made it safe. */
+export interface ResumeStepInfo {
+  stepId: string
+  kind: WriteStep['kind']
+  date?: string
+  workoutId?: string
+  reason: ResumeCandidateReason
+}
+
+/** One step a `resume` refuses to arm, and why. */
+export interface ResumeRefusalInfo {
+  stepId: string
+  code: WriteErrorCode
+  detail: string
+}
+
+/**
+ * A `resume` preview. Extends the ordinary preview so a caller confirms it
+ * with the same `<operationId>:<previewRevision>` handle, then dispatches it
+ * through the executor that matches the operation's kind.
+ */
+export interface ResumePreview extends SchedulePreview {
+  operationId: string
+  /** Always present: arming a resume always lands on a concrete revision. */
+  previewRevision: number
+  kind: WriteOperation['kind']
+  candidates: ResumeStepInfo[]
+  refusals: ResumeRefusalInfo[]
+}
+
 /** Steps whose abandoned pre-dispatch marker became an honest `unknown`. */
 export interface AbandonedAttemptReport {
   rolledForward: { operationId: string; stepId: string }[]
@@ -176,11 +237,20 @@ export interface ExecuteScheduleOptions {
 /**
  * Why the rest of a batch stopped being dispatched. Passed down to every
  * remaining entry so its receipt points at the entry that caused the stop.
+ *
+ * The set of reasons is closed, and it is exactly the spec's stop conditions:
+ * caller cancellation, an expired confirmation, a lost lock, a storage failure
+ * that could not record an attempt, and an authentication/identity failure on
+ * the channel. `confirmation_stale` covers the last confirmation-authority
+ * member: a skip decision the approval was granted on no longer holds, so the
+ * old approval may not be spent on a write.
  */
+type HaltReasonCode = 'aborted' | 'expired' | 'transport' | 'state_unavailable' | 'lock_lost' | 'confirmation_stale'
+
 interface HaltReason {
   cause: WriteStep
   code: WriteErrorCode
-  reason: 'aborted' | 'expired' | 'transport' | 'state_unavailable' | 'lock_lost'
+  reason: HaltReasonCode
 }
 
 export interface SchedulePreviewInput {
@@ -189,6 +259,12 @@ export interface SchedulePreviewInput {
   request: Record<string, unknown>
   steps: ScheduleStepInput[]
   idempotencyKey?: string
+  /**
+   * What to do when a fresh read finds an identical entry already there.
+   * `skip` (default) reports it as satisfied; `error` reports it as
+   * `DUPLICATE_EXISTING`. Neither ever deletes an entry.
+   */
+  duplicatePolicy?: DuplicatePolicy
 }
 
 export interface CreatePreviewInput {
@@ -232,6 +308,30 @@ interface ScheduleDecision {
   businessKey: string
   action: ScheduleAction
   found?: { operation: WriteOperation; step: WriteStep }
+  /**
+   * A durable `succeeded` receipt for this business key that a fresh read must
+   * now confirm or falsify.
+   *
+   * Unlike `found`, this is not a verdict: a `succeeded` step proves Garmin
+   * accepted a request, not that the entry is still on the calendar. Treating
+   * it as terminal would mean one manual deletion in the Garmin app blocks that
+   * workout/day in this journal forever. So the claim is handed to the preflight
+   * read instead: present → skip, absent on a complete read → the claim is
+   * falsified and the step may be re-armed with a new approval.
+   */
+  historyClaim?: { operation: WriteOperation; step: WriteStep }
+  /**
+   * The fresh calendar observation this decision came from, when there was
+   * one. Its presence (with no `found`) is what tells the journal writer that
+   * a skip is a fact about *now* rather than a durable receipt.
+   */
+  observation?: ClassifiedObservation
+  /** ISO instant of the observation behind this decision. */
+  readAt?: string
+  /** Refusal code when a fresh preflight, not the journal, produced `blocked`. */
+  blockedCode?: WriteErrorCode
+  /** Caller-facing refusal text for a preflight-produced `blocked`. */
+  blockedReason?: string
 }
 
 export interface WriteCoordinatorOptions {
@@ -239,6 +339,17 @@ export interface WriteCoordinatorOptions {
   lock: AccountLock
   accountKey: string
   writer: CalendarWriter
+  /**
+   * Read-only calendar capability used for the fresh preflight and for
+   * reconcile. Deliberately a *different* seam from `writer`: this interface
+   * has no method that can schedule, create or unschedule anything, so a
+   * reconcile pass is structurally incapable of hiding a compensating write
+   * (spec §C7: "reconcile 只注入读取客户端和日志能力，不注入 writer").
+   *
+   * When it is absent every new dispatch is refused (`CALENDAR_QUERY_UNSUPPORTED`)
+   * rather than being sent against an unread calendar.
+   */
+  calendarReader?: CalendarLookup
   now?: () => Date
   newOperationId?: () => string
   newStepId?: () => string
@@ -387,15 +498,233 @@ export class WriteCoordinator {
   }
 
   /**
-   * Build a preview and persist the candidate set. Never writes to Garmin.
-   * Returns `requiresConfirmation:false` with a safe no-op when every step is
-   * blocked or already satisfied.
+   * Re-read what an operation is still uncertain about, and report the next
+   * move. Never writes to Garmin.
+   *
+   * Two things are deliberately absent from this method: a writer (there is no
+   * way to express a send) and any dependency on a local `status`. A provider
+   * read can *add* an observation — `evidence`, `observedAt`,
+   * `desiredStateSatisfied` — but only a real receipt from a real dispatch ever
+   * retires `unknown`. That is why a reconcile that finds the target on the
+   * calendar still reports the original attempt as unresolved.
    */
+  async reconcile(operationId: string, options: { maxReads?: number } = {}): Promise<ReconcileReport> {
+    return await this.runLocked(async () => {
+      const document = await this.options.store.read()
+      const operation = document.operations[operationId]
+      if (!operation) {
+        throw new GarminWriteError(
+          WRITE_ERROR_CODES.OPERATION_NOT_FOUND,
+          'not_applied',
+          'No local write operation with this operationId exists for this account',
+        )
+      }
+
+      const maxReads = options.maxReads ?? RECONCILE_MAX_READS
+      const plan = planReconcile(operation, document, { maxReads })
+      const outcome = await runReconcileReads({
+        plan,
+        reader: this.options.calendarReader,
+        now: this.now,
+        maxReads,
+      })
+
+      // Record what was seen, without touching a single `status`.
+      if (outcome.byStepId.size > 0) {
+        for (const step of operation.steps) {
+          const observation = outcome.byStepId.get(step.stepId)
+          if (!observation) continue
+          applyObservation(step, observation, outcome.observedAt)
+        }
+        operation.updatedAt = this.now().toISOString()
+        await this.persist(document)
+      }
+
+      const resumePlan = planResumeCandidates(operation)
+      const candidates = resumePlan.candidates.filter(
+        candidate => this.canRearm(document, operationId, candidate.step),
+      )
+      const unresolved = operation.steps.filter(
+        step => BLOCKING_STEP_STATUSES.has(step.status),
+      ).length
+      const hardRefusals = resumePlan.refusals.filter(
+        refusal => refusal.code === WRITE_ERROR_CODES.SCHEDULE_LOOKUP_UNSUPPORTED,
+      ).length
+      const manualReviewRequired = unresolved > 0 || hardRefusals > 0
+      const next = nextActionFor({
+        unresolved,
+        candidates: candidates.length,
+        manualReviewRequired,
+        readsUnavailable: outcome.readsUnavailable,
+      })
+
+      return {
+        operationId,
+        kind: operation.kind,
+        readsIssued: outcome.readsIssued,
+        readLimit: outcome.readLimit,
+        budgetMs: RECONCILE_BUDGET_MS,
+        maxReads,
+        observations: operation.steps.flatMap((step) => {
+          const observation = outcome.byStepId.get(step.stepId)
+          if (!observation) return []
+          return [buildStepReport(
+            step,
+            observation,
+            candidates.some(candidate => candidate.step.stepId === step.stepId),
+          )]
+        }),
+        unreadable: plan.unreadable.map(entry => ({
+          stepId: entry.step.stepId,
+          kind: entry.step.kind,
+          code: entry.code,
+          detail: entry.detail,
+        })),
+        deferred: plan.deferred.map(target => ({
+          stepId: target.step.stepId,
+          detail:
+            'This step was left unread because the reconcile budget was reached. '
+            + 'It was not modified.',
+        })),
+        ...(outcome.failures.length > 0 ? { failures: outcome.failures } : {}),
+        candidates: candidates.map(candidate => ({
+          stepId: candidate.step.stepId,
+          kind: candidate.step.kind,
+          ...(candidate.step.date ? { date: candidate.step.date } : {}),
+          ...(candidate.step.workoutId ? { workoutId: candidate.step.workoutId } : {}),
+          reason: candidate.reason,
+        })),
+        refusals: resumePlan.refusals.map(refusal => ({
+          stepId: refusal.step.stepId,
+          code: refusal.code,
+          detail: refusal.detail,
+        })),
+        manualReviewRequired,
+        nextAction: next.action,
+        nextActionDetail: next.detail,
+      }
+    })
+  }
+
   /**
-   * Common preview path for single-step writes (create, unschedule, single
-   * schedule). Always takes the account lock, builds a one-step decision
-   * list, and either reuses an existing operation or creates a new one.
+   * Derive the safe remaining steps of an operation from the journal and arm
+   * them under a *new* revision.
+   *
+   * Nothing here accepts a payload: the steps, their dates and their workout
+   * ids all come from the journal record, so a resume can never smuggle in a
+   * different date or a different template. A step whose business key is
+   * claimed by any other record — including an `unknown` one — is refused
+   * rather than armed.
+   *
+   * Arming happens through the same fresh preflight as a first-time preview:
+   * a schedule entry discovered to be already on the calendar is not armed, and
+   * one whose day cannot be read completely is left un-attempted.
    */
+  async resume(operationId: string): Promise<ResumePreview> {
+    return await this.runLocked(async () => {
+      const document = await this.options.store.read()
+      const operation = document.operations[operationId]
+      if (!operation) {
+        throw new GarminWriteError(
+          WRITE_ERROR_CODES.OPERATION_NOT_FOUND,
+          'not_applied',
+          'No local write operation with this operationId exists for this account',
+        )
+      }
+
+      const resumePlan = planResumeCandidates(operation)
+      const armable = resumePlan.candidates.filter(
+        candidate => this.canRearm(document, operationId, candidate.step),
+      )
+
+      const preflightTimezone = requestTimezone(operation.request)
+      const preflightBlocked: string[] = []
+      for (const candidate of armable) {
+        const step = candidate.step
+        if (step.status === REBUILDABLE_STEP_STATUS) continue
+        step.status = REBUILDABLE_STEP_STATUS
+        step.evidence = 'none'
+        delete step.errorCode
+        delete step.reference
+      }
+
+      // Fresh read in front of every schedule step this resume would arm. The
+      // journal may be hours old; a `prepared` marker alone is not evidence
+      // about the calendar.
+      for (const candidate of armable) {
+        const step = candidate.step
+        if (step.kind !== 'schedule' || !step.date || !step.workoutId) continue
+        const outcome = await preflightTarget({
+          reader: this.options.calendarReader,
+          workoutId: step.workoutId,
+          date: step.date,
+          timezone: preflightTimezone,
+          now: this.now,
+          duplicatePolicy: operation.duplicatePolicy ?? 'skip',
+        })
+        if (outcome.kind === 'clear') {
+          step.observedAt = outcome.readAt
+          continue
+        }
+        preflightBlocked.push(step.stepId)
+        step.observedAt = outcome.readAt
+        if (outcome.kind === 'skip_existing') {
+          step.status = 'skipped'
+          step.evidence = 'observed_present'
+          step.desiredStateSatisfied = true
+          step.workoutScheduleId = outcome.observation.matches[0]?.workoutScheduleId ?? null
+          continue
+        }
+        step.status = 'not_attempted'
+        step.evidence = 'none'
+        step.errorCode = outcome.kind === 'duplicate_existing'
+          ? WRITE_ERROR_CODES.DUPLICATE_EXISTING
+          : outcome.code
+      }
+
+      const armed = armable.filter(candidate => candidate.step.status === REBUILDABLE_STEP_STATUS)
+      // A new approval, never the old one: bumping the revision invalidates
+      // every handle minted before this call, in this process and any other.
+      this.advanceRevision(operation)
+      this.issueRevision(operation)
+      operation.updatedAt = this.now().toISOString()
+      await this.persist(document)
+
+      return {
+        operationId,
+        kind: operation.kind,
+        requiresConfirmation: armed.length > 0,
+        previewRevision: operation.previewRevision ?? 0,
+        steps: operation.steps.map(step => this.previewStepFromExisting(
+          step,
+          operation,
+          armed.some(candidate => candidate.step.stepId === step.stepId),
+        )),
+        candidates: armable.map(candidate => ({
+          stepId: candidate.step.stepId,
+          kind: candidate.step.kind,
+          ...(candidate.step.date ? { date: candidate.step.date } : {}),
+          ...(candidate.step.workoutId ? { workoutId: candidate.step.workoutId } : {}),
+          reason: candidate.reason,
+        })),
+        refusals: [
+          ...resumePlan.refusals.map(refusal => ({
+            stepId: refusal.step.stepId,
+            code: refusal.code,
+            detail: refusal.detail,
+          })),
+          ...preflightBlocked.map(stepId => ({
+            stepId,
+            code: WRITE_ERROR_CODES.CALENDAR_INCOMPLETE,
+            detail:
+              'This entry was not armed: its calendar day could not be read completely, and an '
+              + 'unread day is not an empty one.',
+          })),
+        ],
+      }
+    })
+  }
+
   private async previewSingleStep(input: SingleStepPreviewInput): Promise<SchedulePreview> {
     return this.runLocked(async () => {
       const document = await this.options.store.read()
@@ -551,6 +880,229 @@ export class WriteCoordinator {
   }
 
   /**
+   * Put a fresh, uncached calendar read in front of every decision that would
+   * write.
+   *
+   * Only decisions the journal calls `write` are read: a `blocked` decision is
+   * already pinned to an unresolved holder and a `skip_existing` one is already
+   * pinned to a durable receipt, so a read there could only replace durable
+   * evidence with a weaker, momentary one.
+   *
+   * The three outcomes are deliberately different:
+   *   - `clear`      — a complete read did not show the target; the write may
+   *                    proceed (still subject to its own confirmation).
+   *   - `skip`       — one identical entry is already there; nothing is sent
+   *                    and nothing is removed.
+   *   - `duplicate`  — more than one entry matches, so the target can no longer
+   *                    be addressed unambiguously. Refused, and nothing is
+   *                    deleted.
+   *   - `blocked`    — the calendar could not be read completely. The write is
+   *                    refused rather than sent blind; an unread calendar is not
+   *                    an empty one.
+   */
+  private async applyPreflight(
+    decisions: ScheduleDecision[],
+    options: { timezone: string; duplicatePolicy?: DuplicatePolicy },
+  ): Promise<ScheduleDecision[]> {
+    const out: ScheduleDecision[] = []
+    for (const decision of decisions) {
+      const date = decision.step.date
+      const workoutId = decision.step.workoutId
+      if (decision.action !== 'write' || !date || !workoutId) {
+        out.push(decision)
+        continue
+      }
+      const outcome = await preflightTarget({
+        reader: this.options.calendarReader,
+        workoutId,
+        date,
+        timezone: options.timezone,
+        now: this.now,
+        duplicatePolicy: options.duplicatePolicy,
+      })
+      if (outcome.kind === 'clear') {
+        out.push({ ...decision, readAt: outcome.readAt })
+        continue
+      }
+      if (outcome.kind === 'skip_existing' || outcome.kind === 'duplicate_existing') {
+        out.push({
+          ...decision,
+          action: outcome.kind === 'skip_existing' ? 'skip_existing' : 'duplicate_existing',
+          observation: outcome.observation,
+          readAt: outcome.readAt,
+        })
+        continue
+      }
+      out.push({
+        ...decision,
+        action: 'blocked',
+        readAt: outcome.readAt,
+        blockedCode: outcome.code,
+        blockedReason: outcome.detail,
+      })
+    }
+    return out
+  }
+
+  /**
+   * Re-read one schedule target from inside the lock.
+   *
+   * Returns `undefined` for a step this question cannot be asked about (a
+   * create step, an unschedule step, or a step that never recorded a day).
+   * Those always take their own path.
+   */
+  private preflightBeforeDispatch(
+    step: WriteStep,
+    operation: WriteOperation,
+  ): Promise<PreflightOutcome | undefined> {
+    if (step.kind !== 'schedule') return Promise.resolve(undefined)
+    const date = step.date
+    const workoutId = step.workoutId
+    if (!date || !workoutId) return Promise.resolve(undefined)
+    const timezone = requestTimezone(operation.request)
+    return preflightTarget({
+      reader: this.options.calendarReader,
+      workoutId,
+      date,
+      timezone,
+      now: this.now,
+      // The policy the caller approved with this revision, so a confirmed
+      // dispatch reports an already-present entry the same way the preview did.
+      duplicatePolicy: operation.duplicatePolicy ?? 'skip',
+    })
+  }
+
+  /**
+   * The fresh in-lock read that stands between a confirmed `prepared` schedule
+   * step and its single POST.
+   *
+   * A read taken here can only *shrink* the set of writes the caller confirmed.
+   * It can never enlarge it: an entry that appeared after the preview turns the
+   * step into a no-op (`skipped`, no POST — fewer side effects than confirmed),
+   * and a target that can no longer be read leaves the step un-attempted. That
+   * direction is what makes the check legal without a new approval.
+   *
+   * Returns the receipt when the dispatch was vetoed, `undefined` when the POST
+   * may still be issued.
+   */
+  private async vetoDispatch(
+    document: OperationDocument,
+    operation: WriteOperation,
+    step: WriteStep,
+  ): Promise<ScheduleStepReceipt | undefined> {
+    const outcome = await this.preflightBeforeDispatch(step, operation)
+    if (!outcome || outcome.kind === 'clear') {
+      // A complete read that did not show the target is recorded as evidence,
+      // not as a status change: `prepared` still means "never dispatched".
+      if (outcome) step.observedAt = outcome.readAt
+      return undefined
+    }
+
+    // The step stops describing itself as `prepared`: its confirmation has been
+    // spent on a fresh read, and its own bookkeeping must say what was decided.
+    // No `reference` is pinned — nothing in the journal holds this key.
+    delete step.reference
+    step.observedAt = outcome.readAt
+    if (outcome.kind === 'skip_existing') {
+      step.status = 'skipped'
+      step.evidence = 'observed_present'
+      step.desiredStateSatisfied = true
+      step.workoutScheduleId = outcome.observation.matches[0]?.workoutScheduleId ?? null
+      delete step.errorCode
+    } else {
+      step.status = 'not_attempted'
+      step.evidence = 'none'
+      step.errorCode = outcome.kind === 'duplicate_existing'
+        ? WRITE_ERROR_CODES.DUPLICATE_EXISTING
+        : outcome.code
+    }
+    operation.updatedAt = this.now().toISOString()
+    await this.persist(document)
+    return this.receiptFor(operation, step)
+  }
+
+  /**
+   * Re-read a step that was skipped because the *calendar* showed its target,
+   * immediately before its confirmation is honoured.
+   *
+   * A journal-derived skip is permanent — it pins a durable receipt. A
+   * calendar-derived one is a statement about the moment it was taken. If the
+   * entry is gone now, honouring the old confirmation would post a write the
+   * caller never approved: the approval said "leave this one alone". The step
+   * therefore goes back to a retryable state, which forces a fresh preview and
+   * a new revision, i.e. a new approval.
+   *
+   * A read that cannot be taken leaves the skip alone. Not writing is what was
+   * approved, and an unreadable calendar is not evidence of absence.
+   */
+  private async recheckObservedSkip(
+    document: OperationDocument,
+    operation: WriteOperation,
+    step: WriteStep,
+  ): Promise<ScheduleStepReceipt | undefined> {
+    if (!isCalendarObservedSkip(step)) return undefined
+    const outcome = await this.preflightBeforeDispatch(step, operation)
+    if (!outcome || outcome.kind !== 'clear') return undefined
+    step.status = 'not_attempted'
+    step.evidence = 'observed_absent'
+    step.errorCode = WRITE_ERROR_CODES.CONFIRMATION_STALE
+    step.observedAt = outcome.readAt
+    // The entry the skip pointed at is gone; keeping its id would leave the
+    // journal naming a calendar row that no longer exists.
+    delete step.workoutScheduleId
+    operation.updatedAt = this.now().toISOString()
+    await this.persist(document)
+    return this.receiptFor(operation, step)
+  }
+
+  /**
+   * Record a non-writable preview decision on a step.
+   *
+   * Two shapes are kept apart on purpose:
+   *   - a journal verdict pins a read-only `reference` to the step that blocks
+   *     or satisfies the key. It is durable evidence and therefore permanent;
+   *   - a fresh calendar verdict pins nothing, because there is nothing in the
+   *     journal to point at. That absence is the marker `isCalendarObservedSkip`
+   *     reads, and it is what makes a calendar skip re-checkable at confirm time
+   *     instead of eternal.
+   */
+  private applyNonWritable(
+    target: WriteStep,
+    decision: ScheduleDecision,
+    ref?: WriteStep['reference'],
+  ): WriteStep {
+    delete target.reference
+    if (ref) target.reference = ref
+    if (!decision.found && decision.action === 'skip_existing') {
+      target.status = 'skipped'
+      target.evidence = 'observed_present'
+      target.desiredStateSatisfied = true
+      target.observedAt = decision.readAt ?? this.now().toISOString()
+      // The entry that satisfies the key is a fact about *now*, so the pointer
+      // to it is recorded as an observation, not as a durable receipt. The
+      // step's `reference` stays empty on purpose: `isCalendarObservedSkip`
+      // reads that absence to know this skip must be re-checked at confirm.
+      target.workoutScheduleId = decision.observation?.matches[0]?.workoutScheduleId ?? null
+      delete target.errorCode
+      return target
+    }
+    if (decision.action === 'blocked' || decision.action === 'duplicate_existing') {
+      target.status = 'not_attempted'
+      target.evidence = 'none'
+      target.errorCode = decision.blockedCode
+        ?? (decision.action === 'duplicate_existing'
+          ? WRITE_ERROR_CODES.DUPLICATE_EXISTING
+          : ref?.errorCode ?? WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN)
+      return target
+    }
+    // A journal-derived skip: the key is already satisfied by a durable receipt.
+    target.status = 'skipped'
+    target.evidence = 'response'
+    delete target.errorCode
+    return target
+  }
+
+  /**
    * Build a preview and persist the candidate set. Never writes to Garmin.
    * Returns `requiresConfirmation:false` with a safe no-op when every step is
    * blocked or already satisfied.
@@ -586,7 +1138,7 @@ export class WriteCoordinator {
         }
       }
 
-      const decisions = input.steps.map((step) => {
+      const journalDecisions = input.steps.map((step) => {
         const businessKey = scheduleBusinessKey(this.accountKey, step.workoutId, step.date)
         const verdict = findStepByBusinessKeySafe(document, businessKey)
         if (verdict.kind === 'unresolved') {
@@ -598,11 +1150,28 @@ export class WriteCoordinator {
           }
         }
         if (verdict.kind === 'satisfied') {
+          if (!claimsNewOperation(idemHash)) {
+            // An anonymous repeat: the caller asked for the same target again
+            // and the journal already holds the outcome. That receipt is the
+            // answer, and it is not weaker than a momentary reading.
+            return {
+              step,
+              businessKey,
+              action: 'skip_existing' as ScheduleAction,
+              found: { operation: verdict.operation, step: verdict.step },
+            }
+          }
+          // A caller-declared new operation. A `succeeded` step is a receipt for
+          // a request, never proof the entry it created is still on the
+          // calendar, and the owner may have deleted it in the Garmin app since.
+          // The complete fresh read below is what decides which world we are in:
+          // only it may lift the receipt (`supersedes`), and an unreadable or
+          // incomplete day leaves the receipt in force instead.
           return {
             step,
             businessKey,
-            action: 'skip_existing' as ScheduleAction,
-            found: { operation: verdict.operation, step: verdict.step },
+            action: 'write' as ScheduleAction,
+            historyClaim: { operation: verdict.operation, step: verdict.step },
           }
         }
         if (verdict.kind === 'retryable') {
@@ -616,12 +1185,26 @@ export class WriteCoordinator {
         return { step, businessKey, action: 'write' as ScheduleAction }
       })
 
+      // Fresh, uncached read in front of every entry that would write. An
+      // entry the journal already resolved keeps its journal verdict: re-reading
+      // it could only produce a weaker answer than the durable one.
+      const decisions = await this.applyPreflight(journalDecisions, {
+        timezone: input.timezone,
+        duplicatePolicy: input.duplicatePolicy,
+      })
+
       const writable = decisions.filter(decision => decision.action === 'write')
       if (writable.length === 0) {
+        // Nothing new may be armed. Point the caller at whatever answers the
+        // question: the fresh reading's own record when the journal holds a
+        // claim, otherwise the pinned blocker/receipt.
+        const anchor = decisions.find(decision => decision.found ?? decision.historyClaim)
         return {
           requiresConfirmation: false,
           steps: decisions.map(decision => this.toPreviewStep(decision)),
-          existingOperationId: decisions.find(decision => decision.found)?.found?.operation.operationId,
+          existingOperationId:
+            anchor?.found?.operation.operationId
+            ?? anchor?.historyClaim?.operation.operationId,
         }
       }
 
@@ -649,6 +1232,9 @@ export class WriteCoordinator {
       operation.kind = input.kind
       operation.requestHash = requestHash(safeRequest)
       operation.request = safeRequest
+      // Captured with the revision, never hashed into the request: it decides
+      // what an already-present entry is *called*, not whether a POST happens.
+      operation.duplicatePolicy = input.duplicatePolicy ?? 'skip'
       if (idemHash) operation.idempotencyKeyHash = idemHash
       operation.updatedAt = this.now().toISOString()
       // Persist EVERY requested item in the original order, including
@@ -662,6 +1248,18 @@ export class WriteCoordinator {
           : undefined
         if (decision.action === 'write') {
           if (reusedStep && reusedStep.status === 'prepared') return reusedStep
+          // A claim that survived the read as `clear` is falsified: this step
+          // replaces a durable receipt the calendar no longer corroborates. The
+          // record is what later lets the in-lock dispatch look past that
+          // receipt; without it the journal's own success would veto the write
+          // it just approved.
+          const falsified = decision.historyClaim && decision.readAt
+            ? {
+                operationId: decision.historyClaim.operation.operationId,
+                stepId: decision.historyClaim.step.stepId,
+                observedAt: decision.readAt,
+              }
+            : undefined
           return {
             stepId: reusedStep?.stepId ?? this.newStepId(),
             businessKey: decision.businessKey,
@@ -672,10 +1270,17 @@ export class WriteCoordinator {
             date: decision.step.date,
             evidence: 'none',
             attempts: reusedStep?.attempts ?? [],
+            ...(falsified ? { supersedes: falsified } : {}),
           }
         }
-        // Non-writable: anchor a reference to the blocker / satisfaction
-        // holder. The original batch's order and identity are preserved.
+        // Non-writable. Two shapes are possible and they are kept distinct on
+        // purpose:
+        //   - a journal verdict pins a read-only `reference` to the step that
+        //     blocks or satisfies this key — durable, and permanent;
+        //   - a fresh calendar verdict carries no reference at all, because
+        //     there is nothing in the journal to point at. That absence is the
+        //     marker `isCalendarObservedSkip` reads, and it is what makes the
+        //     skip re-checkable instead of eternal.
         const ref = decision.found
           ? {
               operationId: decision.found.operation.operationId,
@@ -685,29 +1290,18 @@ export class WriteCoordinator {
               errorCode: decision.found.step.errorCode,
             }
           : undefined
-        if (reusedStep) {
-          reusedStep.reference = ref
-          reusedStep.status = decision.action === 'blocked' ? 'not_attempted' : 'skipped'
-          reusedStep.errorCode = decision.action === 'blocked'
-            ? ref?.errorCode ?? WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN
-            : undefined
-          return reusedStep
-        }
-        return {
+        if (reusedStep) return this.applyNonWritable(reusedStep, decision, ref)
+        return this.applyNonWritable({
           stepId: this.newStepId(),
           businessKey: decision.businessKey,
           kind: 'schedule',
-          status: decision.action === 'blocked' ? 'not_attempted' : 'skipped',
+          status: 'skipped',
           attempt: 0,
           workoutId: decision.step.workoutId,
           date: decision.step.date,
-          evidence: decision.action === 'blocked' ? 'none' : 'response',
+          evidence: 'none',
           attempts: [],
-          ...(ref ? { reference: ref } : {}),
-          ...(decision.action === 'blocked'
-            ? { errorCode: ref?.errorCode ?? WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN }
-            : {}),
-        }
+        }, decision, ref)
       })
 
       document.operations[operation.operationId] = operation
@@ -756,6 +1350,15 @@ export class WriteCoordinator {
         if (step.status !== 'prepared') {
           // Either a non-writable entry (blocked / skipped) already finalized
           // at preview time, or a step mutated by an earlier confirm attempt.
+          // A calendar-observed skip is re-read first: it is a fact about *now*,
+          // and the approval covered "leave this one alone", not a write.
+          if (!halt) {
+            const stale = await this.recheckObservedSkip(document, operation, step)
+            if (stale) {
+              receipts.push(stale)
+              continue
+            }
+          }
           receipts.push(this.receiptFor(operation, step))
           continue
         }
@@ -803,7 +1406,17 @@ export class WriteCoordinator {
             receipts.push(this.blockedReceipt(holder.operation, step))
             continue
           }
-          if (holder.kind === 'satisfied') {
+          // A durable receipt only vetoes this dispatch while the journal has
+          // no reason to think it went stale. `step.supersedes` records exactly
+          // one such reason, taken under this operation's own approval: a
+          // complete read of the target day that did not show the entry. When
+          // the step supersedes the holder the block below is skipped so
+          // execution *falls through* to the dispatch path — it must not
+          // `continue`, which would skip this entry without a receipt and leave
+          // the caller with an empty result. Falling through is still safe: the
+          // fresh in-lock read below vetoes the POST if the entry is really
+          // there.
+          if (holder.kind === 'satisfied' && !this.supersedesHolder(step, holder)) {
             step.status = 'skipped'
             step.evidence = 'none'
             step.reference = {
@@ -818,7 +1431,15 @@ export class WriteCoordinator {
           }
         }
 
-        // PERSIST in_flight BEFORE dispatch. If this fails, nothing is sent.
+        // Fresh in-lock calendar read, then persist `in_flight` BEFORE the
+        // dispatch. The read can only veto; it never authorizes. If the
+        // pre-dispatch persist fails, nothing is sent.
+        const vetoed = await this.vetoDispatch(document, operation, step)
+        if (vetoed) {
+          receipts.push(vetoed)
+          continue
+        }
+
         step.status = 'in_flight'
         step.attempt += 1
         step.dispatchedAt = this.now().toISOString()
@@ -947,6 +1568,52 @@ export class WriteCoordinator {
   }
 
   /**
+   * Execute a confirmed *resume* — the step after `resume()` armed the safe
+   * remaining items under a new revision.
+   *
+   * Resume is not a second kind of write: it is the same operation, dispatched
+   * through the same per-kind path a first-time confirm uses, so the in-lock
+   * business-key recheck, the fresh pre-dispatch read, the single-dispatch rule
+   * and the halt semantics are all the ones already covered by tests. What
+   * resume adds is that the *set* of steps being dispatched was re-derived from
+   * the journal rather than supplied by the caller.
+   *
+   * The kind is read before the lock is taken by the delegate. That is sound
+   * because the delegate re-authorizes inside the lock against the
+   * confirmation's `requestHash` and `previewRevision`, and a preview that
+   * changes an operation's kind always rewrites one of the two: a stale
+   * delegation is therefore refused (`CONFIRMATION_STALE` /
+   * `CONFIRMATION_INVALID`) rather than dispatched down the wrong path.
+   */
+  async executeResume(
+    confirmation: WriteConfirmation,
+    writer: UnifiedCalendarWriter,
+    options: ExecuteScheduleOptions = {},
+  ): Promise<ScheduleExecution> {
+    const operation = await this.getOperation(confirmation.operationId)
+    if (!operation) {
+      throw new GarminWriteError(
+        WRITE_ERROR_CODES.OPERATION_NOT_FOUND,
+        'not_applied',
+        'No local write operation matches this confirmation for this account',
+      )
+    }
+    switch (operation.kind) {
+      case 'schedule':
+      case 'batch-schedule':
+        return await this.executeSchedule(confirmation, options)
+      case 'create':
+        return await this.executeCreate(confirmation, writer)
+      case 'unschedule':
+        return await this.executeUnschedule(confirmation, writer)
+      case 'create-and-schedule':
+        return await this.executeCreateAndSchedule(confirmation, writer)
+      default:
+        throw corrupt(`Operation kind cannot be resumed: ${String(operation.kind)}`)
+    }
+  }
+
+  /**
    * Preview the combined "create the template, then schedule it" flow.
    *
    * The two phases live in the *same* operation (`kind: 'create-and-schedule'`)
@@ -1019,7 +1686,16 @@ export class WriteCoordinator {
         // create a second template.
         throw corrupt('A satisfied create step is missing its resolved workoutId')
       }
-      if (createSatisfied && scheduleVerdict.kind === 'satisfied') {
+      // The schedule half is re-armable for exactly one reason: a complete read
+      // of its day did not show the entry, so the receipt that made it
+      // `succeeded` no longer describes the calendar. A receipt is proof Garmin
+      // accepted a request, never proof the entry is still there — otherwise one
+      // deletion in the Garmin app would block this template/day forever.
+      //
+      // That re-arm is not available to an anonymous repeat: without a
+      // caller-declared new operation the stored receipt *is* the answer, and it
+      // is returned as-is rather than re-read.
+      if (createSatisfied && scheduleVerdict.kind === 'satisfied' && !claimsNewOperation(idemHash)) {
         return {
           requiresConfirmation: false,
           existingOperationId: scheduleVerdict.operation.operationId,
@@ -1028,6 +1704,29 @@ export class WriteCoordinator {
             this.previewStepFromExisting(scheduleVerdict.step, scheduleVerdict.operation),
           ],
         }
+      }
+      let falsifiedSchedule:
+        | { decision: ScheduleDecision; claim: { operation: WriteOperation; step: WriteStep } }
+        | undefined
+      if (createSatisfied && scheduleVerdict.kind === 'satisfied') {
+        const claim = { operation: scheduleVerdict.operation, step: scheduleVerdict.step }
+        const decisions = await this.applyPreflight([{
+          step: { workoutId: knownWorkoutId as string, date: input.date },
+          businessKey: scheduleKey as string,
+          action: 'write' as ScheduleAction,
+          historyClaim: claim,
+        }], { timezone: requestTimezone(input.request) })
+        if (decisions[0].action !== 'write') {
+          return {
+            requiresConfirmation: false,
+            existingOperationId: scheduleVerdict.operation.operationId,
+            steps: [
+              this.previewStepFromExisting(createVerdict.step, createVerdict.operation),
+              this.previewStepFromExisting(scheduleVerdict.step, scheduleVerdict.operation),
+            ],
+          }
+        }
+        falsifiedSchedule = { decision: decisions[0], claim }
       }
 
       const safeRequest = stripIdempotencyKey(input.request)
@@ -1072,8 +1771,20 @@ export class WriteCoordinator {
       const existingScheduleStep = scheduleKey
         ? operation.steps.find(step => step.businessKey === scheduleKey)
         : undefined
+      let scheduleDecision: ScheduleDecision | undefined
+      let armedScheduleStep: WriteStep | undefined
       if (scheduleKey && knownWorkoutId && !existingScheduleStep && scheduleVerdict.kind !== 'satisfied') {
-        operation.steps.push({
+        // The template id is already known, so the schedule phase can be read
+        // before it is armed — exactly like a standalone schedule preview. When
+        // it is not known yet the phase is appended during execution instead,
+        // and the same read is taken there, inside the lock.
+        const decisions = await this.applyPreflight([{
+          step: { workoutId: knownWorkoutId, date: input.date },
+          businessKey: scheduleKey,
+          action: 'write' as ScheduleAction,
+        }], { timezone: requestTimezone(input.request) })
+        scheduleDecision = decisions[0]
+        armedScheduleStep = this.applyNonWritable({
           stepId: this.newStepId(),
           businessKey: scheduleKey,
           kind: 'schedule',
@@ -1083,7 +1794,30 @@ export class WriteCoordinator {
           date: input.date,
           evidence: 'none',
           attempts: [],
-        })
+        }, scheduleDecision)
+        operation.steps.push(armedScheduleStep)
+      } else if (scheduleKey && knownWorkoutId && existingScheduleStep && falsifiedSchedule) {
+        // The receipt above is kept untouched and a new step is armed beside
+        // it, carrying the complete-read evidence that makes it non-terminal.
+        // Rewriting the old step would destroy the historical receipt.
+        scheduleDecision = falsifiedSchedule.decision
+        armedScheduleStep = {
+          stepId: this.newStepId(),
+          businessKey: scheduleKey,
+          kind: 'schedule',
+          status: 'prepared',
+          attempt: 0,
+          workoutId: knownWorkoutId,
+          date: input.date,
+          evidence: 'none',
+          attempts: [],
+          supersedes: {
+            operationId: falsifiedSchedule.claim.operation.operationId,
+            stepId: falsifiedSchedule.claim.step.stepId,
+            observedAt: falsifiedSchedule.decision.readAt as string,
+          },
+        }
+        operation.steps.push(armedScheduleStep)
       }
 
       document.operations[operation.operationId] = operation
@@ -1104,7 +1838,11 @@ export class WriteCoordinator {
         previewSteps.push(this.toPreviewStep({ step: {}, businessKey: createKey, action: 'write' }, operation))
       }
       const appended = scheduleKey ? operation.steps.find(step => step.businessKey === scheduleKey) : undefined
-      if (appended) previewSteps.push(this.toPreviewStep({ step: {}, businessKey: scheduleKey as string, action: 'write' }, operation))
+      if (appended) {
+        previewSteps.push(scheduleDecision
+          ? this.toPreviewStep(scheduleDecision, operation)
+          : this.toPreviewStep({ step: {}, businessKey: scheduleKey as string, action: 'write' }, operation))
+      }
 
       return {
         operationId: operation.operationId,
@@ -1170,7 +1908,12 @@ export class WriteCoordinator {
       }
       const scheduleKey = scheduleBusinessKey(this.accountKey, resolvedWorkoutId, date)
 
-      let scheduleStep = operation.steps.find(step => step.businessKey === scheduleKey)
+      // A re-armed schedule step lives beside the `succeeded` receipt it
+      // replaces, so the armed one — not the first key match — is what this
+      // execution acts on.
+      let scheduleStep = operation.steps.find(
+        step => step.businessKey === scheduleKey && step.status === 'prepared',
+      ) ?? operation.steps.find(step => step.businessKey === scheduleKey)
       if (!scheduleStep) {
         const verdict = findStepByBusinessKeySafe(document, scheduleKey)
         scheduleStep = {
@@ -1215,6 +1958,13 @@ export class WriteCoordinator {
         const blocker = await this.recheckBusinessKey(document, operation, scheduleStep)
         if (blocker) {
           receipts.push(blocker)
+          return { operationId, receipts }
+        }
+        // Same fresh in-lock read as the batch path: it can veto this POST but
+        // can never authorize one that the confirmation did not cover.
+        const vetoed = await this.vetoDispatch(document, operation, scheduleStep)
+        if (vetoed) {
+          receipts.push(vetoed)
           return { operationId, receipts }
         }
         await this.dispatchSchedule(document, operation, scheduleStep, writer)
@@ -1404,6 +2154,9 @@ export class WriteCoordinator {
       return this.blockedReceipt(holder.operation, step)
     }
     if (holder.kind === 'satisfied') {
+      // See `executeSchedule`: a receipt this step was approved to replace no
+      // longer vetoes the dispatch. Anything else still does.
+      if (this.supersedesHolder(step, holder)) return undefined
       step.status = 'skipped'
       step.evidence = 'none'
       step.reference = {
@@ -1417,6 +2170,23 @@ export class WriteCoordinator {
       return this.receiptFor(operation, step)
     }
     return undefined
+  }
+
+  /**
+   * Whether this step carries a recorded, complete-read falsification of
+   * exactly the satisfied holder it is up against.
+   *
+   * Both ids must match: a `supersedes` entry names one specific receipt, so a
+   * step can never inherit permission to write past an unrelated success.
+   */
+  private supersedesHolder(
+    step: WriteStep,
+    holder: { operation: WriteOperation; step: WriteStep },
+  ): boolean {
+    const claim = step.supersedes
+    if (!claim) return false
+    return claim.operationId === holder.operation.operationId
+      && claim.stepId === holder.step.stepId
   }
 
   /** The canonical workout definition persisted for a create operation. */
@@ -1806,18 +2576,67 @@ export class WriteCoordinator {
         reason: decision.action === 'blocked' ? BLOCKED_REASON : SKIP_REASON,
       }
     }
-    const step = operation?.steps.find(candidate => candidate.businessKey === decision.businessKey)
+    const step = this.stepForDecision(operation, decision)
+    // When the decision came from a fresh reading and nothing else may be
+    // armed, no operation is persisted for it: there is nothing to write, so
+    // there is nothing to journal. The preview step is then projected from the
+    // decision itself rather than from a step that does not exist.
+    const status = step?.status
+      ?? (decision.action === 'skip_existing'
+        ? 'skipped'
+        : decision.action === 'blocked' || decision.action === 'duplicate_existing'
+          ? 'not_attempted'
+          : 'prepared')
+    const preflightReason = decision.observation
+      ? decision.observation.detail
+      : decision.blockedReason
+    const preflightCode = decision.action === 'duplicate_existing'
+      ? WRITE_ERROR_CODES.DUPLICATE_EXISTING
+      : decision.blockedCode
+    // A claim only counts as falsified when the fresh read actually cleared the
+    // target. If the read found the entry the step is a skip, and pointing the
+    // caller at a "superseded" operation would be wrong.
+    const supersededOperationId = step?.supersedes?.operationId
+      ?? (!decision.found && decision.action === 'skip_existing'
+        ? decision.historyClaim?.operation.operationId
+        : undefined)
     return {
       stepId: step?.stepId ?? '',
       workoutId: (decision.step.workoutId as string) ?? '',
       date: (decision.step.date as string) ?? '',
       kind: step?.kind === 'create' || step?.kind === 'unschedule' ? step.kind : 'schedule',
-      workoutScheduleId: step?.workoutScheduleId ?? undefined,
+      workoutScheduleId:
+        step?.workoutScheduleId ?? decision.observation?.matches[0]?.workoutScheduleId ?? undefined,
       action: decision.action,
-      status: step?.status ?? 'prepared',
+      status,
       operationId: operation?.operationId,
       resolvedWorkoutId: step?.workoutId,
+      ...(supersededOperationId ? { supersedesOperationId: supersededOperationId } : {}),
+      ...(preflightCode ? { errorCode: preflightCode } : {}),
+      ...(preflightReason
+        ? { reason: preflightReason }
+        : decision.action === 'skip_existing'
+          ? { reason: SKIP_REASON }
+          : {}),
     }
+  }
+
+  /**
+   * The step a preview decision acts on.
+   *
+   * One business key can carry more than one step: a schedule whose receipt was
+   * falsified is re-armed *beside* the old `succeeded` step rather than on top
+   * of it, so the historical receipt survives. A `write` decision therefore has
+   * to resolve to the armed step, not to whichever step happens to come first.
+   */
+  private stepForDecision(
+    operation: WriteOperation | undefined,
+    decision: ScheduleDecision,
+  ): WriteStep | undefined {
+    if (!operation) return undefined
+    const candidates = operation.steps.filter(step => step.businessKey === decision.businessKey)
+    if (decision.action !== 'write') return candidates[0]
+    return candidates.find(step => step.status === 'prepared') ?? candidates.at(-1)
   }
 
   private blockedReceipt(holder: WriteOperation, step: WriteStep): ScheduleStepReceipt {
@@ -1926,6 +2745,44 @@ export class WriteCoordinator {
 
 function corrupt(detail: string): GarminWriteError {
   return new GarminWriteError(WRITE_ERROR_CODES.STATE_CORRUPT, 'not_applied', detail)
+}
+
+/**
+ * Did this preview declare a *new* operation, or is it an anonymous repeat?
+ *
+ * A durable `succeeded` receipt is the answer to "schedule this target": the
+ * caller asked for it before and the journal holds the outcome. Answering that
+ * same question again out of the same journal is neither a new write nor a
+ * weaker statement than a momentary reading, so no calendar read is spent on
+ * it.
+ *
+ * An `idempotencyKey` that is not yet bound says the opposite. It is the
+ * caller's own statement that this is a distinct attempt — the situation the
+ * plan calls "新 key". Only there may a **complete** fresh read lift a stored
+ * receipt, because only there is the caller asking a question the receipt does
+ * not already answer: "is that entry *still* on my calendar?"
+ *
+ * A key that *is* already bound never reaches this question. It resolves to its
+ * own operation first (`reshowOrAdvance`) and returns that operation's receipt,
+ * which is the plan's "同 key 返回历史回执".
+ */
+function claimsNewOperation(idemHash: string | undefined): boolean {
+  return Boolean(idemHash)
+}
+
+/**
+ * The IANA timezone a persisted request was made in.
+ *
+ * A calendar day is only meaningful inside a timezone, and the journal is the
+ * only durable place that records which one the caller meant. `UTC` is the
+ * fallback for a request that never carried one — it is never inferred from the
+ * host, because the host clock is not evidence about the caller's intent.
+ */
+function requestTimezone(request: Record<string, unknown>): string {
+  const value = request.timezone
+  if (typeof value !== 'string') return RECONCILE_TIMEZONE
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : RECONCILE_TIMEZONE
 }
 
 /**

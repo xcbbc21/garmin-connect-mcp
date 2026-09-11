@@ -154,7 +154,7 @@ describe('write-state security: private journal path', () => {
   })
 
   POSIX_ONLY('refuses a journal file owned by another user', async () => {
-    const store = await seed()
+    await seed()
     const uid = currentEffectiveUid() ?? 0
     // The owner branch cannot be staged with a real file on a host that cannot
     // create foreign-owned files, so the traversal is injected. Everything else
@@ -291,7 +291,7 @@ describe('write-state security: private journal path', () => {
   })
 
   it('refuses a journal the ACL check rejects, and reads it when the ACL is clean', async () => {
-    const store = await seed()
+    await seed()
     const fileGuard = (acl: () => Promise<void>) => createPosixPrivateStateGuard({
       platform: 'darwin',
       lstat: async path => (basename(path) === 'operations.json' ? lstat(path) : lstat(path)),
@@ -481,7 +481,7 @@ describe('write-state security: bounded reads and corrupt content', () => {
   })
 
   it('reports a torn read when the file grows between stat and read', async () => {
-    const store = await seed()
+    await seed()
     const racy: WriteStoreFileSystem = {
       ...nodeStoreFileSystem,
       open: async (path, flags, mode) => {

@@ -23,6 +23,7 @@ import { GarminConnect } from 'garmin-connect'
 import { GarminClient } from '../src/client'
 import type { Config } from '../src/config'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 import { GarminWriteIdentityChangedError } from '../src/write-operations/errors'
 import { FileAccountLock } from '../src/write-operations/lock'
 import { accountKey } from '../src/write-operations/identity'
@@ -90,6 +91,10 @@ function makeHarness(options: { requestTimeoutMs: number; client?: GarminDataCli
     accountUsername: 'runner@example.test',
     accountRegion: 'global',
     stateDirectory,
+    // The reader is injected so the axios double below only ever sees *write*
+    // requests; a preflight read is a precondition, not part of what is under
+    // test here.
+    calendarReader: new FakeCalendar(),
   })
   return { service, client, stateDirectory }
 }

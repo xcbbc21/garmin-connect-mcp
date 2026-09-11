@@ -16,6 +16,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 
 const TIMEZONE = 'Asia/Shanghai'
 
@@ -60,6 +61,9 @@ function makeService(stateDirectory: string, counters: CallCounter) {
     accountUsername: 'runner@example.test',
     accountRegion: 'cn',
     stateDirectory,
+    // Explicit precondition: the account can read its calendar and the day is
+    // empty. A missing read capability would refuse the write instead.
+    calendarReader: new FakeCalendar(),
   })
   return { service, data }
 }

@@ -107,6 +107,14 @@ const stepShape = {
   attempts: z.array(attemptSchema).max(1_000),
   fingerprint: z.string().max(256).optional(),
   reference: referenceSchema.optional(),
+  supersedes: z
+    .object({
+      operationId: z.string().min(1).max(256),
+      stepId: z.string().min(1).max(256),
+      observedAt: isoDateTime,
+    })
+    .strict()
+    .optional(),
 }
 
 const v2StepSchema = z.object(stepShape).strict()
@@ -118,6 +126,7 @@ const operationShape = {
   requestHash: z.string().min(1).max(256),
   idempotencyKeyHash: z.string().min(1).max(256).optional(),
   confirmationExpiresAt: isoDateTime.optional(),
+  duplicatePolicy: z.enum(['skip', 'error']).optional(),
   request: z.record(z.unknown()),
   createdAt: isoDateTime,
   updatedAt: isoDateTime,

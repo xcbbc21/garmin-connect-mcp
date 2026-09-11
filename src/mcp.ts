@@ -124,6 +124,15 @@ const idempotencyKeySchema = z.string().min(1).max(128)
     'in-flight or unknown write. Not a permission token.',
   )
 
+const duplicatePolicySchema = z.enum(['skip', 'error']).optional()
+  .describe(
+    'What to do when a fresh calendar read shows this target is already scheduled. ' +
+    "'skip' (default) reports it as skipped without writing; 'error' reports it as " +
+    'duplicate_existing and still writes nothing. Neither option deletes or overwrites an ' +
+    'existing entry. The value is part of the confirmed request, so it must be the same on ' +
+    'the preview and confirm calls.',
+  )
+
 const READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -343,6 +352,7 @@ export function createMcpServer(
         'Set true only after the user explicitly approves the preview.',
       ),
       confirmationId: confirmationIdSchema.optional(),
+      idempotencyKey: idempotencyKeySchema,
     },
     (args: CreateWorkoutArgs) => invokeTool(() => service.createWorkout(args)),
     WRITE_ANNOTATIONS,
@@ -362,6 +372,7 @@ export function createMcpServer(
       timezone: timezoneSchema,
       ...confirmationSchema,
       idempotencyKey: idempotencyKeySchema,
+      duplicatePolicy: duplicatePolicySchema,
     },
     (args: ScheduleWorkoutArgs) => invokeTool(() => service.scheduleWorkout(args)),
     WRITE_ANNOTATIONS,
@@ -383,6 +394,7 @@ export function createMcpServer(
       timezone: timezoneSchema,
       ...confirmationSchema,
       idempotencyKey: idempotencyKeySchema,
+      duplicatePolicy: duplicatePolicySchema,
     },
     (args: BatchScheduleWorkoutArgs) => invokeTool(() => service.batchScheduleWorkouts(args)),
     WRITE_ANNOTATIONS,

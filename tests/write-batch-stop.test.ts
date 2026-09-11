@@ -23,6 +23,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 import {
   GarminWriteError,
   GarminWriteTransportError,
@@ -120,6 +121,9 @@ function makeHarness(options: {
     accountLock: lock,
     now: options.now,
     shutdownSignal: options.signal,
+    // Explicit precondition: the account can read its calendar and the day is
+    // empty. A missing read capability would refuse the write instead.
+    calendarReader: new FakeCalendar(),
     newOperationId: () => 'op-batch-1',
     newStepId: (() => { let n = 0; return () => `step-${++n}` })(),
   })

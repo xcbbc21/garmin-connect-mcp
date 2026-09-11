@@ -11,6 +11,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 import { accountKey, scheduleBusinessKey } from '../src/write-operations/identity'
 import { WriteCoordinator } from '../src/write-operations/coordinator'
 import { FileAccountLock } from '../src/write-operations/lock'
@@ -42,6 +43,9 @@ function makeService(stateDirectory: string, writer: jest.Mock) {
     accountUsername: 'runner@example.test',
     accountRegion: 'cn',
     stateDirectory,
+    // Explicit precondition: the account can read its calendar and the day is
+    // empty. A missing read capability would refuse the write instead.
+    calendarReader: new FakeCalendar(),
   })
   return { data, service }
 }

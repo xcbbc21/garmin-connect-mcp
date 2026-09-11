@@ -75,6 +75,27 @@ export interface WriteStep {
     workoutScheduleId?: string | null
     errorCode?: string
   }
+  /**
+   * The durable `succeeded` receipt this step was approved to *replace*, with
+   * the complete calendar read that did not show it.
+   *
+   * A Garmin write receipt proves the request was accepted, not that the entry
+   * is still on the calendar: a human can delete it afterwards, and the
+   * journal's own success would then block that workout/day forever. This
+   * record is the only thing that lets a later dispatch look past such a
+   * receipt — and it is written only when a *complete* read of the target day
+   * failed to find the entry, never on an absent, partial or unread calendar.
+   *
+   * It records *why* the old receipt stopped being terminal; it is not an
+   * authorization. The dispatch it belongs to is still vetoed by its own
+   * fresh in-lock read.
+   */
+  supersedes?: {
+    operationId: string
+    stepId: string
+    /** ISO instant of the complete read that did not show the target. */
+    observedAt: string
+  }
 }
 
 export interface WriteOperation {
@@ -107,6 +128,14 @@ export interface WriteOperation {
    * preview that issues a confirmation.
    */
   confirmationExpiresAt?: string
+  /**
+   * The duplicate policy this preview was taken under, captured so a later
+   * in-lock preflight reports the same thing the caller approved. Stored beside
+   * `previewRevision` rather than inside `request` on purpose: it changes what a
+   * "already there" finding is *called*, never whether a write is sent, so it
+   * must not perturb a request hash an older build already persisted.
+   */
+  duplicatePolicy?: DuplicatePolicy
   request: Record<string, unknown>
   createdAt: string
   updatedAt: string
@@ -119,6 +148,20 @@ export interface WriteOperation {
   manualReview?: { reason: string; detectedAt: string }
   steps: WriteStep[]
 }
+
+/**
+ * What a new dispatch should do when a fresh read already shows the target.
+ *
+ * This is a *reporting* switch, never an override switch: `'error'` means "tell
+ * me instead of quietly skipping", and neither value deletes, replaces or
+ * re-posts an entry. Same-day duplicates therefore get no force option at all —
+ * the only safe answers to "it is already there" are "leave it" and "refuse".
+ *
+ * It is captured with the preview revision rather than hashed into the request,
+ * so re-presenting the same request after an upgrade still resolves to the same
+ * operation instead of clashing with a hash computed by an older build.
+ */
+export type DuplicatePolicy = 'skip' | 'error'
 
 /** On-disk journal for one account. `revision` guards atomic replacement. */
 export interface OperationDocument {
@@ -211,6 +254,21 @@ export type BusinessHistoryVerdict =
   | { kind: 'retryable'; operation: WriteOperation; step: WriteStep }
   | { kind: 'absent' }
 
+/**
+ * Whether `candidate` is a later record than `current`.
+ *
+ * `updatedAt` is an ISO-8601 UTC instant, so a plain string comparison orders
+ * the records correctly. Ties fall back to the operation id so the aggregation
+ * stays deterministic for a hand-edited or clock-skewed journal instead of
+ * silently depending on object iteration order.
+ */
+function isNewerRecord(candidate: WriteOperation, current: WriteOperation): boolean {
+  if (candidate.updatedAt !== current.updatedAt) {
+    return candidate.updatedAt > current.updatedAt
+  }
+  return candidate.operationId > current.operationId
+}
+
 export function collectBusinessHistory(
   document: OperationDocument,
   businessKey: string,
@@ -228,8 +286,14 @@ export function collectBusinessHistory(
         // post-recovery state.
         return { kind: 'unresolved', operation, step }
       }
-      if (!satisfiedHit && SATISFIED_STEP_STATUSES.has(step.status)) {
-        satisfiedHit = { operation, step }
+      if (SATISFIED_STEP_STATUSES.has(step.status)) {
+        // More than one record can be satisfied for one key (a schedule that
+        // was re-created after a manual deletion leaves two). The *newest* one
+        // is the current state of the world; picking the first hit would report
+        // a superseded receipt as if it were the live one.
+        if (!satisfiedHit || isNewerRecord(operation, satisfiedHit.operation)) {
+          satisfiedHit = { operation, step }
+        }
         continue
       }
       if (!retryableHit && RETRYABLE_STEP_STATUSES.has(step.status)) {

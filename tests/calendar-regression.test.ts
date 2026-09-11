@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
 import { PublicToolError } from '../src/utils/errors'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 
 function fixture() {
   const data = {
@@ -16,6 +17,11 @@ function fixture() {
     // Each fixture gets a private journal: write records intentionally outlive
     // a single service instance, so a shared directory would leak across tests.
     stateDirectory: mkdtempSync(join(tmpdir(), 'garmin-calendar-regression-')),
+    // C7 precondition: a new schedule is only previewed against a calendar that
+    // can actually be read. These boundaries are about scheduling, so the
+    // account is stated to be readable and its days to be empty — an unreadable
+    // calendar would block instead, which `write-preflight.test.ts` covers.
+    calendarReader: new FakeCalendar(),
   })
   return { data, service }
 }

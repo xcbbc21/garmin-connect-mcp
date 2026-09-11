@@ -25,7 +25,6 @@ import { GarminWriteError, WRITE_ERROR_CODES } from '../src/write-operations/err
 import {
   CURRENT_JOURNAL_SCHEMA_VERSION,
   migrateJournalUnderLock,
-  migrateV1ToV2,
   parseOperationJournal,
 } from '../src/write-operations/migration'
 import { FileOperationStore, nodeStoreFileSystem, type WriteStoreFileSystem } from '../src/write-operations/store'

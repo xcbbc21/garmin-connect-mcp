@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,8 +26,19 @@ import { PublicToolError } from './utils/errors'
 import { parseLocalDate } from './utils/date'
 import { resolveStateDirectory } from './config'
 import { WriteCoordinator } from './write-operations/coordinator'
-import type { WriteConfirmation } from './write-operations/coordinator'
+import type {
+  DuplicatePolicy,
+  ReconcileReport,
+  ResumePreview,
+  ScheduleExecution,
+  ScheduleStepReceipt,
+  UnifiedCalendarWriter,
+  WriteConfirmation,
+} from './write-operations/coordinator'
+import type { CalendarSnapshot, CalendarRange } from './calendar/types'
+import type { CalendarLookup } from './write-operations/reconcile'
 import { FileAccountLock } from './write-operations/lock'
+import { GarminWriteError, WRITE_ERROR_CODES } from './write-operations/errors'
 import { FileOperationStore } from './write-operations/store'
 import {
   accountKey as deriveAccountKey,
@@ -66,6 +76,12 @@ export interface GarminDataClient {
   scheduleWorkout(workoutId: string, date: string): Promise<Record<string, unknown>>
   unscheduleWorkout(workoutScheduleId: string): Promise<void>
   getUserProfile(): Promise<unknown>
+  /**
+   * Fresh Garmin Calendar read. Optional on the type on purpose: a client
+   * without a verified read capability is expressible, and its absence blocks
+   * new writes instead of being treated as an empty calendar.
+   */
+  getCalendarRange?(range: CalendarRange): Promise<CalendarSnapshot>
 }
 
 export interface GarminToolServiceOptions {
@@ -86,6 +102,14 @@ export interface GarminToolServiceOptions {
    * omitted the platform default is resolved; it is never in-memory.
    */
   stateDirectory?: string
+  /**
+   * The calendar *reader* handed to the coordinator for preflight, reconcile
+   * and resume. It is deliberately a separate seam from the writer: the type
+   * has no schedule/create/unschedule method, so nothing on the read path can
+   * hide a re-send. When omitted, a client that implements `getCalendarRange`
+   * is used; when neither exists, writes are refused rather than sent blind.
+   */
+  calendarReader?: CalendarLookup
   /** Test seams: injected store/lock and deterministic ids/clock. */
   operationStore?: OperationStore
   accountLock?: AccountLock
@@ -218,6 +242,36 @@ export interface ScheduleWorkoutArgs {
   date: string
   timezone?: string
   idempotencyKey?: string
+  duplicatePolicy?: DuplicatePolicy
+  confirmed?: boolean
+  confirmationId?: string
+}
+
+/**
+ * One line a caller can act on without reading the whole report.
+ *
+ * It names only tools that exist in this build, and it never suggests re-sending
+ * a write: an unresolved attempt is resolved by reading, or by a human.
+ */
+function nextActionMessage(action: string, detail: string): string {
+  switch (action) {
+    case 'resume_garmin_write_operation':
+      return `${detail} Call resume_garmin_write_operation to preview the safe remaining steps.`
+    case 'reconcile_garmin_write_operation':
+      return `${detail} Call reconcile_garmin_write_operation again later, or read get_garmin_calendar directly.`
+    case 'manual_review':
+      return `${detail} Check the Garmin Calendar in the Garmin app before doing anything else.`
+    default:
+      return `${detail} No action is required.`
+  }
+}
+
+export interface ReconcileWriteOperationArgs {
+  operationId: string
+}
+
+export interface ResumeWriteOperationArgs {
+  operationId: string
   confirmed?: boolean
   confirmationId?: string
 }
@@ -226,6 +280,7 @@ export interface BatchScheduleWorkoutArgs {
   schedules: Array<{ workoutId: string; date: string }>
   timezone?: string
   idempotencyKey?: string
+  duplicatePolicy?: DuplicatePolicy
   confirmed?: boolean
   confirmationId?: string
 }
@@ -346,6 +401,23 @@ export class GarminToolService {
     return deriveAccountKey(this.options.accountUsername, this.options.accountRegion)
   }
 
+  /**
+   * The reader the coordinator may use, or `undefined` when this account has no
+   * verified way to read the Garmin Calendar.
+   *
+   * `undefined` is a meaningful answer: preflight turns it into
+   * `CALENDAR_QUERY_UNSUPPORTED` and refuses the write. The one thing it must
+   * never become is "the calendar is empty".
+   */
+  private calendarReader(): CalendarLookup | undefined {
+    if (this.options.calendarReader) return this.options.calendarReader
+    const client = this.client
+    if (typeof client.getCalendarRange !== 'function') return undefined
+    return {
+      getCalendarRange: range => client.getCalendarRange!(range),
+    }
+  }
+
   private writeCoordinator(): WriteCoordinator {
     if (!this.coordinator) {
       const accountKey = this.writeAccountKey()
@@ -364,6 +436,7 @@ export class GarminToolService {
             }
           },
         },
+        calendarReader: this.calendarReader(),
         now: this.options.now,
         newOperationId: this.options.newOperationId,
         newStepId: this.options.newStepId,
@@ -662,7 +735,13 @@ export class GarminToolService {
   }
 
   async createWorkout(args: CreateWorkoutArgs): Promise<Record<string, unknown>> {
-    const { confirmed, confirmationId, ...definition } = args
+    // `idempotencyKey` is caller metadata, not part of the workout definition:
+    // it must never reach the definition validator, the template fingerprint, or
+    // the persisted request. Leaving it in `definition` used to fail validation
+    // ("unknown field") and would otherwise have leaked the raw value into the
+    // journal payload.
+    const { confirmed, confirmationId, idempotencyKey, ...definition } = args
+    assertIdempotencyKey(idempotencyKey)
     const validationError = validateWorkoutDef(definition)
     if (validationError) {
       throw new PublicToolError(`Invalid workout definition: ${validationError}`)
@@ -678,7 +757,7 @@ export class GarminToolService {
     if (confirmed !== true) {
       const preview = await coordinator.previewCreate({
         request: canonicalRequest,
-        idempotencyKey: assertIdempotencyKey(args.idempotencyKey),
+        idempotencyKey: assertIdempotencyKey(idempotencyKey),
         businessKey,
         fingerprint,
       })
@@ -722,7 +801,7 @@ export class GarminToolService {
       this.resolveConfirmation(confirmationId, canonicalRequest),
       { addWorkout: () => this.client.addWorkout(buildGarminWorkout(definition)) as unknown as Promise<{ workoutId: string | number }> },
     )
-    const receipt = execution.receipts[0]
+    const receipt = this.receiptAt(execution, 0, 'create')
     if (receipt.status === 'succeeded') {
       return {
         success: true,
@@ -776,6 +855,7 @@ export class GarminToolService {
         request: canonicalRequest,
         steps: [{ workoutId: request.workoutId, date: request.date }],
         idempotencyKey,
+        duplicatePolicy: args.duplicatePolicy,
       })
       const step = preview.steps[0]
       if (!preview.requiresConfirmation) return this.scheduleNoOpResponse(request, step)
@@ -797,7 +877,27 @@ export class GarminToolService {
       this.resolveConfirmation(args.confirmationId, canonicalRequest),
       { signal: this.options.shutdownSignal },
     )
-    return this.scheduleReceiptResponse(execution.receipts[0], request)
+    return this.scheduleReceiptResponse(this.receiptAt(execution, 0, 'schedule'), request)
+  }
+
+  /**
+   * The single receipt a confirmed one-step operation must produce.
+   *
+   * A confirmation names an operation and a revision, so a confirmed dispatch
+   * always has exactly one step to report. If the journal no longer holds it,
+   * nothing was sent and the honest answer is a state problem — not a
+   * `TypeError` escaping from a public tool.
+   */
+  private receiptAt(execution: ScheduleExecution, index: number, label: string): ScheduleStepReceipt {
+    const receipt = execution.receipts[index]
+    if (!receipt) {
+      throw new GarminWriteError(
+        WRITE_ERROR_CODES.STATE_CORRUPT,
+        'not_applied',
+        `The confirmed operation records no ${label} step to report; nothing was sent to Garmin`,
+      )
+    }
+    return receipt
   }
 
   private scheduleNoOpResponse(
@@ -883,6 +983,7 @@ export class GarminToolService {
         request: canonicalRequest,
         steps: request.schedules,
         idempotencyKey,
+        duplicatePolicy: args.duplicatePolicy,
       })
       if (!preview.requiresConfirmation) {
         return {
@@ -1171,7 +1272,7 @@ export class GarminToolService {
       this.resolveConfirmation(args.confirmationId, request),
       { unschedule: (id: string) => this.client.unscheduleWorkout(id) },
     )
-    const receipt = execution.receipts[0]
+    const receipt = this.receiptAt(execution, 0, 'unschedule')
     if (receipt.status === 'succeeded') {
       return {
         success: true,
@@ -1206,6 +1307,187 @@ export class GarminToolService {
    * nothing is stored in this process, so the handle keeps working after a
    * restart and is invalidated in every process when the revision advances.
    */
+  /**
+   * Ask the coordinator to re-read what an operation is still unsure about.
+   *
+   * `readOnlyHint:false` is honest about what this does: it takes no Garmin
+   * write, but it does record local observations. It never re-sends, never
+   * deletes, and never turns an observation into a success — an `unknown`
+   * attempt stays unresolved until a real receipt arrives.
+   */
+  async reconcileWriteOperation(
+    args: ReconcileWriteOperationArgs,
+  ): Promise<Record<string, unknown>> {
+    const operationId = validateOpaqueId('operationId', args.operationId)
+    const coordinator = await this.writeCoordinatorReady()
+    const report: ReconcileReport = await coordinator.reconcile(operationId)
+    return {
+      operationId: report.operationId,
+      kind: report.kind,
+      readsIssued: report.readsIssued,
+      readLimit: report.readLimit,
+      budgetMs: report.budgetMs,
+      maxReads: report.maxReads,
+      observations: report.observations,
+      unreadable: report.unreadable,
+      deferred: report.deferred,
+      // A read that failed is the reason the answer is "look again later". Losing
+      // it here would leave the caller with a next action and no cause.
+      failures: report.failures ?? [],
+      candidates: report.candidates,
+      refusals: report.refusals,
+      manualReviewRequired: report.manualReviewRequired,
+      nextAction: report.nextAction,
+      nextActionDetail: report.nextActionDetail,
+      wroteToGarmin: false,
+      message: nextActionMessage(report.nextAction, report.nextActionDetail),
+    }
+  }
+
+  /**
+   * Derive the safe remaining steps of a journaled operation and, once the
+   * caller approves the preview, dispatch them.
+   *
+   * There is no payload parameter. Dates, workout ids and template definitions
+   * all come from the journal record, so a resume can never be used to move a
+   * write to a different day or swap the template — that would need a new
+   * preview, not a recovery.
+   */
+  async resumeWriteOperation(
+    args: ResumeWriteOperationArgs,
+  ): Promise<Record<string, unknown>> {
+    const operationId = validateOpaqueId('operationId', args.operationId)
+    const coordinator = await this.writeCoordinatorReady()
+
+    if (args.confirmed !== true) {
+      const preview: ResumePreview = await coordinator.resume(operationId)
+      const steps = preview.steps.map(step => ({
+        stepId: step.stepId,
+        kind: step.kind,
+        action: step.action,
+        status: step.status,
+        workoutId: step.workoutId,
+        date: step.date,
+        workoutScheduleId: step.workoutScheduleId ?? null,
+        ...(step.errorCode ? { errorCode: step.errorCode } : {}),
+      }))
+      if (!preview.requiresConfirmation) {
+        return {
+          success: steps.every(step => step.action === 'skip_existing' || step.status === 'succeeded'),
+          requiresConfirmation: false,
+          operationId,
+          previewRevision: preview.previewRevision,
+          steps,
+          candidates: preview.candidates,
+          refusals: preview.refusals,
+          message:
+            'Nothing can be safely re-armed for this operation. Satisfied entries keep their '
+            + 'durable receipts and unresolved ones need reconcile, not a re-send.',
+        }
+      }
+      return {
+        success: false,
+        requiresConfirmation: true,
+        confirmationId: this.issueConfirmation(operationId, preview.previewRevision),
+        operationId,
+        previewRevision: preview.previewRevision,
+        preview: steps,
+        candidates: preview.candidates,
+        refusals: preview.refusals,
+        message:
+          'Review the steps this resume would arm, then call resume_garmin_write_operation '
+          + 'again with confirmed=true and this confirmationId. Only steps proven never to have '
+          + 'applied are armed; unknown outcomes are never re-sent.',
+      }
+    }
+
+    const execution = await coordinator.executeResume(
+      await this.resolveStoredConfirmation(args.confirmationId, coordinator),
+      this.resumeWriter(),
+      { signal: this.options.shutdownSignal },
+    )
+    const results = execution.receipts.map(receipt => ({
+      success: receipt.success,
+      stepId: receipt.stepId,
+      status: receipt.status,
+      evidence: receipt.evidence,
+      desiredStateSatisfied: receipt.desiredStateSatisfied,
+      workoutId: receipt.workoutId ?? null,
+      date: receipt.date ?? null,
+      workoutScheduleId: receipt.workoutScheduleId ?? null,
+      canResume: receipt.canResume,
+      manualReviewRequired: receipt.manualReviewRequired,
+      ...(receipt.errorCode ? { errorCode: receipt.errorCode } : {}),
+      ...(receipt.nextAction ? { nextAction: receipt.nextAction } : {}),
+      ...(receipt.message ? { message: receipt.message } : {}),
+    }))
+    return {
+      success: results.every(result => result.status === 'succeeded' || result.status === 'skipped'),
+      operationId: execution.operationId,
+      resumed: true,
+      total: results.length,
+      unknownCount: results.filter(result => result.status === 'unknown' || result.status === 'in_flight').length,
+      notAttemptedCount: results.filter(result => result.status === 'not_attempted').length,
+      results,
+      message: 'Resumed steps were dispatched at most once each. Re-query the operation for the durable outcome.',
+    }
+  }
+
+  /**
+   * A resume confirmation names a *stored* request, not a caller-supplied one.
+   *
+   * The approval binding for a resume is the preview revision: `resume()` bumps
+   * it, which invalidates every handle minted before it. The request hash is
+   * read back from the journal precisely because the caller cannot supply a
+   * payload here, so there is nothing to bind it against; the coordinator still
+   * checks both fields under the lock.
+   */
+  private async resolveStoredConfirmation(
+    confirmationId: string | undefined,
+    coordinator: WriteCoordinator,
+  ): Promise<WriteConfirmation> {
+    const decoded = decodeConfirmationId(confirmationId)
+    if (!decoded) {
+      throw new PublicToolError(
+        'Invalid calendar confirmation: pass the confirmationId returned by the resume preview',
+      )
+    }
+    const operation = await coordinator.getOperation(decoded.operationId)
+    if (!operation) {
+      throw new PublicToolError(
+        'No local write operation matches this confirmation for this account',
+      )
+    }
+    return { ...decoded, requestHash: operation.requestHash }
+  }
+
+  /**
+   * The writer a resume is allowed to use.
+   *
+   * All three verbs are here because a resume may re-arm a create phase, a
+   * schedule phase or an unschedule — but the coordinator only ever calls the
+   * verb that matches the journaled step kind, and every definition it sends
+   * comes from the journal, never from this layer.
+   */
+  private resumeWriter(): UnifiedCalendarWriter {
+    return {
+      schedule: async (workoutId, date) => {
+        const result = await this.client.scheduleWorkout(workoutId, date)
+        const id = result?.workoutScheduleId
+        return {
+          workoutScheduleId: typeof id === 'string' || typeof id === 'number' ? String(id) : null,
+        }
+      },
+      addWorkout: async definition =>
+        await this.client.addWorkout(
+          buildGarminWorkout(definition as unknown as WorkoutDef),
+        ) as unknown as { workoutId: string | number },
+      unschedule: async (workoutScheduleId) => {
+        await this.client.unscheduleWorkout(workoutScheduleId)
+      },
+    }
+  }
+
   private issueConfirmation(operationId: string, previewRevision: number): string {
     return encodeConfirmationId(operationId, previewRevision)
   }

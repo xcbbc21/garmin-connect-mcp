@@ -7,6 +7,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 
 const TIMEZONE = 'Asia/Shanghai'
 
@@ -24,14 +25,19 @@ function makeService(stateDirectory: string, overrides: Partial<GarminDataClient
     getWorkouts: jest.fn().mockResolvedValue([]),
     ...overrides,
   }
+  // Every write now stands behind a fresh read of the target day. This fixture
+  // is the explicit precondition "the account can read its calendar and the day
+  // is empty" — never an implicit absence of a read capability.
+  const calendar = new FakeCalendar()
   const service = new GarminToolService(data as GarminDataClient, {
     activityDetail: 'compact',
     fitDownloadDir: '',
     accountUsername: 'runner@example.test',
     accountRegion: 'cn',
     stateDirectory,
+    calendarReader: calendar,
   })
-  return { data, service, writer }
+  return { data, service, writer, calendar }
 }
 
 describe('createAndScheduleWorkout routes through the coordinator', () => {

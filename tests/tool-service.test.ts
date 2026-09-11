@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { zipSync } from 'fflate'
 import type { GarminDataClient } from '../src/tool-service'
 import { GarminToolService } from '../src/tool-service'
+import { FakeCalendar } from './fixtures/calendar/fake-calendar'
 
 jest.mock('node:fs/promises', () => {
   const actual = jest.requireActual<typeof import('node:fs/promises')>('node:fs/promises')
@@ -1864,6 +1865,10 @@ describe('GarminToolService', () => {
       fitDownloadDir: '/tmp/garmin-fit-service-test-output',
       accountUsername: 'runner@example.com',
       accountRegion: 'global',
+      // C7 precondition: no schedule is previewed against an unread calendar.
+      // An empty but *complete* read is what a verified-capable account with a
+      // clear day looks like; a missing reader blocks instead.
+      calendarReader: new FakeCalendar(),
     })
 
     const request = {
@@ -1899,6 +1904,7 @@ describe('GarminToolService', () => {
       fitDownloadDir: '/tmp/garmin-fit-service-test-output',
       accountUsername: 'runner@example.com',
       accountRegion: 'global',
+      calendarReader: new FakeCalendar(),
     })
 
     await expect((service as any).batchScheduleWorkouts({
@@ -1930,6 +1936,7 @@ describe('GarminToolService', () => {
       fitDownloadDir: '/tmp/garmin-fit-service-test-output',
       accountUsername: 'runner@example.com',
       accountRegion: 'global',
+      calendarReader: new FakeCalendar(),
     })
     const request = {
       schedules: [
@@ -1966,6 +1973,7 @@ describe('GarminToolService', () => {
       fitDownloadDir: '/tmp/garmin-fit-service-test-output',
       accountUsername: 'runner@example.com',
       accountRegion: 'global',
+      calendarReader: new FakeCalendar(),
     })
     const request = {
       date: '2026-09-15',
