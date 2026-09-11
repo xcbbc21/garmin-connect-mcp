@@ -55,7 +55,7 @@ describe('built MCP over child-process stdio', () => {
     }
   }, process.platform === 'win32' ? 120_000 : 15_000)
 
-  it('executes a simulated Calendar write only after confirmation and rejects replay over stdio', async () => {
+  it('executes a simulated Calendar write only after confirmation and never re-dispatches on replay over stdio', async () => {
     // StdioClientTransport sanitizes the child environment, so the write journal
     // must be pointed at a private directory explicitly instead of letting the
     // child fall back to the platform default.
@@ -80,8 +80,17 @@ describe('built MCP over child-process stdio', () => {
       const confirmed = { ...request, confirmed: true, confirmationId: preview.confirmationId }
       const result = toolJson(await client.callTool({ name: 'schedule_garmin_workout', arguments: confirmed }))
       expect(result).toMatchObject({ success: true, workoutScheduleId: '1' })
-      const replay = await client.callTool({ name: 'schedule_garmin_workout', arguments: confirmed })
-      expect(replay.isError).toBe(true)
+      const replay = toolJson(await client.callTool({ name: 'schedule_garmin_workout', arguments: confirmed }))
+      // A re-confirm is answered with the durable receipt, not with a second
+      // dispatch. The fixture hands out a fresh id per call, so seeing the same
+      // id again is the duplicate-write check — an error would prove nothing
+      // about whether the POST happened twice.
+      expect(replay).toMatchObject({
+        success: true,
+        status: 'succeeded',
+        desiredStateSatisfied: true,
+        workoutScheduleId: '1',
+      })
       // A second preview for the same workout and date is deduplicated.
       const deduped = toolJson(await client.callTool({
         name: 'schedule_garmin_workout', arguments: request,

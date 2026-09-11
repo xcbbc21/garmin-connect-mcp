@@ -451,8 +451,9 @@
           },
           "confirmationId": {
             "type": "string",
-            "format": "uuid",
-            "description": "One-time ID returned by the matching preview call."
+            "maxLength": 256,
+            "pattern": "^[^\\s:]+:\\d{1,9}$",
+            "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
           }
         },
         "required": [
@@ -501,8 +502,9 @@
           },
           "confirmationId": {
             "type": "string",
-            "format": "uuid",
-            "description": "One-time ID returned by the matching preview call."
+            "maxLength": 256,
+            "pattern": "^[^\\s:]+:\\d{1,9}$",
+            "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
           },
           "idempotencyKey": {
             "type": "string",
@@ -572,8 +574,9 @@
           },
           "confirmationId": {
             "type": "string",
-            "format": "uuid",
-            "description": "One-time ID returned by the matching preview call."
+            "maxLength": 256,
+            "pattern": "^[^\\s:]+:\\d{1,9}$",
+            "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
           },
           "idempotencyKey": {
             "type": "string",
@@ -751,8 +754,9 @@
           },
           "confirmationId": {
             "type": "string",
-            "format": "uuid",
-            "description": "One-time ID returned by the matching preview call."
+            "maxLength": 256,
+            "pattern": "^[^\\s:]+:\\d{1,9}$",
+            "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
           }
         },
         "required": [
@@ -790,8 +794,9 @@
           },
           "confirmationId": {
             "type": "string",
-            "format": "uuid",
-            "description": "One-time ID returned by the matching preview call."
+            "maxLength": 256,
+            "pattern": "^[^\\s:]+:\\d{1,9}$",
+            "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
           }
         },
         "required": [

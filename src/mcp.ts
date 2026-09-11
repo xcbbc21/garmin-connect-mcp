@@ -91,13 +91,28 @@ const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
   .describe('Local Garmin Calendar date in YYYY-MM-DD format')
 const timezoneSchema = z.string().min(1).max(100).optional()
   .describe('IANA timezone used to interpret date, e.g. Asia/Shanghai; defaults to the MCP host timezone')
+/**
+ * A confirmation handle is revision-bound: `<operationId>:<previewRevision>`,
+ * exactly as `encodeConfirmationId` builds it. The revision is what makes a
+ * handle unusable once the operation is re-previewed, so the wire schema has to
+ * accept the shape this server actually issues — a UUID-only schema rejects
+ * every handle it hands out, which is what a client echoing back the returned
+ * value would hit. `decodeConfirmationId` stays the authority on the contents;
+ * this pattern only rejects values it could never accept, and does so before
+ * the service runs.
+ */
+const confirmationIdSchema = z.string().max(256)
+  .regex(
+    /^[^\s:]+:\d{1,9}$/,
+    'Expected the confirmationId returned by the matching preview call, as <operationId>:<previewRevision>',
+  )
+  .describe('One-time handle returned by the matching preview call, as <operationId>:<previewRevision>.')
+
 const confirmationSchema = {
   confirmed: z.boolean().optional().describe(
     'Set true only after the user explicitly approves the returned preview.',
   ),
-  confirmationId: z.string().uuid().optional().describe(
-    'One-time ID returned by the matching preview call.',
-  ),
+  confirmationId: confirmationIdSchema.optional(),
 }
 
 const idempotencyKeySchema = z.string().min(1).max(128)
@@ -327,9 +342,7 @@ export function createMcpServer(
       confirmed: z.boolean().optional().describe(
         'Set true only after the user explicitly approves the preview.',
       ),
-      confirmationId: z.string().uuid().optional().describe(
-        'One-time ID returned by the matching preview call.',
-      ),
+      confirmationId: confirmationIdSchema.optional(),
     },
     (args: CreateWorkoutArgs) => invokeTool(() => service.createWorkout(args)),
     WRITE_ANNOTATIONS,

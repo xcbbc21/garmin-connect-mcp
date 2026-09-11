@@ -3,6 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js'
 import { createMcpServer, standaloneConfig } from '../src/mcp'
 import { GarminAuthenticationRequiredError } from '../src/utils/errors'
+import { encodeConfirmationId } from '../src/write-operations/identity'
 
 describe('MCP adapter', () => {
   it('exposes calendar scheduling tools with write annotations and strict schemas', async () => {
@@ -203,7 +204,7 @@ describe('MCP adapter', () => {
     const service = serviceStub()
     service.scheduleWorkout.mockResolvedValue({
       requiresConfirmation: true,
-      confirmationId: 'a0f7d8e1-172e-4e98-8e83-0c05de15a8a8',
+      confirmationId: encodeConfirmationId('a0f7d8e1-172e-4e98-8e83-0c05de15a8a8', 0),
     })
     const server = createMcpServer(service as any)
     const client = new Client({ name: 'test-client', version: '1.0.0' })
@@ -225,6 +226,64 @@ describe('MCP adapter', () => {
         timezone: 'Asia/Shanghai',
       })
       expect(result.isError).not.toBe(true)
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  it('accepts the revision-bound confirmation handle the service issues', async () => {
+    const service = serviceStub()
+    service.scheduleWorkout.mockResolvedValue({ success: true, workoutScheduleId: '1' })
+    const server = createMcpServer(service as any)
+    const client = new Client({ name: 'test-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    const operationId = 'a0f7d8e1-172e-4e98-8e83-0c05de15a8a8'
+    const handle = encodeConfirmationId(operationId, 0)
+
+    try {
+      // The handle the service issues is `<operationId>:<previewRevision>`, so a
+      // client that echoes back the preview's own confirmationId has to survive
+      // the argument layer. A UUID-only schema rejected it before the service ran.
+      const accepted = await client.callTool({
+        name: 'schedule_garmin_workout',
+        arguments: {
+          workoutId: 'workout-42',
+          date: '2026-09-15',
+          confirmed: true,
+          confirmationId: handle,
+        },
+      })
+      expect(accepted.isError).not.toBe(true)
+      expect(service.scheduleWorkout).toHaveBeenLastCalledWith(expect.objectContaining({
+        confirmed: true,
+        confirmationId: handle,
+      }))
+
+      // Shapes this server can never mint are refused before dispatch rather
+      // than reaching the service: a bare operation id carries no bound
+      // revision, so it cannot authorize a write.
+      for (const confirmationId of [
+        operationId,
+        `${operationId}:`,
+        `${operationId}:x`,
+        `${operationId}:0:1`,
+        `:0`,
+      ]) {
+        const rejected = await client.callTool({
+          name: 'schedule_garmin_workout',
+          arguments: {
+            workoutId: 'workout-42',
+            date: '2026-09-15',
+            confirmed: true,
+            confirmationId,
+          },
+        })
+        expect(rejected.isError).toBe(true)
+        expect(JSON.stringify(rejected)).toContain('confirmationId')
+      }
     } finally {
       await client.close()
       await server.close()
