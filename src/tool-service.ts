@@ -27,15 +27,21 @@ import { PublicToolError } from './utils/errors'
 import { parseLocalDate } from './utils/date'
 import { resolveStateDirectory } from './config'
 import { WriteCoordinator } from './write-operations/coordinator'
+import type { WriteConfirmation } from './write-operations/coordinator'
 import { FileAccountLock } from './write-operations/lock'
 import { FileOperationStore } from './write-operations/store'
 import {
   accountKey as deriveAccountKey,
   assertIdempotencyKey,
+  createBusinessKey,
+  decodeConfirmationId,
+  encodeConfirmationId,
   requestHash,
+  unscheduleBusinessKey,
   workoutDefinitionFingerprint,
 } from './write-operations/identity'
 import type { OperationStore } from './write-operations/store'
+import { SATISFIED_STEP_STATUSES } from './write-operations/types'
 import type { AccountLock } from './write-operations/lock'
 import {
   formatActivity,
@@ -67,6 +73,14 @@ export interface GarminToolServiceOptions {
   fitDownloadDir: string
   accountUsername: string
   accountRegion: GarminRegion
+  /**
+   * Aborted when the owning process is shutting down.
+   *
+   * A cancellation only means this process will not send the *next* entry: it
+   * is never proof that Garmin rolled anything back, so already-dispatched
+   * entries keep whatever real outcome they reported.
+   */
+  shutdownSignal?: AbortSignal
   /**
    * Absolute directory for the account-scoped write journal and lock. When
    * omitted the platform default is resolved; it is never in-memory.
@@ -196,6 +210,7 @@ export interface DownloadActivityFitResult {
 export type CreateWorkoutArgs = WorkoutDef & {
   confirmed?: boolean
   confirmationId?: string
+  idempotencyKey?: string
 }
 
 export interface ScheduleWorkoutArgs {
@@ -221,34 +236,26 @@ export interface CreateAndScheduleWorkoutArgs {
   timezone?: string
   confirmed?: boolean
   confirmationId?: string
+  idempotencyKey?: string
 }
 
 export interface UnscheduleWorkoutArgs {
   workoutScheduleId: string
   confirmed?: boolean
   confirmationId?: string
+  idempotencyKey?: string
 }
 
-interface PendingWorkoutConfirmation {
-  definitionHash: string
-  expiresAt: number
-}
-
-interface PendingCalendarConfirmation {
-  requestHash: string
-  expiresAt: number
-  /** Bound operation for the coordinated schedule path. */
-  operationId?: string
-}
-
-const CONFIRMATION_TTL_MS = 10 * 60 * 1000
-const MAX_PENDING_CONFIRMATIONS = 20
-
+/**
+ * Approval handles are derived from persisted state, not from process memory:
+ * `confirmationId` is `<operationId>:<previewRevision>`. Any process that can
+ * read the account journal can resolve one, and a re-preview bumps the
+ * revision so an earlier handle stops working everywhere.
+ */
 export class GarminToolService {
-  private readonly workoutConfirmations = new Map<string, PendingWorkoutConfirmation>()
-  private readonly calendarConfirmations = new Map<string, PendingCalendarConfirmation>()
   private readonly dateRequestLimiter = new AsyncSemaphore(4)
   private coordinator?: WriteCoordinator
+  private journalMigration?: Promise<string[]>
 
   constructor(
     private readonly client: GarminDataClient,
@@ -335,9 +342,13 @@ export class GarminToolService {
    * state directory. The store and lock are account-scoped and persisted; they
    * are never replaced by in-memory stand-ins in production.
    */
+  private writeAccountKey(): string {
+    return deriveAccountKey(this.options.accountUsername, this.options.accountRegion)
+  }
+
   private writeCoordinator(): WriteCoordinator {
     if (!this.coordinator) {
-      const accountKey = deriveAccountKey(this.options.accountUsername, this.options.accountRegion)
+      const accountKey = this.writeAccountKey()
       const stateDirectory = this.options.stateDirectory
         ?? resolveStateDirectory(process.env.GARMIN_STATE_DIR)
       this.coordinator = new WriteCoordinator({
@@ -359,6 +370,36 @@ export class GarminToolService {
       })
     }
     return this.coordinator
+  }
+
+  /**
+   * The coordinator, with any pending v1 -> v2 journal upgrade already
+   * committed under the account lock.
+   *
+   * Every write path goes through here, so an old journal is upgraded before
+   * the first preview reads a request hash -- the alternative is a preview bound
+   * to a v1 hash that the persisted v2 file would then disagree with. The
+   * migration is a single bounded read once the journal is current, and a
+   * failure is surfaced instead of being retried: a journal that cannot be
+   * migrated is one whose confirmation bindings cannot be trusted.
+   *
+   * Read-only local queries deliberately use `writeCoordinator()` directly:
+   * they see the migrated document in memory and must never trigger a write.
+   */
+  private async writeCoordinatorReady(): Promise<WriteCoordinator> {
+    const coordinator = this.writeCoordinator()
+    if (!this.journalMigration) {
+      this.journalMigration = coordinator.migrateJournal()
+        .then(report => report.warnings)
+        .catch((error: unknown) => {
+          // Do not memoize a failure: a later call should be able to retry a
+          // transiently unreadable journal rather than being stuck forever.
+          this.journalMigration = undefined
+          throw error
+        })
+    }
+    await this.journalMigration
+    return coordinator
   }
 
   async getActivities(args: ActivityArgs = {}): Promise<unknown[]> {
@@ -621,11 +662,46 @@ export class GarminToolService {
       throw new PublicToolError(`Invalid workout definition: ${validationError}`)
     }
 
+    // The workout definition is the fingerprint the coordinator uses to
+    // dedupe across restarts. The confirmationId is the operationId.
+    const fingerprint = workoutDefinitionFingerprint(definition as unknown as Record<string, unknown>)
+    const canonicalRequest = { operation: 'create', definition }
+    const businessKey = createBusinessKey(this.writeAccountKey(), fingerprint)
+    const coordinator = await this.writeCoordinatorReady()
+
     if (confirmed !== true) {
-      const issuedConfirmationId = this.issueWorkoutConfirmation(definition)
+      const preview = await coordinator.previewCreate({
+        request: canonicalRequest,
+        idempotencyKey: assertIdempotencyKey(args.idempotencyKey),
+        businessKey,
+        fingerprint,
+      })
+      if (!preview.requiresConfirmation) {
+        const existing = preview.steps[0]
+        if (existing?.action === 'skip_existing') {
+          return {
+            success: true,
+            workoutId: existing.resolvedWorkoutId ?? null,
+            workoutName: definition.name,
+            alreadyCreated: true,
+            operationId: existing.operationId,
+            message: `Workout "${definition.name}" already exists in the Garmin library (id ${existing.resolvedWorkoutId ?? 'unknown'}).`,
+          }
+        }
+        return {
+          success: false,
+          workoutName: definition.name,
+          blocked: true,
+          operationId: existing?.operationId,
+          errorCode: existing?.errorCode ?? 'WRITE_OUTCOME_UNKNOWN',
+          message: 'A previous create for this definition has an unresolved outcome. Reconcile before retrying.',
+        }
+      }
       return {
         requiresConfirmation: true,
-        confirmationId: issuedConfirmationId,
+        confirmationId: this.issueConfirmation(preview.operationId as string, preview.previewRevision ?? 0),
+        operationId: preview.operationId,
+        previewRevision: preview.previewRevision ?? 0,
         workoutName: definition.name,
         sport: definition.sport ?? 'running',
         stepCount: definition.steps.length,
@@ -636,14 +712,39 @@ export class GarminToolService {
       }
     }
 
-    this.consumeWorkoutConfirmation(confirmationId, definition)
-
-    const result = await this.client.addWorkout(buildGarminWorkout(definition))
+    const execution = await coordinator.executeCreate(
+      this.resolveConfirmation(confirmationId, canonicalRequest),
+      { addWorkout: () => this.client.addWorkout(buildGarminWorkout(definition)) as unknown as Promise<{ workoutId: string | number }> },
+    )
+    const receipt = execution.receipts[0]
+    if (receipt.status === 'succeeded') {
+      return {
+        success: true,
+        workoutId: receipt.workoutId ?? null,
+        workoutName: definition.name,
+        operationId: execution.operationId,
+        message: `Workout "${definition.name}" was created in the Garmin workout library.`,
+      }
+    }
+    if (receipt.status === 'skipped') {
+      return {
+        success: true,
+        workoutId: receipt.workoutId ?? null,
+        workoutName: definition.name,
+        alreadyCreated: true,
+        operationId: execution.operationId,
+        message: `Workout "${definition.name}" already exists in the Garmin library (id ${receipt.workoutId ?? 'unknown'}).`,
+      }
+    }
     return {
-      success: true,
-      workoutId: result.workoutId ?? null,
+      success: false,
       workoutName: definition.name,
-      message: `Workout "${definition.name}" was created in the Garmin workout library.`,
+      blocked: receipt.manualReviewRequired,
+      errorCode: receipt.errorCode,
+      operationId: execution.operationId,
+      message: receipt.manualReviewRequired
+        ? `A previous create for this definition has an unresolved outcome (${receipt.errorCode ?? 'unknown'}). Reconcile before retrying.`
+        : `Create failed: ${receipt.errorCode ?? 'unknown'}`,
     }
   }
 
@@ -659,7 +760,7 @@ export class GarminToolService {
       date: request.date,
       timezone: request.timezone,
     }
-    const coordinator = this.writeCoordinator()
+    const coordinator = await this.writeCoordinatorReady()
 
     if (args.confirmed !== true) {
       const workout = await this.client.getWorkoutDetail(request.workoutId)
@@ -672,13 +773,9 @@ export class GarminToolService {
       })
       const step = preview.steps[0]
       if (!preview.requiresConfirmation) return this.scheduleNoOpResponse(request, step)
-      const issuedConfirmationId = this.issueCalendarConfirmation(
-        canonicalRequest,
-        preview.operationId,
-      )
       return {
         requiresConfirmation: true,
-        confirmationId: issuedConfirmationId,
+        confirmationId: this.issueConfirmation(preview.operationId as string, preview.previewRevision ?? 0),
         operationId: preview.operationId ?? null,
         preview: {
           ...request,
@@ -690,11 +787,10 @@ export class GarminToolService {
       }
     }
 
-    const pending = this.consumeCalendarConfirmation(args.confirmationId, canonicalRequest)
-    if (!pending.operationId) {
-      throw new PublicToolError('Invalid calendar confirmation: this preview has no scheduled write to confirm')
-    }
-    const execution = await coordinator.executeSchedule(pending.operationId, pending.requestHash)
+    const execution = await coordinator.executeSchedule(
+      this.resolveConfirmation(args.confirmationId, canonicalRequest),
+      { signal: this.options.shutdownSignal },
+    )
     return this.scheduleReceiptResponse(execution.receipts[0], request)
   }
 
@@ -768,7 +864,7 @@ export class GarminToolService {
       })),
       timezone: request.timezone,
     }
-    const coordinator = this.writeCoordinator()
+    const coordinator = await this.writeCoordinatorReady()
 
     if (args.confirmed !== true) {
       const workoutDetails = new Map<string, unknown>()
@@ -790,9 +886,9 @@ export class GarminToolService {
           steps: preview.steps,
         }
       }
-      const issuedConfirmationId = this.issueCalendarConfirmation(
-        canonicalRequest,
-        preview.operationId,
+      const issuedConfirmationId = this.issueConfirmation(
+        preview.operationId as string,
+        preview.previewRevision ?? 0,
       )
       return {
         requiresConfirmation: true,
@@ -810,22 +906,31 @@ export class GarminToolService {
       }
     }
 
-    const pending = this.consumeCalendarConfirmation(args.confirmationId, canonicalRequest)
-    if (!pending.operationId) {
-      throw new PublicToolError('Invalid calendar confirmation: this preview has no scheduled writes to confirm')
-    }
-    const execution = await coordinator.executeSchedule(pending.operationId, pending.requestHash)
+    const execution = await coordinator.executeSchedule(
+      this.resolveConfirmation(args.confirmationId, canonicalRequest),
+      { signal: this.options.shutdownSignal },
+    )
     const results = execution.receipts.map(receipt => ({
       success: receipt.success,
       workoutId: receipt.workoutId,
       date: receipt.date,
       status: receipt.status,
       operationId: receipt.operationId,
+      // Exposed so a caller can map an entry back to the journal step that
+      // `get_garmin_write_operation` reports, instead of trusting array order.
+      stepId: receipt.stepId,
       evidence: receipt.evidence,
       desiredStateSatisfied: receipt.desiredStateSatisfied,
       workoutScheduleId: receipt.workoutScheduleId ?? null,
+      // Per-entry recoverability. A halted entry is retryable after its blocker
+      // is resolved; an entry with an unresolved remote outcome needs manual
+      // review. Dropping these two made every halted entry indistinguishable
+      // from one that needs reconciling.
+      canResume: receipt.canResume,
+      manualReviewRequired: receipt.manualReviewRequired,
       ...(receipt.errorCode ? { errorCode: receipt.errorCode } : {}),
       ...(receipt.nextAction ? { nextAction: receipt.nextAction } : {}),
+      ...(receipt.message ? { message: receipt.message } : {}),
     }))
     const successCount = results.filter(
       result => result.status === 'succeeded' || result.status === 'skipped',
@@ -846,163 +951,275 @@ export class GarminToolService {
     }
   }
 
+  /**
+   * Create a workout template and put it on the Garmin Calendar in one
+   * confirmed step.
+   *
+   * Both phases live in a single journaled operation, so the schedule phase
+   * can never be reached through a *different* operation that happens to
+   * observe the create phase as an unrelated satisfied receipt. The schedule
+   * phase is only ever attempted after the create phase has been proven
+   * satisfied and has recorded the workout id it was assigned.
+   */
   async createAndScheduleWorkout(
     args: CreateAndScheduleWorkoutArgs,
   ): Promise<Record<string, unknown>> {
     const validationError = validateWorkoutDef(args.workout)
     if (validationError) throw new PublicToolError(`Invalid workout definition: ${validationError}`)
     const schedule = this.validateCalendarDate(args.date, args.timezone)
-    const request = { workout: args.workout, schedule }
-    if (args.confirmed !== true) {
-      const issuedConfirmationId = this.issueCalendarConfirmation({ operation: 'create-and-schedule', request })
-      return {
-        requiresConfirmation: true,
-        confirmationId: issuedConfirmationId,
-        preview: request,
-        message: 'Review this workout and its Garmin Calendar date, then call create_and_schedule_garmin_workout again with confirmed=true and this confirmationId.',
-      }
-    }
-
-    this.consumeCalendarConfirmation(args.confirmationId, { operation: 'create-and-schedule', request })
-    const created = await this.client.addWorkout(buildGarminWorkout(args.workout))
-    const workoutId = typeof created.workoutId === 'string' || typeof created.workoutId === 'number'
-      ? String(created.workoutId)
-      : ''
-    if (!workoutId) {
-      return {
-        success: false,
-        workoutCreated: true,
-        workoutName: args.workout.name,
-        message: 'Workout was created, but Garmin did not return an ID so it was not scheduled. Check the workout library before retrying.',
-      }
-    }
-    // Route the schedule half through the coordinator so a repeat call
-    // (or a recovered call after a crash) cannot re-dispatch. The same
-    // history-aggregation that protects scheduleWorkout protects this path.
-    const coordinator = this.writeCoordinator()
-    const canonical = {
+    const definition = args.workout as unknown as Record<string, unknown>
+    const fingerprint = workoutDefinitionFingerprint(definition)
+    const accountKey = this.writeAccountKey()
+    const businessKey = createBusinessKey(accountKey, fingerprint)
+    const canonicalRequest = {
       operation: 'create-and-schedule',
-      workoutId,
+      definition: args.workout,
       date: schedule.date,
       timezone: schedule.timezone,
     }
-    const preview = await coordinator.previewSchedule({
-      kind: 'schedule',
-      timezone: schedule.timezone,
-      request: canonical,
-      steps: [{ workoutId, date: schedule.date }],
-    })
-    if (preview.requiresConfirmation) {
-      // The caller already confirmed the create+schedule combo, so we
-      // dispatch the schedule half immediately. This is intentionally
-      // auto-confirmed: the create is already committed and the schedule
-      // is the only remaining network call.
-      const { requestHash } = await import('./write-operations/identity')
-      const execution = await coordinator.executeSchedule(
-        preview.operationId as string,
-        requestHash(canonical),
-      )
-      const receipt = execution.receipts[0]
-      if (receipt.status === 'succeeded') {
+    const coordinator = await this.writeCoordinatorReady()
+
+    if (args.confirmed !== true) {
+      const preview = await coordinator.previewCreateAndSchedule({
+        request: canonicalRequest,
+        idempotencyKey: assertIdempotencyKey(args.idempotencyKey),
+        businessKey,
+        fingerprint,
+        date: schedule.date,
+      })
+      if (!preview.requiresConfirmation) {
+        const blocked = preview.steps.find(step => step.action === 'blocked')
+        if (blocked) {
+          return {
+            success: false,
+            blocked: true,
+            operationId: blocked.operationId,
+            errorCode: blocked.errorCode ?? 'WRITE_OUTCOME_UNKNOWN',
+            beforeCreate: preview.steps[0]?.action === 'skip_existing',
+            preview: { workout: args.workout, schedule },
+            message:
+              'This workout or its calendar entry already has an unresolved outcome. ' +
+              'Reconcile that operation before retrying.',
+          }
+        }
+        // Both phases are already satisfied in the journal: report the durable
+        // receipts instead of asking for a confirmation that would write
+        // nothing.
+        const createStep = preview.steps.find(step => step.kind === 'create')
+        const scheduleStep = preview.steps.find(step => step.kind === 'schedule')
         return {
           success: true,
-          workoutId,
-          workoutScheduleId: receipt.workoutScheduleId ?? null,
+          requiresConfirmation: false,
+          alreadyCreated: true,
+          alreadyScheduled: true,
+          workoutId: createStep?.resolvedWorkoutId ?? null,
+          workoutScheduleId: scheduleStep?.workoutScheduleId ?? null,
           date: schedule.date,
           timezone: schedule.timezone,
-          operationId: preview.operationId,
+          operationId: preview.existingOperationId ?? preview.operationId ?? null,
+          preview: { workout: args.workout, schedule },
+          message: 'This workout is already in the Garmin library and already on the calendar for that date.',
         }
       }
       return {
+        requiresConfirmation: true,
+        confirmationId: this.issueConfirmation(preview.operationId as string, preview.previewRevision ?? 0),
+        operationId: preview.operationId as string,
+        previewRevision: preview.previewRevision ?? 0,
+        alreadyCreated: preview.steps[0]?.action === 'skip_existing',
+        preview: { workout: args.workout, schedule },
+        message:
+          'Review this workout and its Garmin Calendar date, then call ' +
+          'create_and_schedule_garmin_workout again with confirmed=true and this confirmationId. ' +
+          'The schedule phase runs only if the create phase is proven to have succeeded.',
+      }
+    }
+
+    const execution = await coordinator.executeCreateAndSchedule(
+      this.resolveConfirmation(args.confirmationId, canonicalRequest),
+      {
+        addWorkout: () => this.client.addWorkout(buildGarminWorkout(args.workout)) as unknown as Promise<{ workoutId: string | number }>,
+        schedule: (workoutId: string, date: string) =>
+          this.client.scheduleWorkout(workoutId, date) as Promise<{ workoutScheduleId?: string | null }>,
+      },
+    )
+
+    const createReceipt = execution.receipts[0]
+    const scheduleReceipt = execution.receipts[1]
+    const base = {
+      operationId: execution.operationId,
+      workoutId: createReceipt?.workoutId || null,
+      date: schedule.date,
+      timezone: schedule.timezone,
+    }
+
+    if (!createReceipt || !SATISFIED_STEP_STATUSES.has(createReceipt.status)) {
+      const unresolved = createReceipt?.status === 'unknown' || createReceipt?.status === 'in_flight'
+      return {
+        ...base,
+        success: false,
+        blocked: Boolean(createReceipt?.manualReviewRequired),
+        // `workoutCreated` answers "may a template now exist that must not be
+        // re-created?". A proven success/skip says yes; an unresolved create
+        // also says yes (it was dispatched and we cannot prove otherwise). A
+        // proven non-application says no, and re-creating is safe.
+        workoutCreated:
+          createReceipt?.status === 'succeeded'
+          || createReceipt?.status === 'skipped'
+          || unresolved,
+        errorCode: createReceipt?.errorCode,
+        ...(createReceipt?.nextAction ? { nextAction: createReceipt.nextAction } : {}),
+        message: unresolved
+          ? `The create half has an unresolved outcome (${createReceipt?.errorCode ?? 'unknown'}). Reconcile before retrying; the schedule half was not attempted.`
+          : `The workout was not created (${createReceipt?.status ?? 'unknown'}: ${createReceipt?.errorCode ?? 'unknown'}). The schedule half was not attempted.`,
+      }
+    }
+
+    if (!scheduleReceipt) {
+      // The schedule phase was created only for a proven-resolved workout id.
+      // A missing receipt therefore means the create step did not record one.
+      return {
+        ...base,
         success: false,
         workoutCreated: true,
-        workoutId,
-        date: schedule.date,
-        message: `Workout was created, but calendar scheduling reported ${receipt.status}.`,
-        operationId: preview.operationId,
-        receipt,
+        errorCode: 'STATE_CORRUPT',
+        message:
+          'The workout was created but its assigned id was not recorded, so the calendar entry was not attempted. ' +
+          'Reconcile this operation before scheduling it manually.',
       }
     }
-    // Already satisfied: no work to do.
-    const existing = preview.steps[0]
-    if (existing?.action === 'skip_existing') {
+
+    if (SATISFIED_STEP_STATUSES.has(scheduleReceipt.status)) {
       return {
+        ...base,
         success: true,
-        workoutId,
-        workoutScheduleId: existing.workoutScheduleId ?? null,
-        date: schedule.date,
-        timezone: schedule.timezone,
-        operationId: existing.operationId,
+        workoutCreated: true,
+        workoutScheduleId: scheduleReceipt.workoutScheduleId ?? null,
+        status: scheduleReceipt.status,
+        evidence: scheduleReceipt.evidence,
+        createOperationId: execution.operationId,
+        message: scheduleReceipt.status === 'succeeded'
+          ? 'Workout was created and scheduled on the Garmin Calendar.'
+          : 'Workout already existed; the calendar entry was already in place.',
       }
     }
+
     return {
+      ...base,
       success: false,
       workoutCreated: true,
-      workoutId,
-      date: schedule.date,
-      message: `Workout was created, but calendar scheduling reported ${existing?.status ?? 'blocked'}.`,
-      operationId: existing?.operationId,
+      workoutScheduleId: scheduleReceipt.workoutScheduleId ?? null,
+      status: scheduleReceipt.status,
+      evidence: scheduleReceipt.evidence,
+      errorCode: scheduleReceipt.errorCode,
+      ...(scheduleReceipt.nextAction ? { nextAction: scheduleReceipt.nextAction } : {}),
+      message:
+        `The workout was created, but the calendar entry reported ${scheduleReceipt.status}` +
+        `${scheduleReceipt.errorCode ? ` (${scheduleReceipt.errorCode})` : ''}. Do not retry blindly: ` +
+        'query the operation and reconcile before scheduling again.',
     }
   }
 
   async unscheduleWorkout(args: UnscheduleWorkoutArgs): Promise<Record<string, unknown>> {
     const workoutScheduleId = validateOpaqueId('workoutScheduleId', args.workoutScheduleId)
-    const request = { workoutScheduleId }
+    const request = { operation: 'unschedule', workoutScheduleId }
+    const businessKey = unscheduleBusinessKey(this.writeAccountKey(), workoutScheduleId)
+    const coordinator = await this.writeCoordinatorReady()
     if (args.confirmed !== true) {
-      const issuedConfirmationId = this.issueCalendarConfirmation({ operation: 'unschedule', request })
+      const preview = await coordinator.previewUnschedule({
+        request,
+        idempotencyKey: assertIdempotencyKey(args.idempotencyKey),
+        businessKey,
+        workoutScheduleId,
+      })
+      if (!preview.requiresConfirmation) {
+        const existing = preview.steps[0]
+        if (existing?.action === 'skip_existing') {
+          return {
+            success: true,
+            workoutScheduleId,
+            alreadyRemoved: true,
+            operationId: existing.operationId,
+            message: `Workout ${workoutScheduleId} is no longer on the Garmin Calendar.`,
+          }
+        }
+        return {
+          success: false,
+          workoutScheduleId,
+          blocked: true,
+          operationId: existing?.operationId,
+          errorCode: existing?.errorCode ?? 'WRITE_OUTCOME_UNKNOWN',
+          message: 'A previous unschedule for this id has an unresolved outcome. Reconcile before retrying.',
+        }
+      }
       return {
         requiresConfirmation: true,
-        confirmationId: issuedConfirmationId,
+        confirmationId: this.issueConfirmation(preview.operationId as string, preview.previewRevision ?? 0),
+        operationId: preview.operationId,
+        previewRevision: preview.previewRevision ?? 0,
         preview: request,
         message: 'Review this Garmin Calendar removal, then call unschedule_garmin_workout again with confirmed=true and this confirmationId.',
       }
     }
-    this.consumeCalendarConfirmation(args.confirmationId, { operation: 'unschedule', request })
-    await this.client.unscheduleWorkout(workoutScheduleId)
-    return { success: true, workoutScheduleId, message: 'Workout was removed from Garmin Calendar.' }
-  }
-
-  private issueWorkoutConfirmation(definition: WorkoutDef): string {
-    this.pruneWorkoutConfirmations()
-    while (this.workoutConfirmations.size >= MAX_PENDING_CONFIRMATIONS) {
-      const oldest = this.workoutConfirmations.keys().next().value
-      if (oldest === undefined) break
-      this.workoutConfirmations.delete(oldest)
+    const execution = await coordinator.executeUnschedule(
+      this.resolveConfirmation(args.confirmationId, request),
+      { unschedule: (id: string) => this.client.unscheduleWorkout(id) },
+    )
+    const receipt = execution.receipts[0]
+    if (receipt.status === 'succeeded') {
+      return {
+        success: true,
+        workoutScheduleId,
+        operationId: execution.operationId,
+        message: 'Workout was removed from Garmin Calendar.',
+      }
     }
-
-    const confirmationId = randomUUID()
-    this.workoutConfirmations.set(confirmationId, {
-      definitionHash: workoutDefinitionHash(definition),
-      expiresAt: Date.now() + CONFIRMATION_TTL_MS,
-    })
-    return confirmationId
+    if (receipt.status === 'skipped') {
+      return {
+        success: true,
+        workoutScheduleId,
+        alreadyRemoved: true,
+        operationId: execution.operationId,
+        message: 'Workout was already removed from Garmin Calendar.',
+      }
+    }
+    return {
+      success: false,
+      workoutScheduleId,
+      blocked: receipt.manualReviewRequired,
+      errorCode: receipt.errorCode,
+      operationId: execution.operationId,
+      message: receipt.manualReviewRequired
+        ? `A previous unschedule for this id has an unresolved outcome (${receipt.errorCode ?? 'unknown'}). Reconcile before retrying.`
+        : `Unschedule failed: ${receipt.errorCode ?? 'unknown'}`,
+    }
   }
 
-  private consumeWorkoutConfirmation(
+  /**
+   * Mint the durable approval handle for a preview. Pure string derivation:
+   * nothing is stored in this process, so the handle keeps working after a
+   * restart and is invalidated in every process when the revision advances.
+   */
+  private issueConfirmation(operationId: string, previewRevision: number): string {
+    return encodeConfirmationId(operationId, previewRevision)
+  }
+
+  /**
+   * Resolve a caller-supplied handle into the persisted approval it names.
+   * Only syntax is checked here; existence, request hash and revision are
+   * checked by the coordinator from disk, immediately before any dispatch.
+   */
+  private resolveConfirmation(
     confirmationId: string | undefined,
-    definition: WorkoutDef,
-  ): void {
-    this.pruneWorkoutConfirmations()
-    if (!confirmationId) {
+    request: unknown,
+  ): WriteConfirmation {
+    const decoded = decodeConfirmationId(confirmationId)
+    if (!decoded) {
       throw new PublicToolError(
-        'Invalid workout confirmation: request a preview and provide its confirmationId',
+        'Invalid calendar confirmation: pass the confirmationId returned by the preview',
       )
     }
-
-    const pending = this.workoutConfirmations.get(confirmationId)
-    this.workoutConfirmations.delete(confirmationId)
-    if (!pending || pending.definitionHash !== workoutDefinitionHash(definition)) {
-      throw new PublicToolError(
-        'Invalid workout confirmation: the preview is missing, expired, already used, or changed',
-      )
-    }
-  }
-
-  private pruneWorkoutConfirmations(): void {
-    const now = Date.now()
-    for (const [id, confirmation] of this.workoutConfirmations) {
-      if (confirmation.expiresAt <= now) this.workoutConfirmations.delete(id)
-    }
+    return { ...decoded, requestHash: requestHash(request) }
   }
 
   private validateScheduleRequest(args: {
@@ -1044,45 +1261,6 @@ export class GarminToolService {
       return { workoutId: normalized.workoutId, date: normalized.date, index }
     })
     return { timezone, schedules: schedules.map(({ workoutId, date }) => ({ workoutId, date })) }
-  }
-
-  private issueCalendarConfirmation(request: unknown, operationId?: string): string {
-    this.pruneCalendarConfirmations()
-    while (this.calendarConfirmations.size >= MAX_PENDING_CONFIRMATIONS) {
-      const oldest = this.calendarConfirmations.keys().next().value
-      if (oldest === undefined) break
-      this.calendarConfirmations.delete(oldest)
-    }
-    const confirmationId = randomUUID()
-    this.calendarConfirmations.set(confirmationId, {
-      requestHash: hashRequest(request),
-      expiresAt: Date.now() + CONFIRMATION_TTL_MS,
-      operationId,
-    })
-    return confirmationId
-  }
-
-  private consumeCalendarConfirmation(
-    confirmationId: string | undefined,
-    request: unknown,
-  ): PendingCalendarConfirmation {
-    this.pruneCalendarConfirmations()
-    if (!confirmationId) {
-      throw new PublicToolError('Invalid calendar confirmation: request a preview and provide its confirmationId')
-    }
-    const pending = this.calendarConfirmations.get(confirmationId)
-    this.calendarConfirmations.delete(confirmationId)
-    if (!pending || pending.requestHash !== hashRequest(request)) {
-      throw new PublicToolError('Invalid calendar confirmation: the preview is missing, expired, already used, or changed')
-    }
-    return pending
-  }
-
-  private pruneCalendarConfirmations(): void {
-    const now = Date.now()
-    for (const [id, confirmation] of this.calendarConfirmations) {
-      if (confirmation.expiresAt <= now) this.calendarConfirmations.delete(id)
-    }
   }
 }
 
@@ -1580,14 +1758,6 @@ class AsyncSemaphore {
       this.waiters.shift()?.()
     }
   }
-}
-
-function workoutDefinitionHash(definition: WorkoutDef): string {
-  return workoutDefinitionFingerprint(definition as unknown as Record<string, unknown>)
-}
-
-function hashRequest(request: unknown): string {
-  return requestHash(request)
 }
 
 function validateOpaqueId(label: string, value: unknown): string {

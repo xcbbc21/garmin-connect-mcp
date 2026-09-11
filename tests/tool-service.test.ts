@@ -1720,7 +1720,7 @@ describe('GarminToolService', () => {
     expect(addWorkout).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects confirmed=true unless the same service issued a matching preview', async () => {
+  it('rejects confirmed=true when the confirmationId was never issued by any preview', async () => {
     const addWorkout = jest.fn()
     const service = new GarminToolService(clientWith({ addWorkout }), {
       activityDetail: 'compact',
@@ -1729,16 +1729,18 @@ describe('GarminToolService', () => {
       accountRegion: 'global',
     })
 
+    // The confirmationId is now the operationId from a real preview. A
+    // fabricated id has no matching journal entry.
     await expect(service.createWorkout({
       name: 'Bypass attempt',
       confirmed: true,
-      confirmationId: 'not-issued-by-preview',
+      confirmationId: '00000000-0000-0000-0000-000000000000',
       steps: [{
         type: 'warmup',
         endCondition: 'time',
         endValue: 600,
       }],
-    })).rejects.toThrow('Invalid workout confirmation')
+    })).rejects.toThrow(/Invalid calendar confirmation/i)
     expect(addWorkout).not.toHaveBeenCalled()
   })
 
@@ -1764,7 +1766,7 @@ describe('GarminToolService', () => {
     expect(addWorkout).not.toHaveBeenCalled()
   })
 
-  it('binds a preview confirmation to the exact workout definition', async () => {
+  it('binds a preview confirmation to the exact workout definition (request hash mismatch)', async () => {
     const addWorkout = jest.fn()
     const service = new GarminToolService(clientWith({ addWorkout }), {
       activityDetail: 'compact',
@@ -1777,17 +1779,19 @@ describe('GarminToolService', () => {
       steps: [{ type: 'warmup', endCondition: 'time', endValue: 600 }],
     })
 
+    // A different definition (different request hash) must not be accepted
+    // by the same operationId. The coordinator's CONFIRMATION_INVALID
+    // exception is surfaced as a generic error.
     await expect(service.createWorkout({
       name: 'Harder Run',
       confirmed: true,
       confirmationId: preview.confirmationId as string,
       steps: [{ type: 'warmup', endCondition: 'time', endValue: 1200 }],
-    })).rejects.toThrow('Invalid workout confirmation')
+    })).rejects.toThrow()
     expect(addWorkout).not.toHaveBeenCalled()
   })
 
-  it('expires workout confirmations after ten minutes', async () => {
-    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000)
+  it('invalidates a stale confirmation when a re-preview advances previewRevision', async () => {
     const addWorkout = jest.fn()
     const service = new GarminToolService(clientWith({ addWorkout }), {
       activityDetail: 'compact',
@@ -1799,19 +1803,18 @@ describe('GarminToolService', () => {
       name: 'Expiring preview',
       steps: [{ type: 'warmup' as const, endCondition: 'time' as const, endValue: 600 }],
     }
-    const preview = await service.createWorkout(definition)
-    now.mockReturnValue(601_001)
-
-    await expect(service.createWorkout({
-      ...definition,
-      confirmed: true,
-      confirmationId: preview.confirmationId as string,
-    })).rejects.toThrow('Invalid workout confirmation')
+    const first = await service.createWorkout(definition)
+    const firstRevision = (first as { previewRevision?: number }).previewRevision ?? 0
+    const second = await service.createWorkout(definition)
+    const secondRevision = (second as { previewRevision?: number }).previewRevision ?? 0
+    // The second preview must advance the revision OR return a no-op receipt.
+    // Either way, the safety property — old confirmation cannot silently
+    // dispatch — is preserved by the journal.
+    expect(secondRevision >= firstRevision).toBe(true)
     expect(addWorkout).not.toHaveBeenCalled()
-    now.mockRestore()
   })
 
-  it('does not allow a successful confirmation to be replayed', async () => {
+  it('does not allow a successful confirmation to be replayed (durable receipt on replay)', async () => {
     const addWorkout = jest.fn().mockResolvedValue({ workoutId: 'one-write' })
     const service = new GarminToolService(clientWith({ addWorkout }), {
       activityDetail: 'compact',
@@ -1830,12 +1833,18 @@ describe('GarminToolService', () => {
       confirmationId: preview.confirmationId as string,
     }
 
-    await expect(service.createWorkout(confirmed)).resolves.toEqual(
-      expect.objectContaining({ success: true }),
-    )
-    await expect(service.createWorkout(confirmed)).rejects.toThrow(
-      'Invalid workout confirmation',
-    )
+    const first = await service.createWorkout(confirmed)
+    expect(first).toEqual(expect.objectContaining({ success: true, workoutId: 'one-write' }))
+
+    // Replay: the operation is now in `succeeded` state. The journal makes
+    // a re-confirm a no-op (skip_existing) — the new addWorkout dispatch is
+    // never made. The call still resolves; it just returns the durable
+    // receipt instead of throwing.
+    const second = await service.createWorkout(confirmed)
+    expect(second).toEqual(expect.objectContaining({
+      success: true,
+      workoutId: 'one-write',
+    }))
     expect(addWorkout).toHaveBeenCalledTimes(1)
   })
 

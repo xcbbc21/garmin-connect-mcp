@@ -95,7 +95,8 @@ function step(over: Partial<WriteStep>): WriteStep {
 
 function makeOp(id: string, steps: WriteStep[]): WriteOperation {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    previewRevision: 0,
     operationId: id,
     kind: 'batch-schedule',
     accountKey: ACCOUNT,
@@ -287,8 +288,12 @@ describe('batch accounting retains every requested item in original order', () =
     } as never) as Record<string, unknown> & {
       results: Array<{ workoutId: string; status: string }>
     }
-    // Transient network errors do NOT auto-stop the batch: only auth/cancel/
-    // storage failures do. W3 dispatches, fails, and is reported as unknown.
+    // Continuing is the documented contract: only a credential that lost its
+    // authority, a cancelled login, an identity change, local cancellation,
+    // storage failure, lock loss or an expired confirmation stop the remaining
+    // entries. An entry-local `unknown` does not — every dispatch is journaled
+    // `in_flight` first, so W3 is durably accounted for and W4/W5 are still
+    // attempted as the caller asked.
     expect(result.total).toBe(5)
     expect(result.results).toHaveLength(5)
     expect(result.results.map(r => r.workoutId)).toEqual(['W1', 'W2', 'W3', 'W4', 'W5'])

@@ -2,7 +2,8 @@
  * Identity primitives shared by the write journal.
  *
  * Three identifiers are deliberately kept separate:
- *   - confirmationId: one-time user approval of a specific preview (never persisted here)
+ *   - confirmationId: approval of a specific preview revision, encoded so the
+ *     binding survives a process restart (see `encodeConfirmationId`)
  *   - operationId:    server-generated receipt used to query/reconcile a write
  *   - idempotencyKey: caller-supplied stable request label (never stored verbatim)
  */
@@ -14,7 +15,27 @@ import { GarminWriteError, WRITE_ERROR_CODES } from './errors'
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
 
 /** Result control fields that must never leak into a request hash or fingerprint. */
-const CONTROL_FIELDS = ['confirmed', 'confirmationId', 'idempotencyKey'] as const
+export const CONTROL_FIELDS = ['confirmed', 'confirmationId', 'idempotencyKey'] as const
+
+/**
+ * Drop caller-supplied control fields before a request is hashed or persisted.
+ *
+ * `idempotencyKey` in particular is caller metadata: it is not a Garmin
+ * credential, but it may still contain something the caller does not expect to
+ * find in a plaintext local file, so only its account-scoped hash is stored.
+ * Only top-level keys are removed — a nested field is part of the payload the
+ * caller actually asked for.
+ */
+export function stripResultControlFields(
+  request: Record<string, unknown>,
+): Record<string, unknown> {
+  const clone: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(request)) {
+    if ((CONTROL_FIELDS as readonly string[]).includes(key)) continue
+    clone[key] = value
+  }
+  return clone
+}
 
 export function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
@@ -116,6 +137,34 @@ export function assertIdempotencyKey(value: unknown): string | undefined {
 /** Account-scoped hash of an idempotency key. The raw key is never persisted. */
 export function idempotencyKeyHash(account: string, key: string): string {
   return sha256Hex(`${account}\u0000${key}`)
+}
+
+/**
+ * The approval handle a caller receives from a preview and returns on confirm.
+ *
+ * It is *derived* from persisted state rather than kept in an in-process map,
+ * so a confirmation issued before a restart is still resolvable after it, and
+ * a re-preview that advances the revision invalidates the earlier handle in
+ * every process — not just the one that issued it.
+ *
+ * Layout: `<operationId>:<previewRevision>`.
+ */
+export function encodeConfirmationId(operationId: string, previewRevision: number): string {
+  return `${operationId}:${previewRevision}`
+}
+
+export function decodeConfirmationId(
+  value: unknown,
+): { operationId: string; previewRevision: number } | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > 256) return undefined
+  const separator = trimmed.lastIndexOf(':')
+  if (separator <= 0) return undefined
+  const operationId = trimmed.slice(0, separator)
+  const rawRevision = trimmed.slice(separator + 1)
+  if (!/^\d{1,9}$/.test(rawRevision)) return undefined
+  return { operationId, previewRevision: Number(rawRevision) }
 }
 
 /** Strip result-control fields so they never influence the template fingerprint. */

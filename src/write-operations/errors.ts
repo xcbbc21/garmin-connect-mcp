@@ -7,7 +7,11 @@
  * `unknown` is never downgraded to `not_applied` without endpoint evidence.
  */
 
-import { PublicToolError } from '../utils/errors'
+import {
+  GarminAuthenticationCancelledError,
+  GarminAuthenticationRequiredError,
+  PublicToolError,
+} from '../utils/errors'
 
 export type WriteOutcome = 'not_applied' | 'unknown'
 
@@ -16,6 +20,12 @@ export const WRITE_ERROR_CODES = {
   WRITE_OUTCOME_UNKNOWN: 'WRITE_OUTCOME_UNKNOWN',
   /** The write is proven not to have been applied. */
   WRITE_NOT_APPLIED: 'WRITE_NOT_APPLIED',
+  /**
+   * The credential lost its authority while the write was being dispatched.
+   * The outcome stays `unknown`, but unlike a generic transport failure this
+   * invalidates the authority of every remaining entry in the batch.
+   */
+  WRITE_AUTH_EXPIRED: 'WRITE_AUTH_EXPIRED',
   /** The local state directory is missing, unreadable or unwritable. */
   STATE_UNAVAILABLE: 'STATE_UNAVAILABLE',
   /** The local journal is corrupt, from a newer schema, or another account. */
@@ -91,6 +101,28 @@ export function isWriteTransportError(error: unknown): error is GarminWriteTrans
 }
 
 /**
+ * The authenticated identity changed while a write was in flight.
+ *
+ * The request was already dispatched, so the outcome is `unknown`. It is a
+ * distinct type because it also invalidates the authority the *whole* batch was
+ * approved under: continuing would keep writing as an account the user did not
+ * confirm.
+ */
+export class GarminWriteIdentityChangedError extends GarminWriteError {
+  override name = 'GarminWriteIdentityChangedError'
+
+  constructor(message: string) {
+    super(WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN, 'unknown', message)
+  }
+}
+
+export function isWriteIdentityChangedError(
+  error: unknown,
+): error is GarminWriteIdentityChangedError {
+  return error instanceof GarminWriteIdentityChangedError
+}
+
+/**
  * Conservative classification for anything thrown by a write transport.
  *
  * Only an explicit `not_applied` classification is trusted; everything else
@@ -107,7 +139,49 @@ export function classifyWriteFailure(error: unknown): {
   if (error instanceof GarminWriteError) {
     return { outcome: error.outcome, code: error.code }
   }
+  if (error instanceof GarminAuthenticationRequiredError) {
+    // The write transports call the connection gate *before* building the
+    // request, so a credential failure escaping a write proves that write was
+    // never sent. It is safe — and useful — to say so instead of parking the
+    // step in `unknown` forever.
+    return { outcome: 'not_applied', code: WRITE_ERROR_CODES.WRITE_NOT_APPLIED }
+  }
+  if (error instanceof GarminAuthenticationCancelledError) {
+    // Same reasoning: the login was cancelled, so the request was never built.
+    return { outcome: 'not_applied', code: WRITE_ERROR_CODES.WRITE_NOT_APPLIED }
+  }
   return { outcome: 'unknown', code: WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN }
+}
+
+/**
+ * Whether a write failure stops the rest of the batch rather than only failing
+ * the entry that produced it.
+ *
+ * This is a deliberately closed set. The delivery contract lists exactly which
+ * conditions must stop the remaining entries and leave them `not_attempted`:
+ * a credential that lost its authority, a cancelled login, and an identity
+ * change. Each of those invalidates the *channel* or the *authority* the whole
+ * batch was approved under, so re-dispatching the next entry would repeat a
+ * non-idempotent write that we already know cannot be authorized correctly.
+ *
+ * Everything else — an entry-local rejection, a timeout, a 5xx, a socket reset,
+ * or any error we cannot explain — is recorded against the entry that produced
+ * it and the batch continues. That is safe because every dispatch is durably
+ * journaled `in_flight` before it is sent, so a continued batch cannot lose
+ * track of a write; and it is required because the caller asked for *every*
+ * entry in the batch to be attempted.
+ */
+export function isAccountLevelWriteFailure(error: unknown): boolean {
+  if (error instanceof GarminAuthenticationRequiredError) return true
+  if (error instanceof GarminAuthenticationCancelledError) return true
+  if (error instanceof GarminWriteIdentityChangedError) return true
+  if (error instanceof GarminWriteTransportError) {
+    // A 401/403 that arrives *after* the request was built means the credential
+    // stopped being accepted mid-batch. The remaining entries would repeat the
+    // same rejected write, so they must not be dispatched.
+    return error.code === WRITE_ERROR_CODES.WRITE_AUTH_EXPIRED
+  }
+  return false
 }
 
 /** Build the `unknown` error used when a write may have reached Garmin. */

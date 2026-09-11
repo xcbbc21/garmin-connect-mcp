@@ -2,9 +2,9 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
-import { WriteCoordinator } from '../src/write-operations/coordinator'
+import { WriteCoordinator, previewRevisionOf } from '../src/write-operations/coordinator'
 import { GarminWriteError, WRITE_ERROR_CODES } from '../src/write-operations/errors'
-import { accountKey, requestHash } from '../src/write-operations/identity'
+import { accountKey, decodeConfirmationId, requestHash } from '../src/write-operations/identity'
 import { FileAccountLock } from '../src/write-operations/lock'
 import { type OperationStore } from '../src/write-operations/store'
 import { emptyOperationDocument, type OperationDocument } from '../src/write-operations/types'
@@ -114,14 +114,24 @@ describe('write protection: no bypass through previews, keys, restarts or concur
     const b = makeService(state, writer)
     const request = { workoutId: 'w4', date: '2026-09-23', timezone: TIMEZONE }
 
-    // Both callers obtain a confirmation for the same workout/date, then confirm
-    // at the same time from two independent service instances.
+    // Both callers preview the same workout/date. They share one journal
+    // operation for that business key and the second preview advances its
+    // revision, so only the newest handle stays executable.
     const previewA = await a.service.scheduleWorkout(request as never)
     const previewB = await b.service.scheduleWorkout(request as never)
     expect(previewA.requiresConfirmation).toBe(true)
     expect(previewB.requiresConfirmation).toBe(true)
+    expect(previewA.operationId).toBe(previewB.operationId)
 
-    const [left, right] = await Promise.all([
+    const handleA = decodeConfirmationId(previewA.confirmationId)
+    const handleB = decodeConfirmationId(previewB.confirmationId)
+    expect(handleA).toBeDefined()
+    expect(handleB?.previewRevision).toBe((handleA?.previewRevision ?? 0) + 1)
+
+    // Both confirm at the same moment from two independent service instances.
+    // The superseded handle is refused before anything is sent; the newest one
+    // dispatches. Exactly one POST reaches Garmin.
+    const [left, right] = await Promise.allSettled([
       a.service.scheduleWorkout({
         ...request, confirmed: true, confirmationId: previewA.confirmationId,
       } as never),
@@ -130,9 +140,22 @@ describe('write protection: no bypass through previews, keys, restarts or concur
       } as never),
     ])
 
-    // Exactly one POST reached Garmin; the other caller observed the result.
+    expect(left.status).toBe('rejected')
+    expect((left as PromiseRejectedResult).reason).toMatchObject({
+      code: WRITE_ERROR_CODES.CONFIRMATION_STALE,
+    })
+    expect(right.status).toBe('fulfilled')
+    expect((right as PromiseFulfilledResult<Record<string, unknown>>).value).toMatchObject({
+      success: true,
+      desiredStateSatisfied: true,
+    })
     expect(writer).toHaveBeenCalledTimes(1)
-    expect([left, right].filter(result => result.success === true)).toHaveLength(2)
+
+    // The superseded caller is not left blind: re-previewing the same target
+    // reports it as already satisfied rather than offering a second write.
+    const afterA = await a.service.scheduleWorkout(request as never)
+    expect(afterA).toMatchObject({ requiresConfirmation: false, action: 'skip_existing', success: true })
+    expect(writer).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -251,9 +274,25 @@ describe('coordinator state machine', () => {
     expect(preview.requiresConfirmation).toBe(true)
 
     store.failOnSave = store.saves + 1
-    await expect(coordinator.executeSchedule(preview.operationId as string, requestHash(request)))
-      .rejects.toMatchObject({ code: WRITE_ERROR_CODES.STATE_UNAVAILABLE })
+    const execution = await coordinator.executeSchedule({
+      operationId: preview.operationId as string,
+      requestHash: requestHash(request),
+      previewRevision: previewRevisionOf(preview),
+    })
     expect(writer.schedule).not.toHaveBeenCalled()
+    // The journal write failed, but the receipt must still carry the
+    // operationId: throwing it away would leave the caller with no handle to
+    // reconcile. Nothing was dispatched, so the entry is a proven
+    // non-application and stays retryable.
+    expect(execution.operationId).toBe(preview.operationId)
+    expect(execution.receipts).toHaveLength(1)
+    expect(execution.receipts[0]).toMatchObject({
+      status: 'failed',
+      errorCode: WRITE_ERROR_CODES.STATE_UNAVAILABLE,
+      success: false,
+      desiredStateSatisfied: false,
+      manualReviewRequired: false,
+    })
     // The step never reached `in_flight` on disk, so it stays `prepared`.
     expect(store.snapshot().operations[preview.operationId as string].steps[0].status).toBe('prepared')
   })
@@ -283,7 +322,11 @@ describe('coordinator state machine', () => {
     expect(store.snapshot().operations[first.operationId as string].steps[0].status).toBe('not_attempted')
 
     // Confirming the superseded preview must not write anything.
-    const execution = await coordinator.executeSchedule(first.operationId as string, requestHash(firstRequest))
+    const execution = await coordinator.executeSchedule({
+      operationId: first.operationId as string,
+      requestHash: requestHash(firstRequest),
+      previewRevision: previewRevisionOf(first),
+    })
     expect(execution.receipts[0].status).toBe('not_attempted')
     expect(writer.schedule).not.toHaveBeenCalled()
   })

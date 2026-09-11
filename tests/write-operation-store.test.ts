@@ -97,7 +97,9 @@ describe('FileOperationStore', () => {
     const store = new FileOperationStore(base, ACCOUNT)
     await store.save(documentWith(ACCOUNT, 1))
     const parsed = JSON.parse(await readFile(store.filePath, 'utf8'))
-    parsed.schemaVersion = 2
+    // Anything other than the current version is unsupported, in both
+    // directions: a future version must not be read as if it were this one.
+    parsed.schemaVersion = 3
     await writeFile(store.filePath, JSON.stringify(parsed), 'utf8')
     await expect(store.read()).rejects.toMatchObject({
       code: WRITE_ERROR_CODES.STATE_CORRUPT,

@@ -45,7 +45,7 @@ export interface WriteAttempt {
 export interface WriteStep {
   stepId: string
   businessKey: string
-  kind: 'create' | 'schedule' | 'unschedule'
+  kind: 'create' | 'schedule' | 'unschedule' | 'batch-schedule'
   status: StepStatus
   attempt: number
   dispatchedAt?: string
@@ -57,6 +57,12 @@ export interface WriteStep {
   desiredStateSatisfied?: boolean
   observedAt?: string
   attempts: WriteAttempt[]
+  /**
+   * The canonical workout-definition fingerprint, captured at preview time
+   * for `create` steps so the same definition submitted twice in different
+   * sessions still resolves to the same business key.
+   */
+  fingerprint?: string
   /**
    * A read-only reference to a step in another operation that explains why
    * this step is in a non-write state. The original blocker (unknown /
@@ -72,9 +78,16 @@ export interface WriteStep {
 }
 
 export interface WriteOperation {
-  schemaVersion: 1
+  schemaVersion: 2
   operationId: string
   kind: WriteKind
+  /**
+   * The account this operation belongs to. It is copied into every operation
+   * (not just the document) so a journal that was moved, concatenated or
+   * hand-edited is rejected at load time instead of dispatching as the wrong
+   * account — `accountKey` is derived from region + username, so this is the
+   * operation's identity binding.
+   */
   accountKey: string
   requestHash: string
   idempotencyKeyHash?: string
@@ -82,35 +95,56 @@ export interface WriteOperation {
    * Monotonic counter advanced every time a preview is re-issued for the same
    * operation without dispatch. ConfirmationIds are bound to the
    * previewRevision at issue time; old confirmations are invalidated when the
-   * counter moves. Optional in the on-disk type so older journals (or test
-   * fixtures) without the field continue to parse; readers must default to 0.
+   * counter moves. Required from schema v2 on: a v1 journal that lacked it is
+   * migrated to 0, which is the same value readers used to default to.
    */
-  previewRevision?: number
+  previewRevision: number
+  /**
+   * Wall-clock deadline for *authorizing a new dispatch* from the current
+   * preview revision. Steps that already reached a terminal state keep
+   * returning their durable receipt after this passes; only still-`prepared`
+   * steps are refused, and refusing never dispatches. Refreshed on every
+   * preview that issues a confirmation.
+   */
+  confirmationExpiresAt?: string
   request: Record<string, unknown>
   createdAt: string
   updatedAt: string
+  /**
+   * Set when the journal itself could not be reconciled: a v1 record whose
+   * request hash, idempotency binding or batch evidence could not be rebuilt
+   * without guessing. The affected steps are kept as blocking (`unknown`), so
+   * a flagged operation can never authorize a new write.
+   */
+  manualReview?: { reason: string; detectedAt: string }
   steps: WriteStep[]
 }
 
 /** On-disk journal for one account. `revision` guards atomic replacement. */
 export interface OperationDocument {
-  schemaVersion: 1
+  schemaVersion: 2
   revision: number
   accountKey: string
   operations: Record<string, WriteOperation>
   /** idempotencyKeyHash -> operationId */
   idempotencyIndex: Record<string, string>
+  /**
+   * Provenance of the last schema migration. Present only on journals that
+   * were actually migrated, so a fresh v2 journal and a migrated one are
+   * distinguishable after the fact.
+   */
+  migratedFrom?: { schemaVersion: 1; migratedAt: string }
 }
 
 /** A non-network store. Implementations must fail closed on any doubt. */
 export interface OperationStore {
   read(): Promise<OperationDocument>
-  save(document: OperationDocument): Promise<void>
+  save(document: OperationDocument, options?: { expectedRevision?: number }): Promise<void>
 }
 
 export function emptyOperationDocument(accountKey: string): OperationDocument {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 0,
     accountKey,
     operations: {},

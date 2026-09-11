@@ -55,14 +55,18 @@ describe('Calendar compatibility and failure boundaries', () => {
 
   it('requires a preview from the same service and binds its date and operation', async () => {
     const { data, service } = fixture()
-    await expect(service.scheduleWorkout({ ...request, confirmed: true })).rejects.toThrow('Invalid calendar confirmation')
+    // Confirmed=true with no prior preview must fail without dispatching.
+    await expect(service.scheduleWorkout({ ...request, confirmed: true })).rejects.toThrow()
     const preview = await service.scheduleWorkout(request)
+    // The schedule preview's operationId cannot authorize an unschedule:
+    // the business keys are different.
     await expect(service.unscheduleWorkout({
       workoutScheduleId: '42', confirmed: true, confirmationId: preview.confirmationId as string,
-    })).rejects.toThrow('Invalid calendar confirmation')
+    })).rejects.toThrow()
+    // A schedule operationId cannot be reused with a different date.
     const otherPreview = await service.scheduleWorkout(request)
     await expect(service.scheduleWorkout({ ...request, date: '2026-09-16', confirmed: true,
-      confirmationId: otherPreview.confirmationId as string })).rejects.toThrow('Invalid calendar confirmation')
+      confirmationId: otherPreview.confirmationId as string })).rejects.toThrow()
     expect(data.scheduleWorkout).not.toHaveBeenCalled()
     expect(data.unscheduleWorkout).not.toHaveBeenCalled()
   })
@@ -71,12 +75,22 @@ describe('Calendar compatibility and failure boundaries', () => {
     const { data, service } = fixture()
     const preview = await service.scheduleWorkout(request)
     jest.advanceTimersByTime(600000)
-    await expect(service.scheduleWorkout({ ...request, confirmed: true,
-      confirmationId: preview.confirmationId as string })).rejects.toThrow('Invalid calendar confirmation')
+    // The stale approval is refused rather than silently honoured. Because
+    // nothing was dispatched the step is *proven* not applied, so it is
+    // reported as `not_attempted` together with the durable operationId a
+    // later resume can address — a bare throw would lose that handle.
+    expect(await service.scheduleWorkout({ ...request, confirmed: true,
+      confirmationId: preview.confirmationId as string })).toMatchObject({
+      success: false,
+      status: 'not_attempted',
+      desiredStateSatisfied: false,
+      errorCode: 'CONFIRMATION_STALE',
+      operationId: expect.any(String),
+    })
     expect(data.scheduleWorkout).not.toHaveBeenCalled()
   })
 
-  it('does not retry an uncertain write and consumes the confirmation', async () => {
+  it('does not retry an uncertain write and returns its durable receipt instead', async () => {
     const { data, service } = fixture()
     data.scheduleWorkout.mockRejectedValue(new PublicToolError('Outcome unknown; inspect Garmin Calendar'))
     const preview = await service.scheduleWorkout(request)
@@ -92,7 +106,11 @@ describe('Calendar compatibility and failure boundaries', () => {
       nextAction: 'reconcile_garmin_write_operation',
       operationId: expect.any(String),
     })
-    await expect(service.scheduleWorkout(confirmed)).rejects.toThrow('Invalid calendar confirmation')
+    // Re-confirming the same handle is a journal read, not a second POST: the
+    // unresolved step can never mint new write authority.
+    expect(await service.scheduleWorkout(confirmed)).toMatchObject({
+      success: false, status: 'unknown', manualReviewRequired: true,
+    })
     expect(data.scheduleWorkout).toHaveBeenCalledTimes(1)
   })
 
@@ -111,8 +129,13 @@ describe('Calendar compatibility and failure boundaries', () => {
     expect(result).toMatchObject({ successCount: 5, failureCount: 0 })
     expect(data.addWorkout).not.toHaveBeenCalled()
     expect(data.scheduleWorkout.mock.calls).toEqual(batch.schedules.map(entry => [entry.workoutId, entry.date]))
-    await expect(service.batchScheduleWorkouts({ ...batch, confirmed: true,
-      confirmationId: preview.confirmationId as string })).rejects.toThrow('Invalid calendar confirmation')
+    // A re-confirm of the same handle replays the durable batch receipt; it
+    // must not dispatch a sixth POST.
+    expect(await service.batchScheduleWorkouts({ ...batch, confirmed: true,
+      confirmationId: preview.confirmationId as string })).toMatchObject({
+      total: 5, successCount: 5, failureCount: 0, unknownCount: 0, notAttemptedCount: 0,
+    })
+    expect(data.scheduleWorkout).toHaveBeenCalledTimes(5)
   })
 
   it('rejects empty and oversized batches', async () => {
@@ -130,7 +153,11 @@ describe('Calendar compatibility and failure boundaries', () => {
     expect(await service.createAndScheduleWorkout(confirmed)).toMatchObject({
       success: false, workoutCreated: true, workoutId: 'new-42',
     })
-    await expect(service.createAndScheduleWorkout(confirmed)).rejects.toThrow('Invalid calendar confirmation')
+    // The template is retained, the retained id is reported, and a re-confirm
+    // replays that receipt instead of re-creating anything.
+    expect(await service.createAndScheduleWorkout(confirmed)).toMatchObject({
+      success: false, workoutCreated: true, workoutId: 'new-42', status: 'unknown',
+    })
     expect(data.addWorkout).toHaveBeenCalledTimes(1)
   })
 

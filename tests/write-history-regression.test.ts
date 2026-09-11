@@ -100,7 +100,8 @@ function makeOp(
   extras: Partial<WriteOperation> = {},
 ): WriteOperation {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    previewRevision: 0,
     operationId: id,
     kind: 'batch-schedule',
     accountKey: ACCOUNT,

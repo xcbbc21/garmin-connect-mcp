@@ -11,8 +11,14 @@
 import { promises as nodeFs } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { GarminWriteError, WRITE_ERROR_CODES } from './errors'
+import {
+  CURRENT_JOURNAL_SCHEMA_VERSION,
+  operationDocumentV2Schema,
+  parseOperationJournal,
+  type JournalLoadResult,
+  type JournalMigrationReport,
+} from './migration'
 import type { OperationDocument } from './types'
-import { emptyOperationDocument } from './types'
 
 /** 32 MiB: over this, new writes are blocked but the file stays readable. */
 export const MAX_OPERATION_FILE_BYTES = 32 * 1024 * 1024
@@ -85,6 +91,7 @@ export class FileOperationStore implements OperationStore {
     private readonly accountKey: string,
     private readonly fs: WriteStoreFileSystem = defaultFileSystem,
     private readonly randomSuffix: () => string = () => `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    private readonly now: () => Date = () => new Date(),
   ) {
     if (!isAbsolute(stateDirectory)) {
       throw new GarminWriteError(
@@ -105,16 +112,59 @@ export class FileOperationStore implements OperationStore {
     return this.root
   }
 
+  /**
+   * The last migration report produced by `read`/`readWithReport`. Callers that
+   * care (a receipt, a log line) can read it instead of re-deriving the facts.
+   */
+  private report: JournalMigrationReport | undefined
+
+  get migrationReport(): JournalMigrationReport | undefined {
+    return this.report
+  }
+
+  /**
+   * Read, validate and — when the file is still schema v1 — upgrade *in
+   * memory*. Nothing is persisted here: the upgrade must be committed under the
+   * account lock by `migrateJournalUnderLock`, so two processes can never race
+   * the rename.
+   */
   async read(): Promise<OperationDocument> {
+    return (await this.readWithReport()).document
+  }
+
+  async readWithReport(): Promise<JournalLoadResult> {
+    const raw = await this.readRawFile()
+    const result = parseOperationJournal(raw, this.accountKey, this.now)
+    this.report = result.report
+    return result
+  }
+
+  /**
+   * Raw JSON as it sits on disk, or `undefined` when no journal exists yet.
+   *
+   * An empty file is *not* a new journal: it is the fingerprint of a crash
+   * between create and write, and treating it as "no operations" would silently
+   * discard unknown writes. It is reported as corrupt instead.
+   */
+  async readRawFile(): Promise<unknown> {
     await this.assertSafePath()
     let raw: string
     try {
       raw = await this.fs.readFile(this.file, 'utf8')
     } catch (error) {
-      if (isNotFound(error)) return emptyOperationDocument(this.accountKey)
+      if (isNotFound(error)) return undefined
       throw this.unavailable('Operation journal could not be read', error)
     }
-    return this.parse(raw)
+    if (raw.trim().length === 0) {
+      throw this.corrupt(
+        'Operation journal is empty; refusing to treat a truncated journal as a new one',
+      )
+    }
+    try {
+      return JSON.parse(raw)
+    } catch (error) {
+      throw this.corrupt(`Operation journal is not valid JSON: ${describe(error)}`)
+    }
   }
 
   async save(document: OperationDocument, options: SaveOptions = {}): Promise<void> {
@@ -150,6 +200,23 @@ export class FileOperationStore implements OperationStore {
         WRITE_ERROR_CODES.STATE_UNAVAILABLE,
         'not_applied',
         'Operation journal exceeded the 32 MiB cap; archive it before new writes',
+      )
+    }
+    if (document.schemaVersion !== CURRENT_JOURNAL_SCHEMA_VERSION) {
+      throw this.corrupt(
+        `Refusing to persist a schemaVersion ${String(document.schemaVersion)} journal; ` +
+          `this build writes ${CURRENT_JOURNAL_SCHEMA_VERSION}`,
+      )
+    }
+    const validation = operationDocumentV2Schema.safeParse(document)
+    if (!validation.success) {
+      // Internal validation: a document this build assembled must satisfy the
+      // on-disk contract. Failing here means a bug, and writing it would make
+      // the next read fail closed against a file we authored.
+      throw this.corrupt(
+        'Refusing to persist an operation document that fails v2 validation: ' +
+          `${validation.error.issues[0]?.path.join('.') ?? '<root>'}: ` +
+          `${validation.error.issues[0]?.message ?? 'unknown'}`,
       )
     }
 
@@ -204,41 +271,6 @@ export class FileOperationStore implements OperationStore {
         if (isNotFound(error)) continue
         throw this.unavailable('Operation-journal path could not be inspected', error)
       }
-    }
-  }
-
-  private parse(raw: string): OperationDocument {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw)
-    } catch (error) {
-      throw new GarminWriteError(
-        WRITE_ERROR_CODES.STATE_CORRUPT,
-        'not_applied',
-        `Operation journal is not valid JSON: ${describe(error)}`,
-      )
-    }
-    if (!isRecord(parsed)) {
-      throw this.corrupt('Operation journal is not an object')
-    }
-    if (parsed.schemaVersion !== 1) {
-      throw this.corrupt('Operation journal uses an unsupported schemaVersion')
-    }
-    if (parsed.accountKey !== this.accountKey) {
-      throw this.corrupt('Operation journal belongs to a different account')
-    }
-    if (!Number.isInteger(parsed.revision) || (parsed.revision as number) < 0) {
-      throw this.corrupt('Operation journal has an invalid revision')
-    }
-    if (!isRecord(parsed.operations) || !isRecord(parsed.idempotencyIndex)) {
-      throw this.corrupt('Operation journal has an invalid shape')
-    }
-    return {
-      schemaVersion: 1,
-      revision: parsed.revision as number,
-      accountKey: this.accountKey,
-      operations: parsed.operations as OperationDocument['operations'],
-      idempotencyIndex: parsed.idempotencyIndex as OperationDocument['idempotencyIndex'],
     }
   }
 
