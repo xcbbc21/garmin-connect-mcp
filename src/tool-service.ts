@@ -367,6 +367,7 @@ export class GarminToolService {
         now: this.options.now,
         newOperationId: this.options.newOperationId,
         newStepId: this.options.newStepId,
+        shutdownSignal: this.options.shutdownSignal,
       })
     }
     return this.coordinator
@@ -385,12 +386,17 @@ export class GarminToolService {
    *
    * Read-only local queries deliberately use `writeCoordinator()` directly:
    * they see the migrated document in memory and must never trigger a write.
+   *
+   * The same prelude rolls forward abandoned `in_flight` markers. That is a
+   * state change, so it belongs here — on a path that is about to write and
+   * that takes the account lock — and never on a plain read: `getOperation`
+   * and `listOperations` must stay side-effect free.
    */
   private async writeCoordinatorReady(): Promise<WriteCoordinator> {
     const coordinator = this.writeCoordinator()
     if (!this.journalMigration) {
       this.journalMigration = coordinator.migrateJournal()
-        .then(report => report.warnings)
+        .then(report => coordinator.rollForwardAbandonedAttempts().then(() => report.warnings))
         .catch((error: unknown) => {
           // Do not memoize a failure: a later call should be able to retry a
           // transiently unreadable journal rather than being stuck forever.

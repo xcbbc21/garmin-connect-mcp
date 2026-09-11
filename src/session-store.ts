@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants, type Stats } from 'node:fs'
+import { constants } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   lstat,
@@ -14,7 +14,14 @@ import {
   GARMIN_BROWSER_AUTH_COMMAND,
   PublicToolError,
 } from './utils/errors'
-import { verifyNoGrantingDarwinAcl } from './darwin-private-acl'
+import {
+  findDeepestExistingPath,
+  verifyPosixCreationAnchor,
+  verifyPrivatePosixFileHandle,
+  verifyPrivatePosixParent,
+  verifySafeExistingPosixDestination,
+  verifySafePosixAncestorChain,
+} from './private-path'
 import {
   createWindowsPrivateAcl,
   type WindowsPrivateAcl,
@@ -359,182 +366,6 @@ async function preparePosixSessionWriteDestination(
   const destination = join(canonicalParent, destinationName)
   await verifySafeExistingPosixDestination(destination)
   return { destination, parent: canonicalParent }
-}
-
-async function findDeepestExistingPath(path: string): Promise<{
-  existingPath: string
-  missingComponents: string[]
-}> {
-  let current = path
-  const missingComponents: string[] = []
-  while (true) {
-    try {
-      await lstat(current)
-      return { existingPath: current, missingComponents }
-    } catch (error) {
-      if (!isRecord(error) || error.code !== 'ENOENT') throw error
-    }
-
-    const parent = dirname(current)
-    if (parent === current) throw new Error('Session directory has no anchor')
-    missingComponents.unshift(basename(current))
-    current = parent
-  }
-}
-
-async function verifySafePosixAncestorChain(path: string): Promise<void> {
-  const effectiveUid = currentEffectiveUid()
-  for (const ancestor of ancestorPaths(path)) {
-    const before = await lstat(ancestor)
-    assertSafePosixAncestor(before, effectiveUid)
-    const after = await verifyDarwinAclBoundToEntry(ancestor, before)
-    assertSafePosixAncestor(after, effectiveUid)
-  }
-}
-
-async function verifyPosixCreationAnchor(path: string): Promise<void> {
-  const effectiveUid = currentEffectiveUid()
-  const before = await lstat(path)
-  assertPosixCreationAnchor(before, effectiveUid)
-  const after = await verifyDarwinAclBoundToEntry(path, before)
-  assertPosixCreationAnchor(after, effectiveUid)
-}
-
-async function verifyPrivatePosixParent(path: string): Promise<void> {
-  const effectiveUid = currentEffectiveUid()
-  const before = await lstat(path)
-  assertPrivatePosixParent(before, effectiveUid)
-  const after = await verifyDarwinAclBoundToEntry(path, before)
-  assertPrivatePosixParent(after, effectiveUid)
-}
-
-async function verifySafeExistingPosixDestination(path: string): Promise<void> {
-  let info
-  try {
-    info = await lstat(path)
-  } catch (error) {
-    if (isRecord(error) && error.code === 'ENOENT') return
-    throw error
-  }
-  const effectiveUid = currentEffectiveUid()
-  assertPrivatePosixFile(info, effectiveUid, 'Unsafe session destination')
-  const after = await verifyDarwinAclBoundToEntry(path, info)
-  assertPrivatePosixFile(after, effectiveUid, 'Unsafe session destination')
-}
-
-async function verifyPrivatePosixFileHandle(
-  file: FileHandle,
-  path: string,
-): Promise<void> {
-  const info = await file.stat()
-  const effectiveUid = currentEffectiveUid()
-  assertPrivatePosixFile(info, effectiveUid, 'Unsafe session file')
-  const before = await lstat(path)
-  assertSameFileSystemEntry(info, before)
-  assertPrivatePosixFile(before, effectiveUid, 'Unsafe session file')
-  const after = await verifyDarwinAclBoundToEntry(path, before)
-  assertSameFileSystemEntry(info, after)
-  assertPrivatePosixFile(after, effectiveUid, 'Unsafe session file')
-}
-
-async function verifyDarwinAclBoundToEntry(
-  path: string,
-  before: Stats,
-): Promise<Stats> {
-  if (process.platform !== 'darwin') return before
-  await verifyNoGrantingDarwinAcl(path)
-  const after = await lstat(path)
-  assertSameFileSystemEntry(before, after)
-  return after
-}
-
-function assertSafePosixAncestor(
-  info: Stats,
-  effectiveUid: number | undefined,
-): void {
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new Error('Unsafe session directory')
-  }
-  if (
-    effectiveUid !== undefined
-    && info.uid !== 0
-    && info.uid !== effectiveUid
-  ) {
-    throw new Error('Unsafe session directory owner')
-  }
-  if (
-    (info.mode & 0o022) !== 0
-    && !(info.uid === 0 && (info.mode & 0o1000) !== 0)
-  ) {
-    throw new Error('Unsafe session directory permissions')
-  }
-}
-
-function assertPosixCreationAnchor(
-  info: Stats,
-  effectiveUid: number | undefined,
-): void {
-  if (
-    !info.isDirectory()
-    || info.isSymbolicLink()
-    || (effectiveUid !== undefined && info.uid !== effectiveUid)
-    || (info.mode & 0o300) !== 0o300
-    || (info.mode & 0o022) !== 0
-  ) {
-    throw new Error('Unsafe session directory anchor')
-  }
-}
-
-function assertPrivatePosixParent(
-  info: Stats,
-  effectiveUid: number | undefined,
-): void {
-  if (
-    !info.isDirectory()
-    || info.isSymbolicLink()
-    || (effectiveUid !== undefined && info.uid !== effectiveUid)
-    || (info.mode & 0o300) !== 0o300
-    || (info.mode & 0o077) !== 0
-  ) {
-    throw new Error('Unsafe session directory')
-  }
-}
-
-function assertPrivatePosixFile(
-  info: Stats,
-  effectiveUid: number | undefined,
-  message: string,
-): void {
-  if (
-    !info.isFile()
-    || info.isSymbolicLink()
-    || info.nlink !== 1
-    || (effectiveUid !== undefined && info.uid !== effectiveUid)
-    || (info.mode & 0o077) !== 0
-  ) {
-    throw new Error(message)
-  }
-}
-
-function assertSameFileSystemEntry(left: Stats, right: Stats): void {
-  if (left.dev !== right.dev || left.ino !== right.ino) {
-    throw new Error('Session path changed during verification')
-  }
-}
-
-function ancestorPaths(path: string): string[] {
-  const paths: string[] = []
-  let current = path
-  while (true) {
-    paths.unshift(current)
-    const parent = dirname(current)
-    if (parent === current) return paths
-    current = parent
-  }
-}
-
-function currentEffectiveUid(): number | undefined {
-  return typeof process.geteuid === 'function' ? process.geteuid() : undefined
 }
 
 export function bindSessionTokensToAccount(

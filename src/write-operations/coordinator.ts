@@ -159,6 +159,11 @@ export interface ScheduleExecution {
   receipts: ScheduleStepReceipt[]
 }
 
+/** Steps whose abandoned pre-dispatch marker became an honest `unknown`. */
+export interface AbandonedAttemptReport {
+  rolledForward: { operationId: string; stepId: string }[]
+}
+
 export interface ExecuteScheduleOptions {
   /**
    * When aborted, no *further* entry is dispatched. An entry already in flight
@@ -237,6 +242,13 @@ export interface WriteCoordinatorOptions {
   now?: () => Date
   newOperationId?: () => string
   newStepId?: () => string
+  /**
+   * Process-level cancellation (MCP transport closing). Waiting for the account
+   * lock stops immediately when it fires, so a shutdown never blocks on a
+   * contended lock. A write that already holds the lock is not interrupted
+   * here; its own `signal` governs the batch.
+   */
+  shutdownSignal?: AbortSignal
 }
 
 const BLOCKED_REASON =
@@ -257,6 +269,21 @@ export class WriteCoordinator {
 
   private get accountKey(): string {
     return this.options.accountKey
+  }
+
+  /**
+   * Take the account lock, with the caller's cancellation merged with the
+   * process shutdown signal.
+   *
+   * Every write decision — preview, confirm, batch, create, unschedule — goes
+   * through here, so "waiting for the lock is bounded and cancellable" holds
+   * for all of them rather than only for the one path that remembered to pass a
+   * signal.
+   */
+  private async runLocked<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const shutdown = this.options.shutdownSignal
+    const merged = shutdown && signal ? mergeSignals(shutdown, signal) : shutdown ?? signal
+    return this.options.lock.runExclusive(task, { signal: merged })
   }
 
   /** Read the journal without taking the write lock; safe for read-only tools. */
@@ -286,13 +313,70 @@ export class WriteCoordinator {
    * to do.
    */
   async migrateJournal(): Promise<JournalMigrationReport> {
-    return this.options.lock.runExclusive(async () => {
+    return this.runLocked(async () => {
       const { report } = await migrateJournalUnderLock({
         store: this.options.store,
         accountKey: this.accountKey,
         now: this.options.now,
       })
       return report
+    })
+  }
+
+  /**
+   * Replace leftover pre-dispatch `in_flight` markers with `unknown`.
+   *
+   * `in_flight` is written durably *before* the single network dispatch, so a
+   * marker still on disk after a process died is the fingerprint of a write
+   * whose outcome nobody observed. It is never `succeeded` (no receipt was
+   * recorded) and never `failed` (a request may well have been sent), so the
+   * only honest status is `unknown` — which keeps the business key occupied and
+   * therefore keeps blocking a blind re-create.
+   *
+   * Three things make this safe, and all three are required:
+   *
+   *   1. *It runs under the account lock.* Every dispatch path acquires that
+   *      lock first, so holding it is positive proof that no live executor is
+   *      between `beginAttempt` and its outcome. Without the lock a second
+   *      process could be mid-write and this would rewrite a live record.
+   *   2. *It never reports success.* The step becomes `unknown`, not
+   *      `succeeded`; only a real Garmin receipt or a read-only observation
+   *      may do that, and both come from their own paths.
+   *   3. *Plain reads never call it.* `getOperation`/`listOperations` stay
+   *      read-only, so opening a receipt cannot mutate the journal.
+   *
+   * A crashed process leaves its lock directory behind, and a stale lock is
+   * never preempted — so in practice this runs after the documented offline
+   * recovery step released that lock, which is exactly when it is known that
+   * the crashed holder is gone.
+   */
+  async rollForwardAbandonedAttempts(): Promise<AbandonedAttemptReport> {
+    return this.runLocked(async () => {
+      const document = await this.options.store.read()
+      const rolledForward: { operationId: string; stepId: string }[] = []
+      for (const operation of Object.values(document.operations)) {
+        for (const step of operation.steps) {
+          if (step.status !== 'in_flight') continue
+          step.status = 'unknown'
+          step.evidence = 'none'
+          step.errorCode = WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN
+          // Close the matching open attempt only. Touching the newest attempt
+          // blindly would mislabel the record if the journal ever held an
+          // attempt this step does not own.
+          const open = step.attempts.filter(
+            candidate => candidate.attempt === step.attempt && candidate.outcome === 'in_flight',
+          ).pop()
+          if (open) {
+            open.outcome = 'unknown'
+            open.finishedAt = this.now().toISOString()
+            open.errorCode = WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN
+          }
+          operation.updatedAt = this.now().toISOString()
+          rolledForward.push({ operationId: operation.operationId, stepId: step.stepId })
+        }
+      }
+      if (rolledForward.length > 0) await this.persist(document)
+      return { rolledForward }
     })
   }
 
@@ -313,7 +397,7 @@ export class WriteCoordinator {
    * list, and either reuses an existing operation or creates a new one.
    */
   private async previewSingleStep(input: SingleStepPreviewInput): Promise<SchedulePreview> {
-    return this.options.lock.runExclusive(async () => {
+    return this.runLocked(async () => {
       const document = await this.options.store.read()
       const idemHash = input.idempotencyKey
         ? idempotencyKeyHash(this.accountKey, input.idempotencyKey)
@@ -472,7 +556,7 @@ export class WriteCoordinator {
    * blocked or already satisfied.
    */
   async previewSchedule(input: SchedulePreviewInput): Promise<SchedulePreview> {
-    return this.options.lock.runExclusive(async () => {
+    return this.runLocked(async () => {
       const document = await this.options.store.read()
       const idemHash = input.idempotencyKey
         ? idempotencyKeyHash(this.accountKey, input.idempotencyKey)
@@ -652,7 +736,7 @@ export class WriteCoordinator {
     confirmation: WriteConfirmation,
     options: ExecuteScheduleOptions = {},
   ): Promise<ScheduleExecution> {
-    return this.options.lock.runExclusive(async () => {
+    return await this.runLocked(async () => {
       const document = await this.options.store.read()
       const operationId = confirmation.operationId
       const operation = this.authorize(
@@ -793,7 +877,7 @@ export class WriteCoordinator {
       }
 
       return { operationId, receipts }
-    })
+    }, options.signal)
   }
 
   /**
@@ -805,7 +889,7 @@ export class WriteCoordinator {
     confirmation: WriteConfirmation,
     writer: CreateWriter,
   ): Promise<ScheduleExecution> {
-    return this.options.lock.runExclusive(async () => {
+    return this.runLocked(async () => {
       const document = await this.options.store.read()
       const operationId = confirmation.operationId
       const operation = this.authorize(
@@ -838,7 +922,7 @@ export class WriteCoordinator {
     confirmation: WriteConfirmation,
     writer: UnscheduleWriter,
   ): Promise<ScheduleExecution> {
-    return this.options.lock.runExclusive(async () => {
+    return this.runLocked(async () => {
       const document = await this.options.store.read()
       const operationId = confirmation.operationId
       const operation = this.authorize(
@@ -876,7 +960,7 @@ export class WriteCoordinator {
    * inside the account lock, still journaled, still dispatched at most once).
    */
   async previewCreateAndSchedule(input: CreateAndSchedulePreviewInput): Promise<SchedulePreview> {
-    return this.options.lock.runExclusive(async () => {
+    return this.runLocked(async () => {
       const document = await this.options.store.read()
       const idemHash = input.idempotencyKey
         ? idempotencyKeyHash(this.accountKey, input.idempotencyKey)
@@ -1044,7 +1128,7 @@ export class WriteCoordinator {
     confirmation: WriteConfirmation,
     writer: CreateAndScheduleWriter,
   ): Promise<ScheduleExecution> {
-    return this.options.lock.runExclusive(async () => {
+    return this.runLocked(async () => {
       const document = await this.options.store.read()
       const operationId = confirmation.operationId
       const operation = this.authorize(
@@ -1864,8 +1948,24 @@ function usableWorkoutId(value: unknown): string | undefined {
 }
 
 /**
- * Strip caller-supplied metadata (the raw idempotencyKey) before persisting
- * the request. The hash is kept separately on the operation, and the same
- * helper is used by the v1 -> v2 journal migration so persisted requests and
- * freshly previewed requests always agree on what the canonical payload is.
+ * Combine two cancellation signals into one, without depending on
+ * `AbortSignal.any` (absent from the earliest Node 20 releases this package
+ * still supports). The returned signal aborts when either input does, and the
+ * listeners are dropped once it has fired so a long-lived shutdown signal does
+ * not accumulate handlers.
  */
+function mergeSignals(first: AbortSignal, second: AbortSignal): AbortSignal {
+  const controller = new AbortController()
+  const forward = (): void => {
+    first.removeEventListener('abort', forward)
+    second.removeEventListener('abort', forward)
+    controller.abort()
+  }
+  if (first.aborted || second.aborted) {
+    controller.abort()
+    return controller.signal
+  }
+  first.addEventListener('abort', forward, { once: true })
+  second.addEventListener('abort', forward, { once: true })
+  return controller.signal
+}

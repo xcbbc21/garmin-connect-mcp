@@ -1,9 +1,15 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileAccountLock } from '../src/write-operations/lock'
 import { GarminWriteError, WRITE_ERROR_CODES } from '../src/write-operations/errors'
+
+const CANCELLED = 'Waiting for the account write lock was cancelled; no new write was sent'
+
+function tick(ms = 20): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 const WORKER = join(__dirname, 'fixtures', 'write-lock-worker.ts')
 const ACCOUNT = 'lock-account'
@@ -128,5 +134,111 @@ describe('FileAccountLock', () => {
 
   it('rejects a relative state root', () => {
     expect(() => new FileAccountLock('relative', ACCOUNT)).toThrow(GarminWriteError)
+  })
+
+  // -------------------------------------------------------------------------
+  // Cancellable waiting (C4). Giving up on the wait is always a provable
+  // non-application, because the lock is acquired strictly before a dispatch.
+  // -------------------------------------------------------------------------
+
+  it('fails fast on an already-cancelled request without creating the lock', async () => {
+    const lock = new FileAccountLock(base, ACCOUNT)
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(lock.runExclusive(async () => 'never', { signal: controller.signal }))
+      .rejects.toMatchObject({
+        code: WRITE_ERROR_CODES.WRITE_NOT_APPLIED,
+        message: expect.stringContaining(CANCELLED) as unknown as string,
+      })
+    // Nothing was taken, so nothing was leaked for the next process to clear.
+    await expect(lstat(lock.path)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('stops waiting for a foreign holder when the signal aborts', async () => {
+    const lock = new FileAccountLock(base, ACCOUNT, undefined, { waitTimeoutMs: 5_000, pollIntervalMs: 10 })
+    await mkdir(lock.path, { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(lock.path, 'owner.json'),
+      JSON.stringify({ ownerToken: 'foreign', pid: 1, startedAt: '2000-01-01T00:00:00.000Z' }),
+      'utf8',
+    )
+
+    const controller = new AbortController()
+    const started = Date.now()
+    const waiting = lock.runExclusive(async () => 'never', { signal: controller.signal })
+    setTimeout(() => controller.abort(), 30)
+    await expect(waiting).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.WRITE_NOT_APPLIED,
+      message: expect.stringContaining(CANCELLED) as unknown as string,
+    })
+    // Cancelled well inside the 5 s budget; the foreign lock is untouched.
+    expect(Date.now() - started).toBeLessThan(1_000)
+    await expect(readFile(join(lock.path, 'owner.json'), 'utf8')).resolves.toContain('foreign')
+  })
+
+  it('never abandons a task that already holds the lock', async () => {
+    const lock = new FileAccountLock(base, ACCOUNT)
+    const controller = new AbortController()
+
+    const result = await lock.runExclusive(async () => {
+      // By now the write may be in flight, so the signal must not stop it.
+      controller.abort()
+      return 'finished'
+    }, { signal: controller.signal })
+
+    expect(result).toBe('finished')
+    await expect(lock.runExclusive(async () => 'next')).resolves.toBe('next')
+  })
+
+  it('gives up while a same-process holder still holds the lock', async () => {
+    const lock = new FileAccountLock(base, ACCOUNT, undefined, { waitTimeoutMs: 150, pollIntervalMs: 10 })
+    let holderDone = false
+    const holding = lock.runExclusive(async () => {
+      await tick(500)
+      holderDone = true
+    })
+    await tick()
+
+    const started = Date.now()
+    await expect(lock.runExclusive(async () => 'never')).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.OPERATION_BUSY,
+    })
+    // The in-process queue and the on-disk lock share ONE budget: the second
+    // caller may not silently wait for the holder to finish.
+    expect(holderDone).toBe(false)
+    expect(Date.now() - started).toBeLessThan(450)
+
+    await holding
+  })
+
+  it('lets the next waiter inherit a fresh budget after a cancelled waiter', async () => {
+    const lock = new FileAccountLock(base, ACCOUNT, undefined, { waitTimeoutMs: 500, pollIntervalMs: 10 })
+    let release!: () => void
+    const holding = lock.runExclusive(() => new Promise<void>(resolve => { release = resolve }))
+    await tick()
+
+    const controller = new AbortController()
+    const cancelled = lock.runExclusive(async () => 'never', { signal: controller.signal })
+    controller.abort()
+    await expect(cancelled).rejects.toMatchObject({ code: WRITE_ERROR_CODES.WRITE_NOT_APPLIED })
+
+    release()
+    await holding
+    // A queued entry nobody will use must not delay or deadlock the queue.
+    await expect(lock.runExclusive(async () => 'after')).resolves.toBe('after')
+  })
+
+  it('shares the budget with the caller-supplied wait timeout', async () => {
+    const lock = new FileAccountLock(base, ACCOUNT, undefined, { waitTimeoutMs: 60, pollIntervalMs: 10 })
+    let release!: () => void
+    const holding = lock.runExclusive(() => new Promise<void>(resolve => { release = resolve }))
+    await tick()
+
+    await expect(lock.runExclusive(async () => 'never')).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.OPERATION_BUSY,
+    })
+    release()
+    await holding
   })
 })

@@ -11,6 +11,7 @@ const WINDOWS_ACL_ERROR = 'Garmin session token file could not be written'
 
 type WindowsAclOperation =
   | 'prepare-directory'
+  | 'verify-directory'
   | 'secure-file'
   | 'verify-file'
 
@@ -42,6 +43,22 @@ export interface WindowsPrivateAclDependencies {
 export interface WindowsPrivateAcl {
   /** Create atomically with an exact DACL, or read-only verify if it exists. */
   prepareDirectory(path: string): Promise<void>
+  /**
+   * Read-only verification of an existing directory chain's exact DACL.
+   *
+   * Separate from `prepareDirectory` on purpose: a read-only caller (the write
+   * journal on its read path) must be able to prove the chain without creating
+   * anything as a side effect. The DACL is never rewritten; a chain that is
+   * reparse-pointed or not exactly private fails.
+   *
+   * `allowMissing` distinguishes "this store has not been created yet" from
+   * "this store is not private". A component that does not exist is not a
+   * privacy violation, so with `allowMissing` the walk stops there and
+   * resolves; without it, a missing component fails. A *file* where a
+   * directory belongs always fails, and the trusted special-folder root must
+   * exist either way.
+   */
+  verifyDirectory(path: string, options?: { allowMissing?: boolean }): Promise<void>
   /** Replace the DACL of an existing empty file, then verify it exactly. */
   secureFile(path: string): Promise<void>
   /** Read-only verification of an existing regular file's exact DACL. */
@@ -65,9 +82,13 @@ function Fail-Acl {
 
 $operation = [Environment]::GetEnvironmentVariable('GARMIN_ACL_OPERATION', 'Process')
 $target = [Environment]::GetEnvironmentVariable('GARMIN_ACL_TARGET', 'Process')
+$allowMissingFlag = [Environment]::GetEnvironmentVariable('GARMIN_ACL_ALLOW_MISSING', 'Process')
 if ([String]::IsNullOrWhiteSpace($operation) -or [String]::IsNullOrWhiteSpace($target)) {
   Fail-Acl
 }
+# Only '1' means "a not-yet-created store is not a privacy violation". Any
+# other value (including a forging caller's junk) keeps the strict behaviour.
+$script:allowMissing = $allowMissingFlag -ceq '1'
 
 $fullPath = [IO.Path]::GetFullPath($target)
 $script:currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -182,7 +203,7 @@ function Assert-ExactSecurity([string] $path, [bool] $directory) {
   if ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) { Fail-Acl }
 }
 
-function Assert-ExactPrivateDirectoryChain([string] $directoryPath, [bool] $createMissing) {
+function Assert-ExactPrivateDirectoryChain([string] $directoryPath, [bool] $createMissing, [bool] $allowMissing) {
   $trustedRoot = Get-LongestTrustedUserRoot $directoryPath
   Assert-NoReparseChain $trustedRoot
   if (-not [IO.Directory]::Exists($trustedRoot)) { Fail-Acl }
@@ -203,30 +224,42 @@ function Assert-ExactPrivateDirectoryChain([string] $directoryPath, [bool] $crea
     if ([IO.Directory]::Exists($current)) {
       # Existing components are read-only verified, never rewritten.
       Assert-ExactSecurity $current $true
-    } elseif ([IO.File]::Exists($current) -or -not $createMissing) {
+    } elseif ([IO.File]::Exists($current)) {
+      # A file where a directory belongs is never merely "absent".
       Fail-Acl
-    } else {
+    } elseif ($createMissing) {
       # Create one component at a time so no ordinary/shared intermediate can
       # appear between the trusted special-folder root and the session parent.
       [void] [IO.Directory]::CreateDirectory($current, (New-ExactDirectorySecurity))
       Assert-ExactSecurity $current $true
+    } elseif ($allowMissing) {
+      # The store has not been created yet, so nothing below this component can
+      # exist either. Stop the walk: the caller decides whether to create it.
+      return
+    } else {
+      Fail-Acl
     }
   }
 }
 
 switch ($operation) {
   'prepare-directory' {
-    Assert-ExactPrivateDirectoryChain $fullPath $true
+    Assert-ExactPrivateDirectoryChain $fullPath $true $false
+  }
+  'verify-directory' {
+    # Read-only: never creates, and tolerates an absent store only when the
+    # caller explicitly asked for that distinction.
+    Assert-ExactPrivateDirectoryChain $fullPath $false $script:allowMissing
   }
   'secure-file' {
-    Assert-ExactPrivateDirectoryChain ([IO.Path]::GetDirectoryName($fullPath)) $false
+    Assert-ExactPrivateDirectoryChain ([IO.Path]::GetDirectoryName($fullPath)) $false $false
     Assert-NoReparseChain $fullPath
     if (-not [IO.File]::Exists($fullPath)) { Fail-Acl }
     [IO.File]::SetAccessControl($fullPath, (New-ExactFileSecurity))
     Assert-ExactSecurity $fullPath $false
   }
   'verify-file' {
-    Assert-ExactPrivateDirectoryChain ([IO.Path]::GetDirectoryName($fullPath)) $false
+    Assert-ExactPrivateDirectoryChain ([IO.Path]::GetDirectoryName($fullPath)) $false $false
     Assert-ExactSecurity $fullPath $false
   }
   default {
@@ -254,7 +287,11 @@ export async function createWindowsPrivateAcl(
       'powershell.exe',
     )
     const run = dependencies.run ?? runWindowsCommand
-    const invoke = async (operation: WindowsAclOperation, path: string): Promise<void> => {
+    const invoke = async (
+      operation: WindowsAclOperation,
+      path: string,
+      allowMissing = false,
+    ): Promise<void> => {
       try {
         const target = validatedWindowsTarget(path)
         const result = await run(powershell, [
@@ -263,7 +300,7 @@ export async function createWindowsPrivateAcl(
           '-NonInteractive',
           '-EncodedCommand',
           ENCODED_WINDOWS_EXACT_ACL_SCRIPT,
-        ], windowsCommandOptions(systemRoot, operation, target))
+        ], windowsCommandOptions(systemRoot, operation, target, allowMissing))
         if (
           Buffer.byteLength(result.stdout, 'utf8') > WINDOWS_COMMAND_MAX_BUFFER_BYTES
           || Buffer.byteLength(result.stderr, 'utf8') > WINDOWS_COMMAND_MAX_BUFFER_BYTES
@@ -277,6 +314,9 @@ export async function createWindowsPrivateAcl(
 
     return {
       prepareDirectory: path => invoke('prepare-directory', path),
+      verifyDirectory: (path, options) => (
+        invoke('verify-directory', path, options?.allowMissing === true)
+      ),
       secureFile: path => invoke('secure-file', path),
       verifyFile: path => invoke('verify-file', path),
     }
@@ -289,10 +329,12 @@ function windowsCommandOptions(
   systemRoot: string,
   operation: WindowsAclOperation,
   target: string,
+  allowMissing = false,
 ): WindowsAclCommandOptions {
   return {
     encoding: 'utf8',
     env: {
+      GARMIN_ACL_ALLOW_MISSING: allowMissing ? '1' : '0',
       GARMIN_ACL_OPERATION: operation,
       GARMIN_ACL_TARGET: target,
       SystemRoot: systemRoot,

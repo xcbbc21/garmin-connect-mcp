@@ -2,14 +2,33 @@
  * Account-scoped, fail-closed operation journal.
  *
  * The store never touches the network and never silently repairs itself. Any
- * doubt (missing permissions, corrupt JSON, unknown schema, account mismatch,
- * projected size over the cap) becomes a typed error and the caller must not
- * proceed to a Garmin write. Every mutation is an atomic temp-write + fsync +
- * rename so a crash can never leave a truncated or empty journal behind.
+ * doubt (unsafe directory chain, foreign owner, widened mode, a granting macOS
+ * ACL, a non-private DACL, a file where a directory belongs, corrupt JSON,
+ * unknown schema, account mismatch, size over the cap) becomes a typed error
+ * and the caller must not proceed to a Garmin write. Every mutation is an
+ * atomic temp-write + fsync + rename so a crash can never leave a truncated or
+ * empty journal behind.
+ *
+ * Three properties this module is responsible for, and how they are obtained:
+ *
+ *   1. *The journal is private.* The proof is not implemented here — it is
+ *      `./private-state`, which delegates to the same policy module the session
+ *      token store uses, so the two cannot drift apart. Verification runs over
+ *      the whole ancestor chain and over the file that actually landed, never
+ *      "chmod and assume".
+ *   2. *The read is bounded.* There is no unbounded `readFile` on this path at
+ *      all: the file is opened, `fstat`ed, the size is checked against the cap,
+ *      and then at most one byte past the reported size is read through the
+ *      handle. A journal that reached the cap stays on disk — nothing here
+ *      deletes or truncates state to get unblocked.
+ *   3. *Durability failures are reported.* Only a platform that genuinely has
+ *      no directory fsync is tolerated; EIO and friends are surfaced instead of
+ *      being swallowed as success.
  */
 
-import { promises as nodeFs } from 'node:fs'
+import { promises as nodeFs, type Stats } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { findDeepestExistingPath } from '../private-path'
 import { GarminWriteError, WRITE_ERROR_CODES } from './errors'
 import {
   CURRENT_JOURNAL_SCHEMA_VERSION,
@@ -18,6 +37,7 @@ import {
   type JournalLoadResult,
   type JournalMigrationReport,
 } from './migration'
+import { defaultPrivateStateGuard, type PrivateStateGuard } from './private-state'
 import type { OperationDocument } from './types'
 
 /** 32 MiB: over this, new writes are blocked but the file stays readable. */
@@ -25,27 +45,62 @@ export const MAX_OPERATION_FILE_BYTES = 32 * 1024 * 1024
 
 const OPERATION_FILE_NAME = 'operations.json'
 
+/**
+ * Platforms with no directory fsync at all. Windows is the only one: `open` on
+ * a directory there does not produce a handle that can be synced, so the
+ * absence of the call is a platform fact rather than a lost write.
+ */
+const DIRECTORY_SYNC_UNSUPPORTED_PLATFORMS: ReadonlySet<NodeJS.Platform> =
+  new Set<NodeJS.Platform>(['win32'])
+
+/**
+ * Codes that mean "this filesystem does not implement directory fsync", not
+ * "the bytes did not reach the disk". Deliberately narrow: EIO, ENOSPC, EPERM
+ * and EACCES are real durability failures and must be reported.
+ */
+const UNSUPPORTED_DIRECTORY_SYNC_CODES: ReadonlySet<string> = new Set<string>([
+  'EINVAL',
+  'ENOTSUP',
+  'EOPNOTSUPP',
+  'ENOSYS',
+])
+
 export interface StoreFileHandle {
   write(data: string): Promise<void>
   sync(): Promise<void>
   close(): Promise<void>
+  /** `fstat` on this handle: identity and size of the inode actually held. */
+  stat(): Promise<Stats>
+  /**
+   * A positioned read. The caller owns the size bound; this never returns more
+   * than `length` bytes and never reaches beyond the open inode.
+   */
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ bytesRead: number }>
 }
 
 export interface StoreStat {
   isFile(): boolean
   isSymbolicLink(): boolean
   size: number
+  dev: number
+  ino: number
 }
 
 /** The narrow filesystem surface the store needs; injectable for fault tests. */
 export interface WriteStoreFileSystem {
   mkdir(path: string, options: { recursive: true; mode: number }): Promise<void>
-  readFile(path: string, encoding: 'utf8'): Promise<string>
   open(path: string, flags: string, mode: number): Promise<StoreFileHandle>
   rename(from: string, to: string): Promise<void>
   unlink(path: string): Promise<void>
   chmod(path: string, mode: number): Promise<void>
   lstat(path: string): Promise<StoreStat>
+  /** Open a directory and fsync it; real failures must surface to the caller. */
+  syncDirectory(path: string): Promise<void>
 }
 
 export interface SaveOptions {
@@ -65,26 +120,50 @@ export interface OperationStore {
 /** Real filesystem adapter; exported so tests can wrap and inject faults. */
 export const nodeStoreFileSystem: WriteStoreFileSystem = {
   mkdir: (path, options) => nodeFs.mkdir(path, options).then(() => undefined),
-  readFile: (path, encoding) => nodeFs.readFile(path, encoding),
   open: async (path, flags, mode) => {
     const handle = await nodeFs.open(path, flags, mode)
     return {
       write: async (data: string) => { await handle.writeFile(data, 'utf8') },
       sync: () => handle.sync(),
       close: () => handle.close(),
+      stat: () => handle.stat(),
+      read: (buffer, offset, length, position) => handle.read(buffer, offset, length, position),
     }
   },
   rename: (from, to) => nodeFs.rename(from, to),
   unlink: (path) => nodeFs.unlink(path),
   chmod: (path, mode) => nodeFs.chmod(path, mode),
   lstat: (path) => nodeFs.lstat(path),
+  syncDirectory: async (path) => {
+    const handle = await nodeFs.open(path, 'r')
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+  },
 }
 
 const defaultFileSystem: WriteStoreFileSystem = nodeStoreFileSystem
 
+export interface FileOperationStoreOptions {
+  /** The private-state proof. Defaults to the running platform's guard. */
+  guard?: PrivateStateGuard
+  /**
+   * Selects the default guard and the directory-fsync rule. Injectable so the
+   * Windows branches can be exercised on a host that is not Windows.
+   */
+  platform?: NodeJS.Platform
+  /** Symlink-resolving `realpath`; injectable for tests. */
+  realpath?: (path: string) => Promise<string>
+}
+
 export class FileOperationStore implements OperationStore {
   private readonly root: string
   private readonly file: string
+  private readonly stateGuard: PrivateStateGuard
+  private readonly platform: NodeJS.Platform
+  private readonly realpath: (path: string) => Promise<string>
 
   constructor(
     stateDirectory: string,
@@ -92,6 +171,7 @@ export class FileOperationStore implements OperationStore {
     private readonly fs: WriteStoreFileSystem = defaultFileSystem,
     private readonly randomSuffix: () => string = () => `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     private readonly now: () => Date = () => new Date(),
+    options: FileOperationStoreOptions = {},
   ) {
     if (!isAbsolute(stateDirectory)) {
       throw new GarminWriteError(
@@ -100,10 +180,25 @@ export class FileOperationStore implements OperationStore {
         'GARMIN_STATE_DIR must be an absolute path',
       )
     }
+    if (!isSinglePathSegment(accountKey)) {
+      throw new GarminWriteError(
+        WRITE_ERROR_CODES.STATE_UNAVAILABLE,
+        'not_applied',
+        'Write-journal account key must be a single path segment',
+      )
+    }
     this.root = join(resolve(stateDirectory), accountKey)
     this.file = join(this.root, OPERATION_FILE_NAME)
+    this.platform = options.platform ?? process.platform
+    this.stateGuard = options.guard ?? defaultPrivateStateGuard(this.platform)
+    this.realpath = options.realpath ?? (path => nodeFs.realpath(path))
   }
 
+  /**
+   * The path as configured. I/O goes to the canonicalised form of the same
+   * entry, so this is for callers that need to name the location, not to
+   * bypass the proof.
+   */
   get filePath(): string {
     return this.file
   }
@@ -147,14 +242,10 @@ export class FileOperationStore implements OperationStore {
    * discard unknown writes. It is reported as corrupt instead.
    */
   async readRawFile(): Promise<unknown> {
-    await this.assertSafePath()
-    let raw: string
-    try {
-      raw = await this.fs.readFile(this.file, 'utf8')
-    } catch (error) {
-      if (isNotFound(error)) return undefined
-      throw this.unavailable('Operation journal could not be read', error)
-    }
+    const file = await this.verifiedFilePath()
+    if (!file) return undefined
+
+    const raw = await this.readFileBounded(file)
     if (raw.trim().length === 0) {
       throw this.corrupt(
         'Operation journal is empty; refusing to treat a truncated journal as a new one',
@@ -175,13 +266,12 @@ export class FileOperationStore implements OperationStore {
         'Refusing to persist an operation document for a different account',
       )
     }
-    await this.assertSafePath()
-    await this.fs.mkdir(this.root, { recursive: true, mode: 0o700 })
-    try {
-      await this.fs.chmod(this.root, 0o700)
-    } catch {
-      // Best effort: platforms without POSIX modes keep their default ACLs.
-    }
+    const root = await this.prepareRoot()
+    const file = join(root, OPERATION_FILE_NAME)
+    // Anything already sitting at the destination must satisfy the private-file
+    // policy. Replacing a symlink, a directory or a group-readable journal would
+    // be the silent repair this store refuses to perform; the operator decides.
+    await this.stateGuard.verifyFile(file)
 
     if (options.expectedRevision !== undefined) {
       const current = await this.read()
@@ -220,18 +310,27 @@ export class FileOperationStore implements OperationStore {
       )
     }
 
-    const tempFile = join(this.root, `.operations.${this.randomSuffix()}.tmp`)
+    const tempFile = join(root, `.operations.${this.randomSuffix()}.tmp`)
     let handle: StoreFileHandle | undefined
+    let staged: Stats | undefined
     let committed = false
     try {
       handle = await this.fs.open(tempFile, 'wx', 0o600)
+      // The file was created with `wx` and mode 0o600; on POSIX this is a
+      // read-back-verified no-op, on Windows it is where the exact DACL is
+      // applied. Either way the handle is then bound to the verified inode.
+      await this.stateGuard.secureNewFile(tempFile)
+      staged = await handle.stat()
+      await this.stateGuard.verifyOpenHandle(staged, tempFile)
       await handle.write(payload)
       await handle.sync()
       await handle.close()
       handle = undefined
-      await this.fs.rename(tempFile, this.file)
+      await this.fs.rename(tempFile, file)
       committed = true
-      await this.syncDirectory()
+      await this.assertLandedFile(file, staged)
+      await this.syncDirectory(file)
+      staged = undefined
     } catch (error) {
       if (handle) await handle.close().catch(() => undefined)
       if (!committed) await this.fs.unlink(tempFile).catch(() => undefined)
@@ -240,38 +339,132 @@ export class FileOperationStore implements OperationStore {
     }
   }
 
-  private async syncDirectory(): Promise<void> {
-    // Directory fsync is not available on every platform (notably Windows);
-    // failing to sync the directory must never corrupt an already-renamed file.
+  /**
+   * Canonical journal path, or `undefined` when no journal exists yet. The
+   * chain is proven first, so an unsafe location is rejected even before the
+   * file is created.
+   */
+  private async verifiedFilePath(): Promise<string | undefined> {
+    const root = await this.canonicalPath(this.root)
+    await this.stateGuard.verifyChain(root)
+    const file = join(root, OPERATION_FILE_NAME)
+    const info = await this.stateGuard.verifyFile(file)
+    return info ? file : undefined
+  }
+
+  /**
+   * Read exactly the fstat-reported number of bytes through the open handle.
+   *
+   * At most one byte past that size is requested, which is enough to notice
+   * that the file grew between the `fstat` and the read: a torn read is
+   * reported as corrupt rather than parsed into a half-journal.
+   */
+  private async readFileBounded(file: string): Promise<string> {
+    let handle: StoreFileHandle | undefined
     try {
-      const dir = await nodeFs.open(dirname(this.file), 'r')
-      try {
-        await dir.sync()
-      } finally {
-        await dir.close()
-      }
-    } catch {
-      // Ignore: rename already made the new journal visible.
+      handle = await this.fs.open(file, 'r', 0o600)
+      const info = await handle.stat()
+      await this.stateGuard.verifyOpenHandle(info, file)
+      if (info.size > MAX_OPERATION_FILE_BYTES) throw this.oversize(info.size)
+      return await readExactly(handle, info.size)
+    } catch (error) {
+      if (error instanceof GarminWriteError) throw error
+      throw this.unavailable('Operation journal could not be read', error)
+    } finally {
+      if (handle) await handle.close().catch(() => undefined)
     }
   }
 
-  private async assertSafePath(): Promise<void> {
-    for (const target of [this.root, this.file]) {
-      try {
-        const info = await this.fs.lstat(target)
-        if (info.isSymbolicLink()) {
-          throw new GarminWriteError(
-            WRITE_ERROR_CODES.STATE_CORRUPT,
-            'not_applied',
-            'Refusing to use a symlinked operation-journal path',
-          )
-        }
-      } catch (error) {
-        if (error instanceof GarminWriteError) throw error
-        if (isNotFound(error)) continue
-        throw this.unavailable('Operation-journal path could not be inspected', error)
-      }
+  /**
+   * Canonical account directory, created when missing and proven private.
+   *
+   * The chain that already exists is proven *before* anything is created, so
+   * this never creates state below a directory the effective user does not
+   * exclusively control. Only then is the created result proven itself — and on
+   * POSIX only the one entry this store owns may be repaired, always with the
+   * repair read back rather than assumed.
+   */
+  private async prepareRoot(): Promise<string> {
+    const root = await this.canonicalPath(this.root)
+    // Before the create: absent components are tolerated, every existing one
+    // must already be a real directory owned by this user.
+    await this.stateGuard.verifyChain(root)
+    await this.fs.mkdir(root, { recursive: true, mode: 0o700 })
+    await this.stateGuard.ensureDirectory(root)
+    return root
+  }
+
+  /** The rename must have published the very inode this process wrote. */
+  private async assertLandedFile(file: string, staged: Stats): Promise<void> {
+    let landed: StoreStat
+    try {
+      landed = await this.fs.lstat(file)
+    } catch (error) {
+      throw new GarminWriteError(
+        WRITE_ERROR_CODES.STATE_CORRUPT,
+        'not_applied',
+        `Operation journal was replaced but the committed file could not be ` +
+          `inspected: ${describe(error)}`,
+      )
     }
+    if (landed.dev !== staged.dev || landed.ino !== staged.ino) {
+      throw new GarminWriteError(
+        WRITE_ERROR_CODES.STATE_CORRUPT,
+        'not_applied',
+        'Operation journal was replaced but the file that landed is not the one this process wrote',
+      )
+    }
+  }
+
+  /**
+   * Resolve the deepest component that exists, then re-attach the rest.
+   *
+   * The policy is then checked against the *canonical* path. That is not a
+   * weakening: a legitimate platform symlink (`/var` -> `/private/var` on
+   * macOS, a symlinked home directory) must not be mistaken for an attack,
+   * while a container a real attacker could replace is exactly what the
+   * ancestor check rejects - and every directory on the resolved path must be
+   * owned by this user (or root) and not group- or world-writable. Doing all
+   * I/O on the canonical path afterwards also closes the window between the
+   * check and the use.
+   */
+  private async canonicalPath(path: string): Promise<string> {
+    try {
+      const { existingPath, missingComponents } = await findDeepestExistingPath(path, {
+        noAnchor: 'Write-journal path has no filesystem anchor',
+      })
+      const resolved = await this.realpath(existingPath)
+      return missingComponents.length === 0
+        ? resolved
+        : join(resolved, ...missingComponents)
+    } catch (error) {
+      throw this.unavailable('Write-journal path could not be resolved', error)
+    }
+  }
+
+  private async syncDirectory(file: string): Promise<void> {
+    // A platform without directory fsync loses nothing by skipping it: the
+    // rename is still the visible commit, and there is no call to make.
+    if (DIRECTORY_SYNC_UNSUPPORTED_PLATFORMS.has(this.platform)) return
+    try {
+      await this.fs.syncDirectory(dirname(file))
+    } catch (error) {
+      if (isUnsupportedDirectorySyncError(error)) return
+      throw new GarminWriteError(
+        WRITE_ERROR_CODES.STATE_UNAVAILABLE,
+        'not_applied',
+        `Operation journal was replaced but its directory could not be synced: ${describe(error)}`,
+      )
+    }
+  }
+
+  private oversize(bytes: number): GarminWriteError {
+    return new GarminWriteError(
+      WRITE_ERROR_CODES.STATE_UNAVAILABLE,
+      'not_applied',
+      `Operation journal is ${String(bytes)} bytes, over the 32 MiB read cap; ` +
+        'archive it before using it again',
+    )
   }
 
   private corrupt(detail: string): GarminWriteError {
@@ -287,12 +480,54 @@ export class FileOperationStore implements OperationStore {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+/**
+ * Read `size` bytes through the handle and not one byte more than `size + 1`.
+ * The caller has already bounded `size`, so this can never read an unbounded
+ * amount however large the file on disk turns out to be.
+ */
+async function readExactly(handle: StoreFileHandle, size: number): Promise<string> {
+  const wanted = Math.min(size + 1, MAX_OPERATION_FILE_BYTES + 1)
+  const buffer = Buffer.allocUnsafe(wanted)
+  let filled = 0
+  while (filled < wanted) {
+    const { bytesRead } = await handle.read(buffer, filled, wanted - filled, filled)
+    if (bytesRead <= 0) break
+    filled += bytesRead
+  }
+  if (filled !== size) {
+    throw new GarminWriteError(
+      WRITE_ERROR_CODES.STATE_CORRUPT,
+      'not_applied',
+      'Operation journal changed size while it was being read; refusing a torn read',
+    )
+  }
+  return buffer.toString('utf8', 0, filled)
 }
 
-function isNotFound(error: unknown): boolean {
-  return isRecord(error) && error.code === 'ENOENT'
+/**
+ * The account key becomes exactly one path segment below the state directory.
+ * A key carrying a separator or `..` would step outside it, so it is rejected
+ * before it can be joined — the same fail-closed rule the state directory gets.
+ * Production derives the key as a hash; this states the invariant instead of
+ * assuming it.
+ */
+function isSinglePathSegment(value: string): boolean {
+  return value.length > 0
+    && value !== '.'
+    && value !== '..'
+    && !value.includes('/')
+    && !value.includes('\\')
+    && !value.includes('\0')
+}
+
+function isUnsupportedDirectorySyncError(error: unknown): boolean {
+  return isRecord(error)
+    && typeof error.code === 'string'
+    && UNSUPPORTED_DIRECTORY_SYNC_CODES.has(error.code)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function describe(error: unknown): string {

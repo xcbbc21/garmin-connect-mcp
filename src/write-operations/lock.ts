@@ -7,6 +7,13 @@
  * preemption: a paused holder may still be about to write, and without server
  * fencing an expired TTL does not make takeover safe. A stale lock must be
  * removed by the documented offline procedure, never automatically.
+ *
+ * Waiting is *bounded and cancellable*: the in-process queue and the on-disk
+ * lock share one budget, and an `AbortSignal` (the caller's request being
+ * cancelled, or the process shutting down) stops the wait immediately. Both
+ * happen strictly before anything is sent to Garmin, so giving up is always a
+ * provable non-application. Cancelling a wait never cancels a task that
+ * already holds the lock: by then the write may be in flight.
  */
 
 import { promises as nodeFs } from 'node:fs'
@@ -14,8 +21,17 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { GarminWriteError, WRITE_ERROR_CODES } from './errors'
 
+export interface LockRunOptions {
+  /**
+   * Aborts the *wait* for the lock. Once the lock is held the signal no longer
+   * stops anything here — the task owns its own cancellation — but the lock is
+   * still released when the task finishes.
+   */
+  signal?: AbortSignal
+}
+
 export interface AccountLock {
-  runExclusive<T>(task: () => Promise<T>): Promise<T>
+  runExclusive<T>(task: () => Promise<T>, options?: LockRunOptions): Promise<T>
   /**
    * Prove the caller still owns the account lock.
    *
@@ -124,20 +140,25 @@ export class FileAccountLock implements AccountLock {
     }
   }
 
-  async runExclusive<T>(task: () => Promise<T>): Promise<T> {
+  async runExclusive<T>(task: () => Promise<T>, options: LockRunOptions = {}): Promise<T> {
     // ONE budget covers both waits: the in-process tail queue and the on-disk
     // lock. Timing only the disk lock would let a caller queued behind a
     // long-running same-process holder wait arbitrarily long, which is the
     // difference between "bounded" and "usually bounded".
     const deadline = this.now() + this.waitTimeoutMs
+    const signal = options.signal
+    // Fail fast on an already-cancelled request: the caller must not be handed
+    // a lock it no longer wants, and a queued entry nobody will use only
+    // delays the next waiter.
+    if (signal?.aborted) throw waitAborted()
     const previous = this.tail
     let releaseQueue!: () => void
     this.tail = new Promise<void>(resolve => { releaseQueue = resolve })
 
     const ownerToken = randomUUID()
     try {
-      await this.waitForTurn(previous, deadline)
-      await this.acquire(ownerToken, deadline)
+      await this.waitForTurn(previous, deadline, signal)
+      await this.acquire(ownerToken, deadline, signal)
       this.heldToken = ownerToken
       try {
         return await task()
@@ -153,17 +174,23 @@ export class FileAccountLock implements AccountLock {
   }
 
   /**
-   * Wait for the previous in-process holder, bounded by the shared deadline.
+   * Wait for the previous in-process holder, bounded by the shared deadline
+   * and abortable.
    *
    * The queue is a fairness device, not the mutual-exclusion primitive: the
    * on-disk lock is. So abandoning the queue on a timeout is safe — it only
    * means this caller stops waiting and reports `OPERATION_BUSY` instead of
    * sending a write.
    */
-  private async waitForTurn(previous: Promise<void>, deadline: number): Promise<void> {
+  private async waitForTurn(
+    previous: Promise<void>,
+    deadline: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     let released = false
     const turn = previous.then(() => { released = true })
     while (!released) {
+      if (signal?.aborted) throw waitAborted()
       const remaining = deadline - this.now()
       if (remaining <= 0) {
         throw new GarminWriteError(
@@ -172,8 +199,41 @@ export class FileAccountLock implements AccountLock {
           'Another request in this process is still holding the account write lock; no new write was sent',
         )
       }
-      // React to a release immediately, but never wake later than the deadline.
-      await Promise.race([turn, this.sleep(Math.min(this.pollIntervalMs, remaining))])
+      // React to a release immediately, but never wake later than the deadline
+      // and never sleep through an abort.
+      await this.pause(turn, Math.min(this.pollIntervalMs, remaining), signal)
+    }
+  }
+
+  /**
+   * Resolve as soon as `turn` settles or `ms` elapses, whichever comes first,
+   * and reject immediately when `signal` aborts. The pending sleep is left to
+   * expire on its own after an abort rather than being cancelled: it holds no
+   * resources and interrupting it would require a timer the injected `sleep`
+   * does not expose.
+   */
+  private async pause(
+    turn: Promise<void> | undefined,
+    ms: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const waited = turn ? [turn, this.sleep(ms)] : [this.sleep(ms)]
+    if (!signal) {
+      await Promise.race(waited)
+      return
+    }
+    let onAbort: (() => void) | undefined
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(waitAborted())
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    // The race may be won by `turn` or the timeout before the abort fires; the
+    // handler below keeps that rejection from becoming unhandled.
+    aborted.catch(() => undefined)
+    try {
+      await Promise.race([...waited, aborted])
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort)
     }
   }
 
@@ -198,11 +258,16 @@ export class FileAccountLock implements AccountLock {
     }
   }
 
-  private async acquire(ownerToken: string, deadline: number): Promise<void> {
+  private async acquire(
+    ownerToken: string,
+    deadline: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     await this.fs.mkdir(dirname(this.lockDirectory), { recursive: true, mode: 0o700 })
       .catch(() => undefined)
 
     for (;;) {
+      if (signal?.aborted) throw waitAborted()
       try {
         await this.fs.mkdir(this.lockDirectory, { recursive: false, mode: 0o700 })
       } catch (error) {
@@ -223,7 +288,7 @@ export class FileAccountLock implements AccountLock {
             'Another request currently owns this account write lock; no new write was sent',
           )
         }
-        await this.sleep(this.pollIntervalMs)
+        await this.pause(undefined, this.pollIntervalMs, signal)
         continue
       }
 
@@ -284,6 +349,18 @@ export class FileAccountLock implements AccountLock {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Giving up the wait is always a provable non-application: the lock is
+ * acquired strictly before a dispatch, so nothing was sent to Garmin.
+ */
+function waitAborted(): GarminWriteError {
+  return new GarminWriteError(
+    WRITE_ERROR_CODES.WRITE_NOT_APPLIED,
+    'not_applied',
+    'Waiting for the account write lock was cancelled; no new write was sent',
+  )
 }
 
 function describe(error: unknown): string {

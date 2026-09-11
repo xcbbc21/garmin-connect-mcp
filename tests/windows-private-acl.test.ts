@@ -25,10 +25,11 @@ describe('Windows exact owner-only session ACLs', () => {
     const acl = await createWindowsPrivateAcl({ run, systemRoot })
 
     await acl.prepareDirectory('C:\\private\\account')
+    await acl.verifyDirectory('C:\\private\\account', { allowMissing: true })
     await acl.secureFile('C:\\private\\account\\session.tmp')
     await acl.verifyFile('C:\\private\\account\\session.json')
 
-    expect(calls).toHaveLength(3)
+    expect(calls).toHaveLength(4)
     for (const call of calls) {
       expect(call.file).toBe(
         'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
@@ -74,20 +75,67 @@ describe('Windows exact owner-only session ACLs', () => {
     expect(script).not.toContain('[IO.Directory]::CreateDirectory($fullPath')
     expect(script).not.toContain('C:\\private\\account')
 
+    // The read-only walk must be told, through the child environment, whether a
+    // not-yet-created store is acceptable. Nothing else may relax the walk.
+    expect(script).toContain("$allowMissingFlag -ceq '1'")
+    expect(script).toContain('$script:allowMissing = $allowMissingFlag -ceq')
+    expect(script).toContain(
+      'function Assert-ExactPrivateDirectoryChain([string] $directoryPath, [bool] $createMissing, [bool] $allowMissing)',
+    )
+    expect(script).toContain('Assert-ExactPrivateDirectoryChain $fullPath $false $script:allowMissing')
+    expect(script).toContain('Assert-ExactPrivateDirectoryChain $fullPath $true $false')
+    expect(script).toContain('} elseif ($allowMissing) {')
+
     expect(calls.map(call => call.options.env.GARMIN_ACL_OPERATION)).toEqual([
       'prepare-directory',
+      'verify-directory',
       'secure-file',
       'verify-file',
     ])
+    expect(calls.map(call => call.options.env.GARMIN_ACL_ALLOW_MISSING)).toEqual([
+      '0',
+      '1',
+      '0',
+      '0',
+    ])
     expect(calls.map(call => call.options.env.GARMIN_ACL_TARGET)).toEqual([
+      'C:\\private\\account',
       'C:\\private\\account',
       'C:\\private\\account\\session.tmp',
       'C:\\private\\account\\session.json',
     ])
   })
 
+  it('keeps the read-only directory walk strict unless missing components are allowed', async () => {
+    const calls: Array<{ options: WindowsAclCommandOptions }> = []
+    const run: WindowsAclCommandRunner = async (_file, _args, options) => {
+      calls.push({ options })
+      return { stdout: '', stderr: '' }
+    }
+    const acl = await createWindowsPrivateAcl({ run, systemRoot })
+
+    await acl.verifyDirectory('C:\\private\\account')
+    await acl.verifyDirectory('C:\\private\\account', {})
+    await acl.verifyDirectory('C:\\private\\account', { allowMissing: false })
+    await acl.verifyDirectory('C:\\private\\account', { allowMissing: true })
+    // Anything other than an explicit `true` must stay on the strict path.
+    await acl.verifyDirectory('C:\\private\\account', {
+      allowMissing: 'yes' as unknown as boolean,
+    })
+
+    expect(calls.map(call => call.options.env.GARMIN_ACL_ALLOW_MISSING)).toEqual([
+      '0',
+      '0',
+      '0',
+      '1',
+      '0',
+    ])
+  })
+
   it.each([
     ['prepare-directory'],
+    ['verify-directory'],
+    ['verify-directory-allow-missing'],
     ['secure-file'],
     ['verify-file'],
   ] as const)('normalizes %s failures without exposing paths or output', async (operation) => {
@@ -100,6 +148,10 @@ describe('Windows exact owner-only session ACLs', () => {
     try {
       if (operation === 'prepare-directory') {
         await acl.prepareDirectory('C:\\private\\SECRET_ACCOUNT')
+      } else if (operation === 'verify-directory') {
+        await acl.verifyDirectory('C:\\private\\SECRET_ACCOUNT')
+      } else if (operation === 'verify-directory-allow-missing') {
+        await acl.verifyDirectory('C:\\private\\SECRET_ACCOUNT', { allowMissing: true })
       } else if (operation === 'secure-file') {
         await acl.secureFile('C:\\private\\SECRET_ACCOUNT')
       } else {

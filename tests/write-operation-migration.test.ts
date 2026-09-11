@@ -484,9 +484,14 @@ describe('FileOperationStore migration', () => {
     await rm(base, { recursive: true, force: true })
   })
 
+  // Every version of the journal writer -- including the original v1 one -- has
+  // created the file with `open(path, 'wx', 0o600)`. A fixture seeded through
+  // `writeFile` without an explicit mode inherits the umask (typically 0o644),
+  // which is a state this codebase cannot produce and which the private-state
+  // guard correctly refuses. Seed the mode production actually writes.
   async function seedV1(store: FileOperationStore, legacy: Record<string, unknown>): Promise<void> {
     await nodeStoreFileSystem.mkdir(store.directory, { recursive: true, mode: 0o700 })
-    await writeFile(store.filePath, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8')
+    await writeFile(store.filePath, `${JSON.stringify(legacy, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
   }
 
   it('upgrades in memory on read without touching the file', async () => {
@@ -592,7 +597,7 @@ describe('FileOperationStore migration', () => {
   it('refuses an empty journal file instead of reading it as a new one', async () => {
     const store = new FileOperationStore(base, ACCOUNT)
     await nodeStoreFileSystem.mkdir(store.directory, { recursive: true, mode: 0o700 })
-    await writeFile(store.filePath, '   \n', 'utf8')
+    await writeFile(store.filePath, '   \n', { encoding: 'utf8', mode: 0o600 })
     await expect(store.read()).rejects.toMatchObject({
       code: WRITE_ERROR_CODES.STATE_CORRUPT,
     })
@@ -630,7 +635,7 @@ describe('WriteCoordinator.migrateJournal', () => {
           }),
         },
         idempotencyIndex: { [keyHash]: 'op-1' },
-      }), null, 2)}\n`, 'utf8')
+      }), null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
 
       const coordinatorFor = () => new WriteCoordinator({
         store: new FileOperationStore(base, ACCOUNT),
@@ -687,7 +692,7 @@ describe('WriteCoordinator.migrateJournal', () => {
           }),
         },
         idempotencyIndex: { [keyHash]: 'op-legacy' },
-      }, null, 2)}\n`, 'utf8')
+      }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
 
       const { GarminToolService } = await import('../src/tool-service')
       const writer = jest.fn().mockResolvedValue({ workoutScheduleId: 'sid-new' })
