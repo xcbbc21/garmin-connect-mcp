@@ -229,24 +229,34 @@ run in two batches at `3a82e4f`; both exited 0: 6 suites / 55 tests, then
 larger than the pre-fix count because the inode-reuse regression test was added.
 
 **Linux aarch64, container `arm64v8/ubuntu:22.04`, kernel `6.12.76-linuxkit`, Ubuntu 22.04.5 LTS.**
-Exported with `git archive 6bc16d6` into a tree carrying neither `node_modules` nor `.git`, so
+Exported with `git archive 90ae9a8` into a tree carrying neither `node_modules` nor `.git`, so
 `npm ci` is a genuine clean install. Node 20 and Node 22 were run serially, to remove CPU
-contention as a source of lock-test flakiness.
+contention as a source of lock-test flakiness. `npm run build` is an explicit step in this battery
+rather than an implicit `pretest` hook, so the standard-build row below is the result of the
+command named in it and not of a pre-script that happened to compile the tree.
 
 | Command | Node v20.19.5 / npm 10.8.2 | Node v22.22.2 / npm 10.9.7 |
 | --- | --- | --- |
 | `npm ci` | exit 0 | exit 0 |
+| `npm run build` (`clean` + `tsc`) | exit 0 | exit 0 |
 | `npm run lint` | exit 0, 0 warnings | exit 0, 0 warnings |
-| `npm test -- --runInBand` | exit 0, 59 suites / 1193 tests, 1192 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
-| `npm run test:coverage` | exit 0. All files 87.59% statements / 78.01% branches / 87.6% functions / 90.16% lines | exit 0, same figures |
-| `npm run build` | exit 0 | exit 0 |
+| `npm test -- --runInBand` | exit 0, 59 suites / 1205 tests, 1204 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
+| `npm run test:coverage` | exit 0. All files 87.59% statements / 78.01% branches / 87.84% functions / 90.16% lines | exit 0, same figures |
 | `npm run pack:smoke` | exit 0, 204 files, `"audit": "passed"` | exit 0, same figures |
 | `npm run test:distribution` | exit 0, `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` | exit 0, same figures |
 | `npm run demo:recovery` | exit 0, `DEMO 1 OK` / `DEMO 2 OK` / `DEMO 3 OK` / `ALL THREE DEMOS OK` | exit 0, same figures |
 
-The container coverage figures are lower than the macOS host figures (87.59 / 78.01 / 87.6 / 90.16
+The container coverage figures are lower than the macOS host figures (87.59 / 78.01 / 87.84 / 90.16
 against 87.73 / 78.13 / 88.08 / 90.33) because platform-conditional branches differ per host.
 Every set clears every configured gate, and nothing here is an average across hosts.
+
+These Linux rows are the only ones in this section measured at `90ae9a8` rather than `3a82e4f`;
+no file under `src/` differs between those commits, which is why the two sets agree apart from the
+platform-conditional rows. Against the previous battery at `6bc16d6`, the whole coverage delta is
+one row: `src/index.ts` functions moved 0% → 16.66%, because the probe's tests reach
+`CalendarCapabilityError` / `CALENDAR_WARNING_CODES` through the package entry point and so
+exercise a re-export wrapper there. Every other row of the coverage table is identical, so this is
+a reported change in one counter and not a general drift in the figures.
 
 **What this battery found.** Before the fix, the Linux Node 20 run aborted at
 `tests/write-state-security.test.ts:613`, `refuses to treat a different inode as the file it
