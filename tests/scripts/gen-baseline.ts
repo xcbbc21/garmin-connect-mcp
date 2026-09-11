@@ -20,8 +20,11 @@ const service = {
   downloadActivityFit: () => Promise.resolve({}),
   getWriteOperation: () => Promise.resolve(null),
   findWriteOperationByIdempotencyKey: () => Promise.resolve(null),
-  listWriteOperations: () => Promise.resolve([]),
+  listWriteOperationPage: () => Promise.resolve({}),
   redactOperation: (op: unknown) => op,
+  getCalendarRange: () => Promise.resolve({}),
+  reconcileWriteOperation: () => Promise.resolve({}),
+  resumeWriteOperation: () => Promise.resolve({}),
 }
 async function main() {
   const server = createMcpServer(service as never)

@@ -12,28 +12,36 @@ import { installMcpShutdownHooks } from './mcp-shutdown'
 import {
   GarminToolService,
   INTENSITY_GUIDANCE_PREFERENCES,
+  OPERATION_CURSOR_PATTERN,
   PERFORMANCE_BASES,
   RUNNING_ADVICE_MODES,
   RUNNING_INTAKE_MIN_LENGTHS,
   TRAINING_LOAD_PREFERENCES,
+  WRITE_OPERATION_PAGE_DEFAULT_LIMIT,
+  WRITE_OPERATION_PAGE_MAX_LIMIT,
 } from './tool-service'
 import type {
   ActivityArgs,
   BatchScheduleWorkoutArgs,
+  CalendarRangeArgs,
   CreateAndScheduleWorkoutArgs,
   CreateWorkoutArgs,
   DateRangeArgs,
   DownloadActivityFitArgs,
   PaginationArgs,
+  ReconcileWriteOperationArgs,
+  ResumeWriteOperationArgs,
   RunningAdviceArgs,
   ScheduleWorkoutArgs,
   UnscheduleWorkoutArgs,
 } from './tool-service'
 import {
   GarminAuthenticationRequiredError,
+  PublicToolError,
   publicErrorMessage,
   safeUpstreamLogLine,
 } from './utils/errors'
+import { isGarminWriteError, WRITE_ERROR_CODES } from './write-operations/errors'
 
 type ToolService = Pick<
   GarminToolService,
@@ -52,8 +60,11 @@ type ToolService = Pick<
   | 'unscheduleWorkout'
   | 'getWriteOperation'
   | 'findWriteOperationByIdempotencyKey'
-  | 'listWriteOperations'
+  | 'listWriteOperationPage'
   | 'redactOperation'
+  | 'getCalendarRange'
+  | 'reconcileWriteOperation'
+  | 'resumeWriteOperation'
   | 'downloadActivityFit'
 >
 
@@ -115,6 +126,17 @@ const confirmationSchema = {
   confirmationId: confirmationIdSchema.optional(),
 }
 
+/**
+ * Operation ids are minted by this server, so the wire schema can demand the
+ * shape it actually produces. The service re-validates it as an opaque
+ * identifier; this only rejects values that could never name a local operation.
+ */
+const operationIdSchema = z.string().uuid().describe(
+  'Operation ID returned by a previous schedule_garmin_workout, ' +
+  'batch_schedule_garmin_workouts, create_garmin_workout, ' +
+  'create_and_schedule_garmin_workout or unschedule_garmin_workout call.',
+)
+
 const idempotencyKeySchema = z.string().min(1).max(128)
   .regex(/^[A-Za-z0-9._:-]+$/, 'Use 1-128 characters from A-Z a-z 0-9 . _ : -')
   .optional()
@@ -144,6 +166,19 @@ const WRITE_ANNOTATIONS = {
   readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: false,
+  openWorldHint: true,
+}
+
+/**
+ * Reconcile writes nothing to Garmin, but it does record what it observed in
+ * the local recovery journal — so `readOnlyHint:true` would be a lie. It is
+ * also safe to repeat: a second reconcile re-reads and re-records, and a
+ * completed operation is never re-dispatched.
+ */
+const RECONCILE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
   openWorldHint: true,
 }
 
@@ -452,54 +487,136 @@ export function createMcpServer(
   )
 
   register(
+    'get_garmin_calendar',
+    'Read the Garmin Calendar for an inclusive local-date range of at most 366 days. Returns a ' +
+      'CalendarSnapshot: the entries it actually observed, whether the read covered the whole ' +
+      'range, and the sub-ranges it could not read. An incomplete read is never an empty ' +
+      'calendar, and no range read of any kind proves that a specific write attempt never ' +
+      'reached Garmin — that question is answered by reconcile_garmin_write_operation against ' +
+      'the local journal. Purely read-only: this call schedules, creates and deletes nothing.',
+    {
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Inclusive first calendar day in YYYY-MM-DD format.'),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Inclusive last calendar day in YYYY-MM-DD format; at most 366 days after startDate.'),
+      timezone: z.string().min(1).max(100).optional().describe(
+        'IANA timezone label echoed back on the snapshot, e.g. Asia/Shanghai. Defaults to the ' +
+        'MCP host timezone. It never shifts a date: the verified provider query carries no ' +
+        'timezone parameter.',
+      ),
+    },
+    (args: CalendarRangeArgs) => invokeTool(() => service.getCalendarRange(args)),
+    READ_ONLY_ANNOTATIONS,
+    false,
+  )
+
+  register(
     'get_garmin_write_operation',
     'Read the local account-scoped write journal without any network access. ' +
       'Supply either an operationId or an idempotencyKey to look up a single ' +
-      'operation. Supplying neither lists recent operations for the active ' +
-      'account (limit/offset supported). The returned records are redacted: ' +
-      'the raw idempotency key, the request payload, and the account key are ' +
-      'never echoed back. Use the returned nextAction to drive reconcile_garmin_write_operation ' +
-      'or resume_garmin_write_operation. Does not require login and never ' +
-      'contacts Garmin.',
+      'operation; those two are mutually exclusive and cannot be combined with ' +
+      'limit or cursor. Supplying neither pages through recent operations for ' +
+      'the active account (newest first, limit default 20, maximum 100) and ' +
+      'returns a nextCursor for the following page. The cursor is an opaque, ' +
+      'bounded local token, never a path, and it is valid only while the ' +
+      'journal is unchanged: if a record moved, the response is ' +
+      '`staleCursor:true` with no `operations` key at all, so an empty page can ' +
+      'never be mistaken for an empty journal. A record that does not exist — ' +
+      'including one belonging to another account — is reported uniformly as ' +
+      'OPERATION_NOT_FOUND. The returned records are redacted: the raw ' +
+      'idempotency key, the request payload, and the account key are never ' +
+      'echoed back. Each record carries its own roll-up (status, canResume, ' +
+      'manualReviewRequired, nextAction) so you do not have to reconstruct the ' +
+      'verdict from step bookkeeping; use that nextAction to drive ' +
+      'reconcile_garmin_write_operation or resume_garmin_write_operation. ' +
+      'Does not require login and never contacts Garmin.',
     {
-      operationId: z.string().uuid().optional().describe(
-        'Operation ID returned by a previous schedule_garmin_workout, batch_schedule_garmin_workouts, ' +
-        'create_garmin_workout, create_and_schedule_garmin_workout or unschedule_garmin_workout call.',
-      ),
+      operationId: operationIdSchema.optional(),
       idempotencyKey: z.string().min(1).max(128)
         .regex(/^[A-Za-z0-9._:-]+$/, 'Use 1-128 characters from A-Z a-z 0-9 . _ : -')
         .optional()
         .describe('Caller-supplied stable request label; only its hash is matched against the journal.'),
-      limit: z.number().int().min(1).max(100).optional(),
-      offset: z.number().int().min(0).optional(),
+      limit: z.number().int().min(1).max(WRITE_OPERATION_PAGE_MAX_LIMIT).optional()
+        .describe(
+          `Page size for the listing mode (default ${WRITE_OPERATION_PAGE_DEFAULT_LIMIT}, maximum ` +
+          `${WRITE_OPERATION_PAGE_MAX_LIMIT}). Rejected when operationId or idempotencyKey is used.`,
+        ),
+      cursor: z.string().regex(OPERATION_CURSOR_PATTERN).optional().describe(
+        'Opaque nextCursor from a previous listing: 1-2048 characters from A-Z a-z 0-9 _ - only, ' +
+        'so it can never be interpreted as a path. Rejected when operationId or idempotencyKey is ' +
+        'used. It expires as soon as the journal changes.',
+      ),
     },
-    async (args: { operationId?: string; idempotencyKey?: string; limit?: number; offset?: number }) => {
+    (args: {
+      operationId?: string
+      idempotencyKey?: string
+      limit?: number
+      cursor?: string
+    }) => invokeTool(async () => {
+      const selector = args.operationId ? 'operationId' : args.idempotencyKey ? 'idempotencyKey' : undefined
+      if (args.operationId && args.idempotencyKey) {
+        throw new PublicToolError(
+          'Invalid arguments: pass either operationId or idempotencyKey, not both',
+        )
+      }
+      if (selector && (args.limit !== undefined || args.cursor !== undefined)) {
+        throw new PublicToolError(
+          `Invalid arguments: limit and cursor only apply when listing; omit them when using ${selector}`,
+        )
+      }
       if (args.operationId) {
         const op = await service.getWriteOperation(args.operationId)
-        if (!op) {
-          return successResult({ found: false, operationId: args.operationId })
-        }
-        return successResult({ found: true, operation: service.redactOperation(op) })
+        if (!op) return notFoundPayload({ operationId: args.operationId })
+        return { found: true, operation: service.redactOperation(op) }
       }
       if (args.idempotencyKey) {
         const op = await service.findWriteOperationByIdempotencyKey(args.idempotencyKey)
-        if (!op) {
-          return successResult({ found: false, hasIdempotencyKey: true })
-        }
-        return successResult({ found: true, operation: service.redactOperation(op) })
+        // Uniform with the operationId miss: a key bound to another account's
+        // journal and a key that was never used are the same answer, so this
+        // lookup cannot be used to probe what another account has written.
+        if (!op) return notFoundPayload({ hasIdempotencyKey: true })
+        return { found: true, operation: service.redactOperation(op) }
       }
-      const all = await service.listWriteOperations() as Array<{ createdAt: string }>
-      const offset = args.offset ?? 0
-      const limit = args.limit ?? 20
-      const slice = all.slice(offset, offset + limit)
-      return successResult({
-        total: all.length,
-        offset,
-        limit,
-        operations: slice.map(op => service.redactOperation(op)),
-      })
-    },
+      return service.listWriteOperationPage({ limit: args.limit, cursor: args.cursor })
+    }),
     READ_ONLY_ANNOTATIONS,
+  )
+
+  register(
+    'reconcile_garmin_write_operation',
+    'Re-read Garmin to resolve what a local write operation is still unsure about, and record ' +
+      'the trusted observations in the local recovery journal. It sends no schedule, create or ' +
+      'unschedule request and deletes nothing anywhere: an attempt with an unknown outcome ' +
+      'stays unknown until a real receipt exists, and an entry observed to be absent is ' +
+      'reported as absent without any past result being rewritten. Because it updates local ' +
+      'state it is not advertised as read-only, but it never modifies Garmin. Returns the ' +
+      'observations it took and the next action to take.',
+    {
+      operationId: operationIdSchema,
+    },
+    (args: ReconcileWriteOperationArgs) => invokeTool(
+      () => service.reconcileWriteOperation(args),
+    ),
+    RECONCILE_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'resume_garmin_write_operation',
+    'Derive the safe remaining steps of a journaled write operation and, once the caller ' +
+      'approves the preview, dispatch them. There is no payload parameter: dates, workout ids ' +
+      'and template definitions all come from the journal record, so a resume can never move a ' +
+      'write to a different day or swap the template — that would be a new request, not a ' +
+      'recovery. Only steps proven never to have applied are armed; an unknown outcome is never ' +
+      're-sent and cannot be cleared from here. The dispatch is non-idempotent: re-query the ' +
+      'operation for the durable result instead of calling it again.',
+    {
+      operationId: operationIdSchema,
+      ...confirmationSchema,
+    },
+    (args: ResumeWriteOperationArgs) => invokeTool(() => service.resumeWriteOperation(args)),
+    WRITE_ANNOTATIONS,
+    false,
   )
 
   return server
@@ -528,6 +645,77 @@ function successResult(value: unknown) {
   }
 }
 
+/**
+ * A lookup that matched nothing.
+ *
+ * It is a normal structured response, not a tool error: "this account has no
+ * such record" is an answer a caller acts on, and `isError` is reserved for
+ * arguments and credentials. The code is the *same* for a record of another
+ * account and for one that never existed, so the reply cannot be used to learn
+ * whether some other account wrote something.
+ */
+function notFoundPayload(extra: Record<string, unknown>) {
+  return {
+    found: false,
+    errorCode: WRITE_ERROR_CODES.OPERATION_NOT_FOUND,
+    ...extra,
+    message:
+      'No local operation matches this identifier for the active account. This is also what ' +
+      'an identifier belonging to another account returns, so it does not tell you whether ' +
+      'such a record exists elsewhere.',
+  }
+}
+
+/**
+ * The closed shape every contract error code has to match.
+ *
+ * Deliberately narrow: a code is copied into a tool response, so only a token
+ * this build could have minted is ever accepted.
+ */
+const TOOL_ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
+
+/**
+ * The stable code a refused tool call declares, or `undefined` when it declares
+ * none.
+ *
+ * A failed call used to carry one sentence and nothing else, so a spent
+ * confirmation handle and a dead socket arrived as the same answer — while the
+ * caller needs opposite next steps ("preview again" versus "reconcile"). The
+ * code is what makes those replies distinguishable without parsing prose.
+ *
+ * Only two sources are read. The write vocabulary always carries a `code`, and
+ * the `PublicToolError` subclasses are this repository's own refusals, so a code
+ * read from them cannot be upstream text. An arbitrary error's `code` property
+ * is never consulted: it is not part of any contract we publish.
+ *
+ * The *message* of a write error stays withheld. Unlike a range refusal, those
+ * are built from local state-file detail, and a private path is exactly what
+ * `publicErrorMessage` exists to keep out of the trajectory.
+ */
+function toolErrorCode(error: unknown): string | undefined {
+  if (isGarminWriteError(error)) return error.code
+  if (!(error instanceof PublicToolError)) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' && TOOL_ERROR_CODE_PATTERN.test(code)
+    ? code
+    : undefined
+}
+
+/**
+ * What to say when an error's own message must not be repeated.
+ *
+ * A write error is never echoed because its text is assembled from local
+ * state-file detail, but its `outcome` is a two-value classification we made
+ * ourselves, so it is safe to translate into the one sentence the caller
+ * actually needs: whether a request left this machine.
+ */
+function toolErrorFallback(error: unknown): string {
+  if (!isGarminWriteError(error)) return 'Garmin request failed'
+  return error.outcome === 'not_applied'
+    ? 'No Garmin write was sent: this request was refused locally'
+    : 'The write may have reached Garmin; reconcile the operation before retrying'
+}
+
 async function invoke(
   action: () => Promise<unknown>,
   authentication?: McpAuthenticationHandler,
@@ -542,13 +730,15 @@ async function invoke(
     ) {
       return authentication.requireAuthentication(error)
     }
+    const errorCode = toolErrorCode(error)
     return {
       isError: true,
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
           error: true,
-          message: publicErrorMessage(error, 'Garmin request failed'),
+          ...(errorCode === undefined ? {} : { errorCode }),
+          message: publicErrorMessage(error, toolErrorFallback(error)),
         }),
       }],
     } as ReturnType<typeof successResult>

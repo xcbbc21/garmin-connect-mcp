@@ -52,6 +52,13 @@ export const WRITE_ERROR_CODES = {
   SCHEDULE_LOOKUP_UNSUPPORTED: 'SCHEDULE_LOOKUP_UNSUPPORTED',
   /** The requested resume cannot proceed without a new preview. */
   RESUME_REQUIRES_PREVIEW: 'RESUME_REQUIRES_PREVIEW',
+  /** A paging cursor is malformed or is not a token this build can have minted. */
+  CURSOR_INVALID: 'CURSOR_INVALID',
+  /**
+   * The journal changed after the cursor was minted, so its offset no longer
+   * names the same list. The caller must list again from the beginning.
+   */
+  CURSOR_STALE: 'CURSOR_STALE',
 } as const
 
 export type WriteErrorCode = typeof WRITE_ERROR_CODES[keyof typeof WRITE_ERROR_CODES]

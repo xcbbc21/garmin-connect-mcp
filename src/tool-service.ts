@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GarminRegion } from './config'
@@ -35,10 +36,19 @@ import type {
   UnifiedCalendarWriter,
   WriteConfirmation,
 } from './write-operations/coordinator'
+import {
+  CalendarCapabilityError,
+  CalendarRangeError,
+} from './calendar/types'
 import type { CalendarSnapshot, CalendarRange } from './calendar/types'
+import {
+  MAX_CALENDAR_RANGE_DAYS,
+  calendarDayCount,
+  isValidCalendarDate,
+} from './calendar/adapter'
 import type { CalendarLookup } from './write-operations/reconcile'
 import { FileAccountLock } from './write-operations/lock'
-import { GarminWriteError, WRITE_ERROR_CODES } from './write-operations/errors'
+import { GarminWriteError, WRITE_ERROR_CODES, isGarminWriteError } from './write-operations/errors'
 import { FileOperationStore } from './write-operations/store'
 import {
   accountKey as deriveAccountKey,
@@ -52,6 +62,7 @@ import {
 } from './write-operations/identity'
 import type { OperationStore } from './write-operations/store'
 import { SATISFIED_STEP_STATUSES } from './write-operations/types'
+import type { WriteOperation } from './write-operations/types'
 import type { AccountLock } from './write-operations/lock'
 import {
   formatActivity,
@@ -121,6 +132,30 @@ export interface GarminToolServiceOptions {
 export interface DateRangeArgs {
   startDate?: string
   endDate?: string
+}
+
+/**
+ * An inclusive calendar-range query.
+ *
+ * `startDate`/`endDate` are required by the tool schema; they stay optional on
+ * the type so the service can be called with a partial object and answer with
+ * a validation error instead of a type-level crash.
+ */
+export interface CalendarRangeArgs {
+  startDate?: string
+  endDate?: string
+  /** IANA label echoed on the snapshot. It never shifts a date. */
+  timezone?: string
+}
+
+/** Paging arguments for a local journal listing. */
+export interface WriteOperationPageArgs {
+  limit?: number
+  /**
+   * Opaque token from a previous listing's `nextCursor`. It names a position in
+   * a *specific* journal state, never a filesystem path.
+   */
+  cursor?: string
 }
 
 export interface ActivityArgs {
@@ -266,6 +301,102 @@ function nextActionMessage(action: string, detail: string): string {
   }
 }
 
+/** A plain object guard for records read back from the journal file. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+/**
+ * The one-line answer to "what happened to that write operation?".
+ *
+ * A caller reading the journal after a lost response should not have to
+ * reconstruct the verdict from per-step bookkeeping, so the operation carries
+ * its own roll-up. The rules are deliberately fail-closed and evaluated in
+ * priority order — a single blocking step outweighs every satisfied one:
+ *
+ *   1. any step whose outcome is still uncertain (`unknown` / `in_flight`),
+ *      or an operation the journal itself flagged as unreconciled, yields
+ *      `unknown` and points at reconciliation. It never points at a write.
+ *   2. otherwise, any step that is proven not to have applied yields
+ *      `incomplete` and points at the resume preview.
+ *   3. otherwise, every step satisfied yields `satisfied` with no next action.
+ *   4. anything else is `mixed` and asks for a human.
+ *
+ * `empty` is an operation with no steps at all: a state this build does not
+ * produce, reported as its own value rather than being folded into "satisfied".
+ */
+function summarizeOperationRecovery(
+  operationId: unknown,
+  manualReview: unknown,
+  receipts: ScheduleStepReceipt[],
+): Record<string, unknown> {
+  if (typeof operationId !== 'string') return {}
+  const blocking = receipts.filter(receipt =>
+    receipt.manualReviewRequired || receipt.status === 'unknown' || receipt.status === 'in_flight')
+  if (blocking.length > 0 || manualReview) {
+    return {
+      status: 'unknown',
+      canResume: false,
+      manualReviewRequired: true,
+      desiredStateSatisfied: false,
+      blockedStepIds: blocking.map(receipt => receipt.stepId),
+      errorCode: blocking.find(receipt => receipt.errorCode)?.errorCode
+        ?? WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN,
+      nextAction: 'reconcile_garmin_write_operation',
+      message: nextActionMessage(
+        'reconcile_garmin_write_operation',
+        'This operation has an attempt whose outcome is not known.',
+      ),
+    }
+  }
+  const resumable = receipts.filter(receipt => receipt.canResume)
+  if (resumable.length > 0) {
+    return {
+      status: 'incomplete',
+      canResume: true,
+      manualReviewRequired: false,
+      desiredStateSatisfied: false,
+      resumableStepIds: resumable.map(receipt => receipt.stepId),
+      nextAction: 'resume_garmin_write_operation',
+      message: nextActionMessage(
+        'resume_garmin_write_operation',
+        `${resumable.length} step(s) were never sent or provably did not apply.`,
+      ),
+    }
+  }
+  if (receipts.length > 0 && receipts.every(receipt => receipt.success)) {
+    return {
+      status: 'satisfied',
+      canResume: false,
+      manualReviewRequired: false,
+      desiredStateSatisfied: true,
+      message: nextActionMessage('none', 'Every step of this operation is satisfied.'),
+    }
+  }
+  if (receipts.length === 0) {
+    return {
+      status: 'empty',
+      canResume: false,
+      manualReviewRequired: false,
+      desiredStateSatisfied: false,
+      nextAction: 'manual_review',
+      message: nextActionMessage(
+        'manual_review',
+        'This record has no steps, which this build never writes.',
+      ),
+    }
+  }
+  return {
+    status: 'mixed',
+    canResume: false,
+    manualReviewRequired: false,
+    desiredStateSatisfied: false,
+    nextAction: 'manual_review',
+    message: nextActionMessage('manual_review', 'The steps of this operation disagree.'),
+  }
+}
+
 export interface ReconcileWriteOperationArgs {
   operationId: string
 }
@@ -336,19 +467,96 @@ export class GarminToolService {
   }
 
   /**
+   * One page of the local journal, newest first — the fallback for a caller
+   * that lost the `operationId` when a response was lost but still wants to
+   * find its own record.
+   *
+   * The cursor is an opaque, bounded local token, never a path, and it is bound
+   * to the exact journal state it was minted against. If any record was
+   * written, advanced or removed since, the cursor is reported *stale* rather
+   * than translated into a shifted window: silently returning "page 2 of a
+   * different list" would let a caller believe it had seen every record.
+   *
+   * Stale pages carry no `operations` key at all, so an empty result can never
+   * be misread as "this account has no operations".
+   */
+  async listWriteOperationPage(
+    args: WriteOperationPageArgs = {},
+  ): Promise<Record<string, unknown>> {
+    const limit = normalizePageLimit(args.limit)
+    const operations = await this.listWriteOperations() as Array<{
+      operationId?: string
+      updatedAt?: string
+    }>
+    const digest = journalDigest(operations)
+
+    let offset = 0
+    if (args.cursor !== undefined) {
+      const decoded = decodeOperationCursor(args.cursor)
+      if (!decoded) {
+        throw new PublicToolError(
+          `[${WRITE_ERROR_CODES.CURSOR_INVALID}] Invalid cursor: pass the nextCursor returned by ` +
+          'the previous listing, or omit cursor to start a new listing.',
+        )
+      }
+      if (decoded.digest !== digest) {
+        return {
+          success: false,
+          staleCursor: true,
+          errorCode: WRITE_ERROR_CODES.CURSOR_STALE,
+          total: operations.length,
+          message:
+            'The local journal changed since this cursor was issued, so its position no longer ' +
+            'names the same list. Omit cursor to list again from the beginning.',
+        }
+      }
+      offset = decoded.offset
+    }
+
+    const slice = operations.slice(offset, offset + limit)
+    const nextOffset = offset + slice.length
+    const hasMore = nextOffset < operations.length
+    return {
+      success: true,
+      total: operations.length,
+      limit,
+      offset,
+      operations: slice.map(operation => this.redactOperation(operation)),
+      nextCursor: hasMore
+        ? encodeOperationCursor({ v: OPERATION_CURSOR_VERSION, offset: nextOffset, digest })
+        : null,
+      message: hasMore
+        ? 'Continue with nextCursor. It stays valid only while the journal is unchanged.'
+        : 'This page reaches the end of the local journal.',
+    }
+  }
+
+  /**
    * Redact a stored operation into a JSON-safe summary. Removes the raw
    * idempotency hash, the on-disk request payload (which can contain caller
    * text we never want echoed back), and the raw account key. The summary
-   * retains what an MCP caller actually needs to make a recovery decision.
+   * retains what an MCP caller actually needs to make a recovery decision:
+   * per-step status, evidence, result IDs, `canResume` and `nextAction` are
+   * projected by the coordinator's own receipt rules, so a reader of the
+   * journal cannot disagree with the writer that produced it.
    */
   redactOperation(operation: unknown): unknown {
     if (!operation || typeof operation !== 'object') return operation
     const op = operation as Record<string, unknown>
-    const steps = Array.isArray(op.steps) ? op.steps.map(step => {
+    const rawSteps = Array.isArray(op.steps) ? op.steps : []
+    const manualReview = asRecord(op.manualReview)
+    const guidance = new Map<string, ScheduleStepReceipt>()
+    if (typeof op.operationId === 'string' && typeof op.schemaVersion === 'number') {
+      for (const receipt of this.writeCoordinator()
+        .describeRecoveryGuidance(op as unknown as WriteOperation)) {
+        guidance.set(receipt.stepId, receipt)
+      }
+    }
+    const steps = rawSteps.map(step => {
       const s = step as Record<string, unknown>
       const reference = s.reference as Record<string, unknown> | undefined
-      return {
-        stepId: s.stepId,
+      const receipt = typeof s.stepId === 'string' ? guidance.get(s.stepId) : undefined
+      return {        stepId: s.stepId,
         kind: s.kind,
         status: s.status,
         attempt: s.attempt,
@@ -377,8 +585,15 @@ export class GarminToolService {
           workoutScheduleId: reference.workoutScheduleId,
           errorCode: reference.errorCode,
         } : undefined,
+        // Server-authoritative recovery guidance. Present whenever the record
+        // is a real journal entry; a hand-built fixture simply omits it rather
+        // than being reported with invented advice.
+        canResume: receipt?.canResume,
+        manualReviewRequired: receipt?.manualReviewRequired,
+        nextAction: receipt?.nextAction,
+        receiptStatus: receipt?.status,
       }
-    }) : []
+    })
     return {
       operationId: op.operationId,
       kind: op.kind,
@@ -388,6 +603,13 @@ export class GarminToolService {
       // Surface the idempotency key fingerprint, never the raw value, and
       // only when the caller already knows the key (they queried by it).
       hasIdempotencyKey: Boolean(op.idempotencyKeyHash),
+      // The journal's own "this record could not be reconciled" flag. It blocks
+      // every new write for its steps, so it must reach the caller as a
+      // recovery instruction, not as a silent annotation.
+      manualReview: manualReview
+        ? { reason: manualReview.reason, detectedAt: manualReview.detectedAt }
+        : undefined,
+      ...summarizeOperationRecovery(op.operationId, manualReview, [...guidance.values()]),
       steps,
     }
   }
@@ -1308,6 +1530,40 @@ export class GarminToolService {
    * restart and is invalidated in every process when the revision advances.
    */
   /**
+   * A fresh, read-only Garmin Calendar read for an inclusive date range.
+   *
+   * Three answers that must never be confused with one another:
+   *   - no verified read exists for this account  -> throws (capability error);
+   *   - the read could not cover the whole range  -> snapshot with a partial
+   *     result and `complete:false`, never an empty range;
+   *   - the read covered the range and saw none  -> a *complete* snapshot with
+   *     no entries, which is a statement about this read and no other.
+   *
+   * None of them says whether a specific write attempt reached Garmin. This
+   * method never writes, never deletes, and never retries a write; it issues
+   * exactly the reads the adapter decides are needed and stores nothing.
+   */
+  async getCalendarRange(args: CalendarRangeArgs = {}): Promise<CalendarSnapshot> {
+    const range = validateCalendarQuery(args)
+    const reader = this.calendarReader()
+    if (!reader) {
+      throw new CalendarCapabilityError(calendarUnsupportedMessage())
+    }
+    try {
+      return await reader.getCalendarRange(range)
+    } catch (error) {
+      // The adapter refuses an unsupported region with a typed write error
+      // before it sends anything. Re-raise it as a capability answer so the
+      // caller learns *why* the calendar cannot be observed instead of seeing
+      // the generic upstream fallback.
+      if (isGarminWriteError(error) && error.code === WRITE_ERROR_CODES.CALENDAR_QUERY_UNSUPPORTED) {
+        throw new CalendarCapabilityError(error.message)
+      }
+      throw error
+    }
+  }
+
+  /**
    * Ask the coordinator to re-read what an operation is still unsure about.
    *
    * `readOnlyHint:false` is honest about what this does: it takes no Garmin
@@ -2106,6 +2362,152 @@ function validateDate(name: string, value: string): string {
 
 function invalidDate(name: string): Error {
   return new PublicToolError(`Invalid ${name}: expected a real date in YYYY-MM-DD format`)
+}
+
+/** Default and maximum page size for a local journal listing. */
+export const WRITE_OPERATION_PAGE_DEFAULT_LIMIT = 20
+export const WRITE_OPERATION_PAGE_MAX_LIMIT = 100
+
+const OPERATION_CURSOR_VERSION = 1
+/**
+ * The cursor alphabet. It deliberately excludes `/`, `.` and whitespace, so a
+ * cursor can never double as a path fragment, and it is length-bounded so a
+ * caller cannot hand this build an unbounded string to decode.
+ */
+export const OPERATION_CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,2048}$/
+
+interface OperationCursorPayload {
+  v: typeof OPERATION_CURSOR_VERSION
+  offset: number
+  digest: string
+}
+
+function normalizePageLimit(limit: number | undefined): number {
+  if (limit === undefined) return WRITE_OPERATION_PAGE_DEFAULT_LIMIT
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new PublicToolError('Invalid limit: expected a positive integer')
+  }
+  return Math.min(limit, WRITE_OPERATION_PAGE_MAX_LIMIT)
+}
+
+/**
+ * A fingerprint of the listed journal.
+ *
+ * It covers identity *and* order *and* last-modified time, so any addition,
+ * removal, reorder or in-place advance of a record invalidates every cursor
+ * minted before it. Length is included so a truncated read cannot hash to the
+ * same value as a full one.
+ */
+function journalDigest(
+  operations: ReadonlyArray<{ operationId?: string; updatedAt?: string }>,
+): string {
+  const hash = createHash('sha256')
+  hash.update(`garmin-write-journal-page:${operations.length}\n`)
+  for (const operation of operations) {
+    hash.update(`${operation.operationId ?? '?'}\u0000${operation.updatedAt ?? '?'}\n`)
+  }
+  return hash.digest('hex')
+}
+
+function encodeOperationCursor(payload: OperationCursorPayload): string {
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+}
+
+/**
+ * Decode a cursor, or return `null` for anything this build cannot have minted.
+ *
+ * Every rejection is a `null` rather than a repair: a cursor that was edited,
+ * truncated or produced by another build names an unknown position, and
+ * guessing one would page through records the caller never asked for.
+ */
+function decodeOperationCursor(cursor: unknown): OperationCursorPayload | null {
+  if (typeof cursor !== 'string' || !OPERATION_CURSOR_PATTERN.test(cursor)) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const payload = parsed as Record<string, unknown>
+  if (payload.v !== OPERATION_CURSOR_VERSION) return null
+  if (!Number.isInteger(payload.offset) || (payload.offset as number) < 0) return null
+  if ((payload.offset as number) > 1_000_000) return null
+  if (typeof payload.digest !== 'string' || !/^[0-9a-f]{64}$/.test(payload.digest)) return null
+  return {
+    v: OPERATION_CURSOR_VERSION,
+    offset: payload.offset as number,
+    digest: payload.digest,
+  }
+}
+
+/**
+ * The host's IANA timezone, used when a calendar query omits one.
+ *
+ * It is only ever echoed back on the snapshot: the verified provider query
+ * carries no timezone parameter, so no date is ever shifted by this value.
+ */
+function hostTimeZone(): string {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    if (typeof zone === 'string' && zone.trim()) return zone
+  } catch {
+    // An environment without a resolvable zone falls back below.
+  }
+  return 'UTC'
+}
+
+function calendarUnsupportedMessage(): string {
+  return 'No verified Garmin Calendar read is ' +
+    'available for this account, so the calendar cannot be observed. This is not an empty ' +
+    'calendar, and no conclusion about any scheduled entry may be drawn from it.'
+}
+
+/**
+ * Enforce the calendar-range contract before any read is issued.
+ *
+ * The adapter validates the same range, but a caller can inject a reader seam
+ * that skips the adapter entirely, so this is not redundant belt-and-braces:
+ * it is the only validation on that path. An over-long range is rejected rather
+ * than truncated, because a silently shortened range would read as a complete
+ * answer for a range nobody asked about.
+ */
+function validateCalendarQuery(args: CalendarRangeArgs): CalendarRange {
+  const startDate = requireCalendarDate('startDate', args.startDate)
+  const endDate = requireCalendarDate('endDate', args.endDate)
+  if (startDate > endDate) {
+    throw new CalendarRangeError(
+      'CALENDAR_RANGE_INVALID',
+      `Invalid date range: endDate ${endDate} is before startDate ${startDate}`,
+    )
+  }
+  const days = calendarDayCount(startDate, endDate)
+  if (days > MAX_CALENDAR_RANGE_DAYS) {
+    throw new CalendarRangeError(
+      'CALENDAR_RANGE_TOO_LONG',
+      `Calendar range covers ${days} days; the maximum is ${MAX_CALENDAR_RANGE_DAYS}`,
+    )
+  }
+
+  const timezone = args.timezone === undefined ? hostTimeZone() : args.timezone
+  if (typeof timezone !== 'string' || !timezone.trim() || timezone.length > 100) {
+    throw new CalendarRangeError(
+      'CALENDAR_RANGE_INVALID',
+      'Invalid timezone: expected a non-empty IANA timezone label such as Asia/Shanghai',
+    )
+  }
+
+  return { startDate, endDate, timezone }
+}
+
+function requireCalendarDate(name: string, value: unknown): string {
+  if (typeof value !== 'string' || !isValidCalendarDate(value)) {
+    throw new CalendarRangeError(
+      'CALENDAR_RANGE_INVALID',
+      `Invalid ${name}: expected a real date in YYYY-MM-DD format`,
+    )
+  }
+  return value
 }
 
 export function getDatesInRange(start: string, end: string): string[] {

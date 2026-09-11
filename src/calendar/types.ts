@@ -177,6 +177,23 @@ export class CalendarRangeError extends PublicToolError {
   }
 }
 
+/**
+ * "This account has no verified calendar read at all."
+ *
+ * Deliberately an error rather than an empty snapshot. "We cannot read the
+ * calendar" and "the calendar is empty" lead to opposite decisions, and only
+ * one of them is safe, so the unreadable case must never be representable as a
+ * snapshot a caller could mistake for evidence.
+ */
+export class CalendarCapabilityError extends PublicToolError {
+  override name = 'CalendarCapabilityError'
+  readonly code = 'CALENDAR_QUERY_UNSUPPORTED' as const
+
+  constructor(message: string) {
+    super(message)
+  }
+}
+
 /** Rejections of a target selector, i.e. an ambiguous or empty identity. */
 export class CalendarTargetError extends PublicToolError {
   override name = 'CalendarTargetError'

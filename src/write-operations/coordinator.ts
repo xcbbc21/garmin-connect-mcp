@@ -410,6 +410,21 @@ export class WriteCoordinator {
   }
 
   /**
+   * The recovery guidance every step of an already-read operation carries,
+   * computed without touching the store, the lock or the network.
+   *
+   * It is the *same* projection a live write returns (`receiptFor`), exposed so
+   * a caller who lost the original response reads exactly what that response
+   * would have said: which step is still uncertain, what evidence exists, and
+   * whether reading again, resuming, or a human is the next step. A second
+   * implementation of those rules is how a recovery reader starts disagreeing
+   * with the writer it is supposed to describe.
+   */
+  describeRecoveryGuidance(operation: WriteOperation): ScheduleStepReceipt[] {
+    return operation.steps.map(step => this.receiptFor(operation, step))
+  }
+
+  /**
    * Commit a pending v1 -> v2 journal upgrade while holding the account lock.
    *
    * The upgrade is a whole-file read-modify-write, so it must not race a live
@@ -2666,7 +2681,14 @@ export class WriteCoordinator {
     const referenceStatus = step.reference?.status
     const reportedStatus = referenceStatus ?? step.status
     const satisfied = SATISFIED_STEP_STATUSES.has(reportedStatus)
-    const resumable = reportedStatus === 'failed' || reportedStatus === 'not_attempted'
+    // `prepared` counts as resumable because this journal persists `in_flight`
+    // before the single dispatch, so a step still `prepared` provably never
+    // reached the network — the same reason `planResumeCandidates` arms it.
+    // Reporting `canResume:false` for such a step would tell a caller to give
+    // up on a write that was never sent.
+    const resumable = reportedStatus === 'prepared'
+      || reportedStatus === 'failed'
+      || reportedStatus === 'not_attempted'
     const unknown = reportedStatus === 'unknown' || reportedStatus === 'in_flight'
     return {
       stepId: step.stepId,

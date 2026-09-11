@@ -10,6 +10,8 @@ export default tseslint.config(
     languageOptions: {
       globals: { process: 'readonly', console: 'readonly', Buffer: 'readonly',
         setTimeout: 'readonly', clearTimeout: 'readonly', URL: 'readonly',
+        // Node 20 ships these as globals, and engines requires node >= 20.
+        fetch: 'readonly', URLSearchParams: 'readonly',
         structuredClone: 'readonly', require: 'readonly', module: 'readonly' },
     },
     rules: {

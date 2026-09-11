@@ -454,6 +454,13 @@
             "maxLength": 256,
             "pattern": "^[^\\s:]+:\\d{1,9}$",
             "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Optional stable request label for this account. Reuse the same value to retrieve the durable operation instead of writing again; a different value never bypasses an in-flight or unknown write. Not a permission token."
           }
         },
         "required": [
@@ -512,6 +519,14 @@
             "maxLength": 128,
             "pattern": "^[A-Za-z0-9._:-]+$",
             "description": "Optional stable request label for this account. Reuse the same value to retrieve the durable operation instead of writing again; a different value never bypasses an in-flight or unknown write. Not a permission token."
+          },
+          "duplicatePolicy": {
+            "type": "string",
+            "enum": [
+              "skip",
+              "error"
+            ],
+            "description": "What to do when a fresh calendar read shows this target is already scheduled. 'skip' (default) reports it as skipped without writing; 'error' reports it as duplicate_existing and still writes nothing. Neither option deletes or overwrites an existing entry. The value is part of the confirmed request, so it must be the same on the preview and confirm calls."
           }
         },
         "required": [
@@ -584,6 +599,14 @@
             "maxLength": 128,
             "pattern": "^[A-Za-z0-9._:-]+$",
             "description": "Optional stable request label for this account. Reuse the same value to retrieve the durable operation instead of writing again; a different value never bypasses an in-flight or unknown write. Not a permission token."
+          },
+          "duplicatePolicy": {
+            "type": "string",
+            "enum": [
+              "skip",
+              "error"
+            ],
+            "description": "What to do when a fresh calendar read shows this target is already scheduled. 'skip' (default) reports it as skipped without writing; 'error' reports it as duplicate_existing and still writes nothing. Neither option deletes or overwrites an existing entry. The value is part of the confirmed request, so it must be the same on the preview and confirm calls."
           }
         },
         "required": [
@@ -845,8 +868,48 @@
       }
     },
     {
+      "name": "get_garmin_calendar",
+      "description": "Read the Garmin Calendar for an inclusive local-date range of at most 366 days. Returns a CalendarSnapshot: the entries it actually observed, whether the read covered the whole range, and the sub-ranges it could not read. An incomplete read is never an empty calendar, and no range read of any kind proves that a specific write attempt never reached Garmin — that question is answered by reconcile_garmin_write_operation against the local journal. Purely read-only: this call schedules, creates and deletes nothing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "startDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive first calendar day in YYYY-MM-DD format."
+          },
+          "endDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive last calendar day in YYYY-MM-DD format; at most 366 days after startDate."
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "IANA timezone label echoed back on the snapshot, e.g. Asia/Shanghai. Defaults to the MCP host timezone. It never shifts a date: the verified provider query carries no timezone parameter."
+          }
+        },
+        "required": [
+          "startDate",
+          "endDate"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "get_garmin_write_operation",
-      "description": "Read the local account-scoped write journal without any network access. Supply either an operationId or an idempotencyKey to look up a single operation. Supplying neither lists recent operations for the active account (limit/offset supported). The returned records are redacted: the raw idempotency key, the request payload, and the account key are never echoed back. Use the returned nextAction to drive reconcile_garmin_write_operation or resume_garmin_write_operation. Does not require login and never contacts Garmin.",
+      "description": "Read the local account-scoped write journal without any network access. Supply either an operationId or an idempotencyKey to look up a single operation; those two are mutually exclusive and cannot be combined with limit or cursor. Supplying neither pages through recent operations for the active account (newest first, limit default 20, maximum 100) and returns a nextCursor for the following page. The cursor is an opaque, bounded local token, never a path, and it is valid only while the journal is unchanged: if a record moved, the response is `staleCursor:true` with no `operations` key at all, so an empty page can never be mistaken for an empty journal. A record that does not exist — including one belonging to another account — is reported uniformly as OPERATION_NOT_FOUND. The returned records are redacted: the raw idempotency key, the request payload, and the account key are never echoed back. Each record carries its own roll-up (status, canResume, manualReviewRequired, nextAction) so you do not have to reconstruct the verdict from step bookkeeping; use that nextAction to drive reconcile_garmin_write_operation or resume_garmin_write_operation. Does not require login and never contacts Garmin.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -865,11 +928,13 @@
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 100
+            "maximum": 100,
+            "description": "Page size for the listing mode (default 20, maximum 100). Rejected when operationId or idempotencyKey is used."
           },
-          "offset": {
-            "type": "integer",
-            "minimum": 0
+          "cursor": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,2048}$",
+            "description": "Opaque nextCursor from a previous listing: 1-2048 characters from A-Z a-z 0-9 _ - only, so it can never be interpreted as a path. Rejected when operationId or idempotencyKey is used. It expires as soon as the journal changes."
           }
         },
         "additionalProperties": false,
@@ -879,6 +944,72 @@
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "reconcile_garmin_write_operation",
+      "description": "Re-read Garmin to resolve what a local write operation is still unsure about, and record the trusted observations in the local recovery journal. It sends no schedule, create or unschedule request and deletes nothing anywhere: an attempt with an unknown outcome stays unknown until a real receipt exists, and an entry observed to be absent is reported as absent without any past result being rewritten. Because it updates local state it is not advertised as read-only, but it never modifies Garmin. Returns the observations it took and the next action to take.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Operation ID returned by a previous schedule_garmin_workout, batch_schedule_garmin_workouts, create_garmin_workout, create_and_schedule_garmin_workout or unschedule_garmin_workout call."
+          }
+        },
+        "required": [
+          "operationId"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "resume_garmin_write_operation",
+      "description": "Derive the safe remaining steps of a journaled write operation and, once the caller approves the preview, dispatch them. There is no payload parameter: dates, workout ids and template definitions all come from the journal record, so a resume can never move a write to a different day or swap the template — that would be a new request, not a recovery. Only steps proven never to have applied are armed; an unknown outcome is never re-sent and cannot be cleared from here. The dispatch is non-idempotent: re-query the operation for the durable result instead of calling it again.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Operation ID returned by a previous schedule_garmin_workout, batch_schedule_garmin_workouts, create_garmin_workout, create_and_schedule_garmin_workout or unschedule_garmin_workout call."
+          },
+          "confirmed": {
+            "type": "boolean",
+            "description": "Set true only after the user explicitly approves the returned preview."
+          },
+          "confirmationId": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\s:]+:\\d{1,9}$",
+            "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
+          }
+        },
+        "required": [
+          "operationId"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
         "openWorldHint": true
       },
       "execution": {
