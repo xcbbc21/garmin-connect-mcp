@@ -1,4 +1,9 @@
-import { resolveConfig, resolveAccountAlias, resolveFitDownloadDir } from '../src/config'
+import {
+  resolveAccountAlias,
+  resolveConfig,
+  resolveFitDownloadDir,
+  resolveStateDirectory,
+} from '../src/config'
 
 const env = { GARMIN_USERNAME: 'runner@example.test' }
 
@@ -9,6 +14,7 @@ describe('runtime configuration', () => {
       sessionTokenFile: '/private/config/garmin-connect-mcp/accounts/default.session.json',
       region: 'global', cacheTtl: 300, requestTimeoutMs: 15000,
       logLevel: 'info', activityDetail: 'compact', fitDownloadDir: '',
+      stateDirectory: '/private/config/garmin-connect-mcp/state',
     })
   })
   it.each(['', 'cn ', 'CN', 'mars'])('rejects an explicitly invalid region: %s', region => {
@@ -61,5 +67,28 @@ describe('runtime configuration', () => {
     expect(resolveFitDownloadDir('', '/private/home')).toBe('')
     expect(resolveFitDownloadDir('~/private-fit', '/private/home')).toBe('/private/home/private-fit')
     expect(resolveConfig({}, { ...env, GARMIN_FIT_DOWNLOAD_DIR: '/private/fit' }).fitDownloadDir).toBe('/private/fit')
+  })
+})
+
+describe('write-journal state directory', () => {
+  it('defaults under the platform config root, independent of the session file', () => {
+    expect(resolveStateDirectory(undefined, { XDG_CONFIG_HOME: '/private/config' }))
+      .toBe('/private/config/garmin-connect-mcp/state')
+    expect(resolveStateDirectory(undefined, { HOME: '/private/home' }))
+      .toBe('/private/home/.config/garmin-connect-mcp/state')
+  })
+
+  it('accepts an absolute override and expands a bare tilde', () => {
+    expect(resolveConfig({}, { ...env, GARMIN_STATE_DIR: '/private/state' }).stateDirectory)
+      .toBe('/private/state')
+    expect(resolveStateDirectory('~', { HOME: '/private/home' }))
+      .toBe('/private/home')
+  })
+
+  it('rejects relative paths before any journal is opened', () => {
+    expect(() => resolveStateDirectory('relative/state', { HOME: '/private/home' }))
+      .toThrow('GARMIN_STATE_DIR must be an absolute local path')
+    expect(() => resolveConfig({}, { ...env, GARMIN_STATE_DIR: 'relative/state' }))
+      .toThrow('GARMIN_STATE_DIR must be an absolute local path')
   })
 })

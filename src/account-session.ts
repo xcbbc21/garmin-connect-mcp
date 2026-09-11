@@ -17,14 +17,24 @@ export function defaultAccountSessionPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
   assertAccountAlias(account)
-  const configRoot = env.XDG_CONFIG_HOME?.trim()
-    || env.LOCALAPPDATA?.trim()
-    || env.APPDATA?.trim()
-    || path.join(env.HOME?.trim() || homedir(), '.config')
   return path.resolve(
-    configRoot,
+    platformConfigRoot(env),
     'garmin-connect-mcp',
     'accounts',
     `${account}.session.json`,
   )
+}
+
+/**
+ * Platform configuration root shared by the session files and the write
+ * journal. The journal lives under a sibling `state` directory so it is
+ * independent of any single login alias or session path.
+ */
+export function platformConfigRoot(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return env.XDG_CONFIG_HOME?.trim()
+    || env.LOCALAPPDATA?.trim()
+    || env.APPDATA?.trim()
+    || path.join(env.HOME?.trim() || homedir(), '.config')
 }

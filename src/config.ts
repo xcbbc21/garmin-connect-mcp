@@ -1,5 +1,7 @@
 import { z } from 'zod'
-import { assertAccountAlias, defaultAccountSessionPath } from './account-session'
+import { isAbsolute, join, normalize } from 'node:path'
+import { homedir } from 'node:os'
+import { assertAccountAlias, defaultAccountSessionPath, platformConfigRoot } from './account-session'
 import { PublicToolError } from './utils/errors'
 import { resolveFitDownloadDir } from './utils/path'
 
@@ -28,6 +30,14 @@ export interface Config {
   activityDetail: 'compact' | 'full'
   /** User-selected FIT parent; output is separated by Garmin region and account */
   fitDownloadDir: string
+  /**
+   * Absolute local directory holding the account-scoped write journal and
+   * lock. Independent of the session file path, so every login alias for the
+   * same account shares one recovery log. Optional in the type so existing
+   * callers keep compiling; `resolveConfig` always populates it and the tool
+   * service resolves the platform default when a caller omits it.
+   */
+  stateDirectory?: string
 }
 
 export type ConfigEnvironment = Record<string, string | undefined>
@@ -44,6 +54,7 @@ const configSchema = z.object({
   logLevel: z.enum(['debug', 'info', 'warn', 'error']),
   activityDetail: z.enum(['compact', 'full']),
   fitDownloadDir: z.string(),
+  stateDirectory: z.string(),
 })
 
 export function resolveAccountAlias(env: ConfigEnvironment = process.env): string {
@@ -74,6 +85,10 @@ export function resolveConfig(
     activityDetail: input.activityDetail
       ?? (env.GARMIN_ACTIVITY_DETAIL === 'full' ? 'full' : 'compact'),
     fitDownloadDir: resolveFitDownloadDir(preferNonEmpty(input.fitDownloadDir, env.GARMIN_FIT_DOWNLOAD_DIR)),
+    stateDirectory: resolveStateDirectory(
+      input.stateDirectory ?? env.GARMIN_STATE_DIR,
+      env,
+    ),
     cacheTtl: input.cacheTtl ?? envNumber(env.GARMIN_CACHE_TTL, 300, true),
     requestTimeoutMs: input.requestTimeoutMs ?? envNumber(env.GARMIN_REQUEST_TIMEOUT_MS, 15_000, false),
     logLevel: input.logLevel ?? envChoice(
@@ -86,6 +101,28 @@ export function resolveConfig(
     throw new PublicToolError('Invalid Garmin configuration fields: ' + fields)
   }
   return result.data
+}
+
+/**
+ * Resolve the write-journal root. Must be an absolute local path; relative
+ * values are rejected so the journal can never depend on the server CWD. When
+ * unset, it defaults to `<platform config root>/garmin-connect-mcp/state`.
+ */
+export function resolveStateDirectory(
+  value: string | undefined,
+  env: ConfigEnvironment = process.env,
+): string {
+  const configured = value?.trim()
+  if (!configured) {
+    return join(platformConfigRoot(env), 'garmin-connect-mcp', 'state')
+  }
+  const expanded = configured === '~'
+    ? (env.HOME?.trim() || homedir())
+    : configured
+  if (!isAbsolute(expanded)) {
+    throw new PublicToolError('GARMIN_STATE_DIR must be an absolute local path')
+  }
+  return normalize(expanded)
 }
 
 function preferNonEmpty(primary: string | undefined, fallback: string | undefined): string {

@@ -3,6 +3,8 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   watchman: false,
+  setupFiles: ['<rootDir>/tests/setup-env.ts'],
+  setupFilesAfterEnv: ['<rootDir>/tests/setup-env-after.ts'],
   collectCoverageFrom: [
     'src/**/*.ts',
   ],
