@@ -28,6 +28,8 @@ jobs:
       - run: npm run pack:smoke
       - name: Install packed runtime without development dependencies
         run: npm run test:distribution
+      - name: Run the three recovery demos against the out-of-process fake provider
+        run: npm run demo:recovery
 
   platform-runtime:
     runs-on: ${{ matrix.os }}

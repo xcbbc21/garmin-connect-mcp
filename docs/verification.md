@@ -332,12 +332,15 @@ jobs run the relevant native permissions and process/protocol tests.
 
 That CI run predates the continuation round. The workflow has since been extended
 so the macOS and Windows jobs also run the write journal, account lock, migration,
-private-state and stdio recovery suites; the extension has been verified on macOS
-locally and has **not** been run on a Windows or Linux runner for any commit of this
-round. No push was performed either, so the commits it reports —
-`e091d1b` through `3a82e4f`, the final commit — have no CI result at all. The Linux,
-macOS and Windows platform claims in this report rest on the local and container
-evidence described in the platform section above, not on CI.
+private-state and stdio recovery suites, and so the Linux jobs also run
+`npm run demo:recovery`. Both extensions have been exercised locally on macOS and,
+for the Linux job, as the exact command sequence it runs — but the workflow itself
+has **not** been run on any runner for any commit of this round. No push was
+performed either, so no commit of the round — `e091d1b` through the final commit,
+the last of which changed only `docs/` after `3a82e4f` changed the last `src/` file
+— has a CI result at all. The Linux, macOS and Windows platform claims in this
+report rest on the local and container evidence described in the platform section
+above, not on CI.
 
 Live read-only checks are available explicitly through `npm run test:integration`
 using the same public client and session configuration. They are excluded from CI.
