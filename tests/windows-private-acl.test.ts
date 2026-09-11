@@ -203,6 +203,71 @@ describe('Windows exact owner-only session ACLs', () => {
       .rejects.toThrow('Garmin session token file could not be written')
     expect(run).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['', 'empty'],
+    ['private\\account\\session.json', 'relative'],
+    ['\\private\\account\\session.json', 'rooted without a drive'],
+    ['C:private\\account\\session.json', 'drive-relative without a separator'],
+    ['C:\\private\\account\\session.json\0SECRET', 'NUL'],
+    ['C:\\private\\..\\SECRET\\session.json', 'traversal'],
+    ['C:\\private\\.\\SECRET\\session.json', 'a single-dot component'],
+    [`C:\\${'a'.repeat(16_001)}`, 'over the UTF-16 path cap'],
+  ])('rejects an unsafe target (%s) before running a command', async (target) => {
+    const run = jest.fn<ReturnType<WindowsAclCommandRunner>, Parameters<WindowsAclCommandRunner>>()
+    const acl = await createWindowsPrivateAcl({ run, systemRoot })
+
+    let thrown: unknown
+    try {
+      await acl.verifyFile(target)
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toEqual(expect.objectContaining({
+      name: 'PublicToolError',
+      message: 'Garmin session token file could not be written',
+    }))
+    expect(run).not.toHaveBeenCalled()
+    // The refused path is never echoed back through the error.
+    expect(String(thrown)).not.toContain('SECRET')
+  })
+
+  it('still runs the command for a normalized, well-formed target', async () => {
+    // Positive control: the rejections above are the validator working, not a
+    // validator that refuses everything.
+    const run = jest.fn<ReturnType<WindowsAclCommandRunner>, Parameters<WindowsAclCommandRunner>>()
+      .mockResolvedValue({ stdout: '', stderr: '' })
+    const acl = await createWindowsPrivateAcl({ run, systemRoot })
+
+    await expect(acl.verifyFile('C:\\Users\\runner\\.garmin\\session.json'))
+      .resolves.toBeUndefined()
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed through the real runner when PowerShell cannot be started', async () => {
+    // No runner injected, so the shipping `execFile` adapter runs. The
+    // executable is built under SystemRoot with a drive letter, so a SystemRoot
+    // that does not exist makes the spawn fail on every platform — which pins
+    // the adapter's failure branch without a Windows host. It does not, and
+    // cannot, prove that a real PowerShell run succeeds.
+    const acl = await createWindowsPrivateAcl({ systemRoot: 'C:\\gcmcp-absent-system-root' })
+
+    let thrown: unknown
+    try {
+      await acl.prepareDirectory('C:\\private\\SECRET_ACCOUNT')
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toEqual(expect.objectContaining({
+      name: 'PublicToolError',
+      message: 'Garmin session token file could not be written',
+    }))
+    expect(String(thrown)).not.toContain('SECRET_ACCOUNT')
+    await expect(acl.verifyFile('C:\\private\\SECRET_ACCOUNT\\session.json'))
+      .rejects.toThrow('Garmin session token file could not be written')
+  })
 })
 
 describe('Windows exact-private session write ordering', () => {

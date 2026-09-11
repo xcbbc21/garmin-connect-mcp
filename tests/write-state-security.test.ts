@@ -16,7 +16,7 @@
  *   - a crashed `in_flight` marker is rolled forward to `unknown` only under the
  *     account lock, and a plain read never mutates state.
  */
-import { link, lstat, mkdir, readFile, realpath, rm, stat, symlink, truncate, writeFile, chmod, mkdtemp } from 'node:fs/promises'
+import { link, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, truncate, writeFile, chmod, mkdtemp } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { Stats } from 'node:fs'
@@ -32,6 +32,7 @@ import {
 import {
   createPosixPrivateStateGuard,
   createWindowsPrivateStateGuard,
+  defaultPrivateStateGuard,
 } from '../src/write-operations/private-state'
 import { createWindowsPrivateAcl, type WindowsPrivateAcl } from '../src/windows-private-acl'
 import { currentEffectiveUid } from '../src/private-path'
@@ -790,5 +791,532 @@ describe('write-state security: account key containment', () => {
     const store = new FileOperationStore(base, ACCOUNT)
     await store.save(documentWith(ACCOUNT, 1))
     expect(store.filePath.startsWith(`${base}/`)).toBe(true)
+  })
+})
+
+/**
+ * The guard the running platform actually gets, and the branches only a real
+ * Windows host or a real inode swap can reach. Every case here uses a seam the
+ * source already exposes (`platform`, `lstat`, `darwinAcl`, the ACL resolver),
+ * so they run deterministically on all three platforms instead of being
+ * skipped where the code under test was least exercised.
+ */
+describe('write-state security: production guard assembly', () => {
+  const sentinel = (): string => `/gcmcp-sentinel-${String(process.pid)}/account`
+
+  it('assembles the Windows guard from the real DACL helper, and only for win32', async () => {
+    const guard = defaultPrivateStateGuard('win32')
+
+    // A POSIX absolute path is refused by the Windows target validator before
+    // any PowerShell is spawned, so this pins the production assembly without
+    // creating anything on the host that runs the test.
+    await expect(guard.ensureDirectory(sentinel())).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining(
+        'Write-journal directory could not be given a private DACL',
+      ) as unknown as string,
+    })
+    // The cause text below exists only in `windows-private-acl.ts`, so the
+    // guard really is wired to the shipping ACL helper and not to a POSIX one.
+    await expect(guard.ensureDirectory(sentinel())).rejects.toThrow(
+      'Garmin session token file could not be written',
+    )
+    await expect(guard.verifyChain(sentinel())).rejects.toThrow(
+      'Write-journal directory DACL is not private',
+    )
+    await expect(guard.secureNewFile(`${sentinel()}/operations.json`)).rejects.toThrow(
+      'Write-journal file could not be given a private DACL',
+    )
+    // A file that is not there is reported absent: no helper is constructed and
+    // nothing is created, which is the read path's contract on Windows too.
+    await expect(guard.verifyFile(`${sentinel()}/operations.json`)).resolves.toBeUndefined()
+
+    // The same input on the POSIX branch is decided by ownership and mode, not
+    // by a DACL, so a path that simply does not exist resolves.
+    await expect(defaultPrivateStateGuard('linux').verifyChain(sentinel())).resolves.toBeUndefined()
+  })
+
+  POSIX_ONLY('defaults to the running platform instead of Windows', async () => {
+    // With `platform` omitted the guard is chosen from `process.platform`; on a
+    // host that is not Windows that must be the POSIX guard, which is the only
+    // one of the two that treats a missing path as nothing to prove.
+    await expect(defaultPrivateStateGuard().verifyChain(sentinel())).resolves.toBeUndefined()
+    await expect(defaultPrivateStateGuard(process.platform).verifyChain(sentinel()))
+      .resolves.toBeUndefined()
+  })
+})
+
+describe('write-state security: Windows guard failure branches', () => {
+  const directory = 'C:\\private\\account'
+  const file = 'C:\\private\\account\\operations.json'
+  const enoent = () => Object.assign(new Error('gone'), { code: 'ENOENT' })
+  const eacces = () => Object.assign(new Error('denied'), { code: 'EACCES' })
+
+  function windowsAcl(overrides: Partial<WindowsPrivateAcl> = {}): WindowsPrivateAcl {
+    return {
+      prepareDirectory: jest.fn().mockResolvedValue(undefined),
+      verifyDirectory: jest.fn().mockResolvedValue(undefined),
+      secureFile: jest.fn().mockResolvedValue(undefined),
+      verifyFile: jest.fn().mockResolvedValue(undefined),
+      ...overrides,
+    }
+  }
+
+  it('fails closed when the path cannot be inspected at all', async () => {
+    const inspect = jest.fn(async () => { throw eacces() })
+    const guard = createWindowsPrivateStateGuard(async () => windowsAcl(), { lstat: inspect })
+
+    // A directory is decided by its DACL alone, so the read path never stats it:
+    // the POSIX shape of this check does not exist on Windows.
+    await expect(guard.verifyChain(directory)).resolves.toBeUndefined()
+    expect(inspect).not.toHaveBeenCalled()
+
+    // A journal *file* is inspected for existence first, and an unreadable path
+    // is a refusal rather than "the file is not there".
+    await expect(guard.verifyFile(file)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('path could not be inspected: denied') as unknown as string,
+    })
+    await expect(
+      guard.verifyOpenHandle(statOf({ kind: 'file', mode: 0o600, uid: 0 }), file),
+    ).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('path could not be inspected') as unknown as string,
+    })
+    expect(inspect).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['ensureDirectory', 'Write-journal directory could not be given a private DACL'],
+    ['verifyChain', 'Write-journal directory DACL is not private'],
+    ['secureNewFile', 'Write-journal file could not be given a private DACL'],
+    ['verifyFile', 'Write-journal file DACL is not private'],
+  ] as const)('%s fails closed with its own wording', async (action, wording) => {
+    const failure = new Error('ACL validation failed')
+    const guard = createWindowsPrivateStateGuard(
+      async () => windowsAcl({
+        prepareDirectory: jest.fn().mockRejectedValue(failure),
+        verifyDirectory: jest.fn().mockRejectedValue(failure),
+        secureFile: jest.fn().mockRejectedValue(failure),
+        verifyFile: jest.fn().mockRejectedValue(failure),
+      }),
+      { lstat: async () => statOf({ kind: 'file', mode: 0o600, uid: 0 }) },
+    )
+
+    const invoke = async (): Promise<unknown> => {
+      if (action === 'ensureDirectory') return guard.ensureDirectory(directory)
+      if (action === 'verifyChain') return guard.verifyChain(directory)
+      if (action === 'secureNewFile') return guard.secureNewFile(file)
+      return guard.verifyFile(file)
+    }
+
+    await expect(invoke()).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining(`${wording}: ACL validation failed`) as unknown as string,
+    })
+  })
+
+  it('never re-wraps a typed write error raised by the DACL helper', async () => {
+    // A typed error is a verdict the caller already understands — an unavailable
+    // store is not a corrupt state, and collapsing the two would hide the
+    // difference between "cannot tell" and "the journal is not private".
+    const typed = new GarminWriteError(
+      WRITE_ERROR_CODES.STATE_UNAVAILABLE,
+      'not_applied',
+      'Write-journal store is unavailable',
+    )
+    const guard = createWindowsPrivateStateGuard(async () => windowsAcl({
+      verifyDirectory: jest.fn().mockRejectedValue(typed),
+    }))
+
+    await expect(guard.verifyChain(directory)).rejects.toBe(typed)
+  })
+
+  it('retries the DACL helper after a failed construction, then caches it', async () => {
+    let attempts = 0
+    const guard = createWindowsPrivateStateGuard(async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('ACL helper is not available yet')
+      return windowsAcl()
+    })
+
+    // The first attempt fails before any action runs: that is not a DACL
+    // verdict, so the next call is allowed to build the helper again.
+    await expect(guard.verifyChain(directory)).rejects.toThrow('ACL helper is not available yet')
+    await expect(guard.verifyChain(directory)).resolves.toBeUndefined()
+    expect(attempts).toBe(2)
+
+    // A helper that did resolve is reused instead of re-run per action.
+    let constructed = 0
+    const cached = createWindowsPrivateStateGuard(async () => {
+      constructed += 1
+      return windowsAcl()
+    })
+    await cached.verifyChain(directory)
+    await cached.secureNewFile(file)
+    expect(constructed).toBe(1)
+  })
+
+  it('hands the exact directory to the DACL helper instead of repairing mode bits', async () => {
+    const prepareDirectory = jest.fn().mockResolvedValue(undefined)
+    const verifyDirectory = jest.fn().mockResolvedValue(undefined)
+    const guard = createWindowsPrivateStateGuard(async () => windowsAcl({
+      prepareDirectory,
+      verifyDirectory,
+    }))
+
+    await expect(guard.ensureDirectory(directory)).resolves.toBeUndefined()
+
+    expect(prepareDirectory).toHaveBeenCalledTimes(1)
+    expect(prepareDirectory).toHaveBeenCalledWith(directory)
+    // Applying the DACL is the whole contract; it is not a verification, and
+    // POSIX mode bits are never consulted on Windows.
+    expect(verifyDirectory).not.toHaveBeenCalled()
+  })
+
+  it('verifies a present journal file through the DACL helper and returns its stats', async () => {
+    const verifyFile = jest.fn().mockResolvedValue(undefined)
+    const info = statOf({ kind: 'file', mode: 0o600, uid: 0 })
+    const guard = createWindowsPrivateStateGuard(async () => windowsAcl({ verifyFile }), {
+      lstat: async () => info,
+    })
+
+    await expect(guard.verifyFile(file)).resolves.toBe(info)
+    expect(verifyFile).toHaveBeenCalledWith(file)
+  })
+
+  it('reports a missing journal file as absent without building the DACL helper', async () => {
+    const resolveAcl = jest.fn()
+    const guard = createWindowsPrivateStateGuard(resolveAcl, {
+      lstat: async () => { throw enoent() },
+    })
+
+    await expect(guard.verifyFile(file)).resolves.toBeUndefined()
+    // A read of a journal that does not exist must not launch PowerShell.
+    expect(resolveAcl).not.toHaveBeenCalled()
+  })
+
+  it('refuses a handle that disappeared or changed before commit', async () => {
+    const gone = createWindowsPrivateStateGuard(async () => windowsAcl(), {
+      lstat: async () => { throw enoent() },
+    })
+    await expect(
+      gone.verifyOpenHandle(statOf({ kind: 'file', mode: 0o600, uid: 0 }), file),
+    ).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('disappeared before it was committed') as unknown as string,
+    })
+
+    const swapped = createWindowsPrivateStateGuard(async () => windowsAcl(), {
+      lstat: async () => statOf({ kind: 'file', mode: 0o600, uid: 0, ino: 2 }),
+    })
+    await expect(
+      swapped.verifyOpenHandle(statOf({ kind: 'file', mode: 0o600, uid: 0, ino: 1 }), file),
+    ).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('changed between open and commit') as unknown as string,
+    })
+  })
+
+  it('treats a handle that cannot report its own stat as nothing to check', async () => {
+    const inspect = jest.fn()
+    const guard = createWindowsPrivateStateGuard(async () => windowsAcl(), { lstat: inspect })
+
+    await expect(guard.verifyOpenHandle(undefined, file)).resolves.toBeUndefined()
+    expect(inspect).not.toHaveBeenCalled()
+  })
+})
+
+describe('write-state security: POSIX guard failure branches', () => {
+  const directory = '/private/account-under-test'
+  const file = '/private/account-under-test/operations.json'
+  const enoent = () => Object.assign(new Error('gone'), { code: 'ENOENT' })
+  const eacces = () => Object.assign(new Error('denied'), { code: 'EACCES' })
+  const privateDirectory = () => statOf({ kind: 'dir', mode: 0o700, uid: 501 })
+  const privateFile = () => statOf({ kind: 'file', mode: 0o600, uid: 501 })
+
+  it('fails closed when a path cannot be inspected for a reason other than absence', async () => {
+    const guard = createPosixPrivateStateGuard({
+      platform: 'linux',
+      effectiveUid: 501,
+      lstat: async () => { throw eacces() },
+    })
+
+    await expect(guard.verifyChain(directory)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('path could not be inspected: denied') as unknown as string,
+    })
+    await expect(guard.verifyFile(file)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('path could not be inspected') as unknown as string,
+    })
+  })
+
+  it.each([
+    ['a regular file', statOf({ kind: 'file', mode: 0o600, uid: 501 })],
+    ['a symlink', statOf({ kind: 'symlink', mode: 0o700, uid: 501 })],
+  ])('refuses to treat %s as the account directory', async (_label, info) => {
+    const guard = createPosixPrivateStateGuard({
+      platform: 'linux',
+      effectiveUid: 501,
+      lstat: async () => info,
+    })
+
+    await expect(guard.ensureDirectory(directory)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('not a directory') as unknown as string,
+    })
+  })
+
+  it('reports a repair it could not apply and a directory that is still absent', async () => {
+    // A widened mode is the one thing this store repairs, and the repair is
+    // never assumed: if the chmod cannot be applied the write stops here.
+    const widened = createPosixPrivateStateGuard({
+      platform: 'linux',
+      effectiveUid: 501,
+      lstat: async () => statOf({ kind: 'dir', mode: 0o755, uid: 501 }),
+    })
+    await expect(widened.ensureDirectory('/nonexistent-repair-target/account')).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('permissions could not be tightened') as unknown as string,
+    })
+
+    // Missing all the way down: nothing was created, and the store must say so
+    // rather than report a directory it never observed.
+    const absent = createPosixPrivateStateGuard({
+      platform: 'linux',
+      effectiveUid: 501,
+      lstat: async () => { throw enoent() },
+    })
+    await expect(absent.ensureDirectory(directory)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('directory could not be created') as unknown as string,
+    })
+  })
+
+  it('tolerates a file that vanished before the chmod and reports one that cannot be set', async () => {
+    const guard = createPosixPrivateStateGuard({ platform: 'linux', effectiveUid: 501 })
+
+    // `chmod` on a file that is already gone is the writer's race, not a
+    // policy failure: the file was created with `wx` and 0o600, and the final
+    // verification still has the last word.
+    await expect(guard.secureNewFile('/private/account-under-test/absent.json'))
+      .resolves.toBeUndefined()
+
+    // A path the filesystem rejects outright is a real failure and must not be
+    // mistaken for the tolerated race above.
+    await expect(guard.secureNewFile('bad\u0000name.json')).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('file permissions could not be set') as unknown as string,
+    })
+  })
+
+  it('refuses a macOS ACL that grants access and accepts a clean one', async () => {
+    const base = {
+      platform: 'darwin' as const,
+      effectiveUid: 501,
+      lstat: async (path: string) => (path === file ? privateFile() : privateDirectory()),
+    }
+
+    await expect(createPosixPrivateStateGuard({
+      ...base,
+      darwinAcl: async () => { throw new Error('granting or malformed ACL entry') },
+    }).verifyChain(directory)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining(
+        'macOS ACL that grants access: granting or malformed ACL entry',
+      ) as unknown as string,
+    })
+
+    await expect(createPosixPrivateStateGuard({
+      ...base,
+      darwinAcl: async () => undefined,
+    }).verifyChain(directory)).resolves.toBeUndefined()
+  })
+
+  it('reports an entry that disappeared or changed while its ACL was verified', async () => {
+    const withShiftedInspection = (
+      shift: (count: number) => Stats | undefined,
+    ) => {
+      const seen = new Map<string, number>()
+      return createPosixPrivateStateGuard({
+        platform: 'darwin',
+        effectiveUid: 501,
+        darwinAcl: async () => undefined,
+        lstat: async (path: string) => {
+          const count = (seen.get(path) ?? 0) + 1
+          seen.set(path, count)
+          if (path !== directory) return privateDirectory()
+          const shifted = shift(count)
+          if (!shifted) throw enoent()
+          return shifted
+        },
+      })
+    }
+
+    // The entry the ACL decision was made about is no longer there.
+    await expect(withShiftedInspection(count => (count > 1 ? undefined : privateDirectory()))
+      .verifyChain(directory)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('disappeared while its ACL was being verified') as unknown as string,
+    })
+
+    // Same path, different entry: the ACL verdict belongs to the inode that was
+    // inspected, not to the path it was reached through.
+    await expect(withShiftedInspection(count => statOf({
+      kind: 'dir',
+      mode: 0o700,
+      uid: 501,
+      ino: count > 1 ? 2 : 1,
+    })).verifyChain(directory)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('changed during ACL verification') as unknown as string,
+    })
+  })
+
+  it('never consults the macOS ACL on a platform that is not darwin', async () => {
+    let called = 0
+    const guard = createPosixPrivateStateGuard({
+      platform: 'linux',
+      effectiveUid: 501,
+      darwinAcl: async () => { called += 1 },
+      lstat: async (path: string) => (path === file ? privateFile() : privateDirectory()),
+    })
+
+    await expect(guard.verifyChain(directory)).resolves.toBeUndefined()
+    await expect(guard.verifyFile(file)).resolves.toMatchObject({ mode: 0o600 })
+    expect(called).toBe(0)
+  })
+
+  it('reports a missing journal file as absent without consulting the ACL', async () => {
+    let called = 0
+    const guard = createPosixPrivateStateGuard({
+      platform: 'darwin',
+      effectiveUid: 501,
+      darwinAcl: async () => { called += 1 },
+      lstat: async () => { throw enoent() },
+    })
+
+    await expect(guard.verifyFile(file)).resolves.toBeUndefined()
+    expect(called).toBe(0)
+  })
+
+  it('treats a handle that cannot report its own stat as nothing to check', async () => {
+    const inspect = jest.fn()
+    const guard = createPosixPrivateStateGuard({
+      platform: 'linux',
+      effectiveUid: 501,
+      lstat: inspect,
+    })
+
+    await expect(guard.verifyOpenHandle(undefined, file)).resolves.toBeUndefined()
+    expect(inspect).not.toHaveBeenCalled()
+  })
+
+  it('defaults the POSIX guard to the running platform and the real inspector', async () => {
+    // Called with no options at all — the production assembly for every
+    // non-Windows host. On macOS this installs the real `ls -lde` ACL check; on
+    // a host without POSIX ACLs (`linux`) it installs none. A path that does not
+    // exist is nothing to prove either way, so the assertion is identical on
+    // every platform and the branch is not skipped on the host that lacks it.
+    const guard = createPosixPrivateStateGuard()
+
+    await expect(guard.verifyChain('/gcmcp-absent-account-under-test'))
+      .resolves.toBeUndefined()
+    await expect(guard.verifyFile('/gcmcp-absent-account-under-test/operations.json'))
+      .resolves.toBeUndefined()
+  })
+})
+
+describe('write-state security: POSIX guard against the real filesystem', () => {
+  let base: string
+
+  beforeEach(async () => {
+    // `tmpdir()` on macOS is `/var/...`, which is really `/private/var/...`;
+    // verifying the unresolved spelling would inspect a symlink the process
+    // never opens, so the real path is used here exactly as the store does.
+    base = await realpath(await mkdtemp(join(tmpdir(), 'garmin-posix-real-')))
+  })
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true })
+  })
+
+  POSIX_ONLY('reports an absent directory and a file sitting where a directory belongs', async () => {
+    const guard = createPosixPrivateStateGuard({ platform: 'linux' })
+
+    await expect(guard.ensureDirectory(join(base, 'missing', 'account'))).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('directory could not be created') as unknown as string,
+    })
+
+    const occupied = join(base, 'not-a-directory')
+    await writeFile(occupied, 'sentinel\n', { mode: 0o600 })
+    await expect(guard.ensureDirectory(occupied)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('not a directory') as unknown as string,
+    })
+    // The file it refused is left exactly as found: no chmod, no replacement.
+    expect((await stat(occupied)).mode & 0o777).toBe(0o600)
+    await expect(readFile(occupied, 'utf8')).resolves.toBe('sentinel\n')
+  })
+
+  POSIX_ONLY('binds the macOS ACL decision to the real inode', async () => {
+    const disappeared = join(base, 'acl-disappeared')
+    await mkdir(disappeared, { mode: 0o700 })
+    await expect(createPosixPrivateStateGuard({
+      platform: 'darwin',
+      darwinAcl: async path => {
+        if (path === disappeared) await rm(disappeared, { recursive: true, force: true })
+      },
+    }).verifyChain(disappeared)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('disappeared while its ACL was being verified') as unknown as string,
+    })
+
+    const swapped = join(base, 'acl-swapped')
+    await mkdir(swapped, { mode: 0o700 })
+    await expect(createPosixPrivateStateGuard({
+      platform: 'darwin',
+      darwinAcl: async path => {
+        if (path !== swapped) return
+        // The old entry stays alive under another name, so the replacement is
+        // guaranteed to be a different inode rather than a reused number.
+        await rename(swapped, `${swapped}-previous`)
+        await mkdir(swapped, { mode: 0o700 })
+      },
+    }).verifyChain(swapped)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('changed during ACL verification') as unknown as string,
+    })
+
+    const clean = join(base, 'acl-clean')
+    await mkdir(clean, { mode: 0o700 })
+    await expect(createPosixPrivateStateGuard({
+      platform: 'darwin',
+      darwinAcl: async () => undefined,
+    }).verifyChain(clean)).resolves.toBeUndefined()
+  })
+
+  POSIX_ONLY('reports an opened handle that disappeared or changed before commit', async () => {
+    const guard = createPosixPrivateStateGuard({ platform: 'linux' })
+
+    const vanished = join(base, 'vanished.json')
+    await writeFile(vanished, '{}\n', { mode: 0o600 })
+    const vanishedInfo = await stat(vanished)
+    await rm(vanished)
+    await expect(guard.verifyOpenHandle(vanishedInfo, vanished)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('disappeared before it was committed') as unknown as string,
+    })
+
+    const opened = join(base, 'opened.json')
+    const other = join(base, 'other.json')
+    await writeFile(opened, '{}\n', { mode: 0o600 })
+    await writeFile(other, '{}\n', { mode: 0o600 })
+    await expect(guard.verifyOpenHandle(await stat(opened), other)).rejects.toMatchObject({
+      code: WRITE_ERROR_CODES.STATE_CORRUPT,
+      message: expect.stringContaining('changed between open and commit') as unknown as string,
+    })
   })
 })
