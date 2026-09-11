@@ -28,6 +28,7 @@ import {
   BLOCKING_STEP_STATUSES,
   SATISFIED_STEP_STATUSES,
   findStepByBusinessKey,
+  findStepByBusinessKeySafe,
   type OperationDocument,
   type StepStatus,
   type WriteEvidence,
@@ -163,28 +164,66 @@ export class WriteCoordinator {
           if (!existing) {
             throw corrupt('Idempotency index points at a missing operation')
           }
-          if (existing.requestHash !== requestHash(input.request)) {
+          if (existing.requestHash !== requestHash(stripIdempotencyKey(input.request))) {
             throw new GarminWriteError(
               WRITE_ERROR_CODES.IDEMPOTENCY_CONFLICT,
               'not_applied',
               'This idempotencyKey is already bound to a different request for this account',
             )
           }
-          // Same key, same request: return the durable receipt, issue no new write.
+          // Same key, same request: was anything actually confirmed?
+          //   - If every step is in a terminal state (succeeded / skipped /
+          //     failed / not_attempted), return the durable receipt. No new
+          //     confirmation is issued; the caller may re-poll.
+          //   - If any step is still prepared (never confirmed) or unknown /
+          //     in_flight, advance the preview revision and let the caller
+          //     re-confirm. The earlier confirmationId is invalidated.
+          const allTerminal = existing.steps.every(step =>
+            step.status === 'succeeded'
+            || step.status === 'skipped'
+            || step.status === 'failed'
+            || step.status === 'not_attempted',
+          )
+          if (allTerminal) {
+            return {
+              operationId: existing.operationId,
+              existingOperationId: existing.operationId,
+              requiresConfirmation: false,
+              steps: existing.steps.map(step => ({
+                stepId: step.stepId,
+                workoutId: step.workoutId ?? '',
+                date: step.date ?? '',
+                action: SATISFIED_STEP_STATUSES.has(step.status) ? 'skip_existing' : 'blocked',
+                status: step.status,
+                operationId: existing.operationId,
+                workoutScheduleId: step.workoutScheduleId,
+                errorCode: step.errorCode,
+                reason: SATISFIED_STEP_STATUSES.has(step.status) ? SKIP_REASON : BLOCKED_REASON,
+              })),
+            }
+          }
+          // Otherwise: same key, same payload, re-issue a confirmation by
+          // bumping the preview revision. The operation's `request` and
+          // `requestHash` are not mutated: the caller's earlier intent is
+          // preserved across re-previews.
+          existing.previewRevision = (existing.previewRevision ?? 0) + 1
+          existing.updatedAt = this.now().toISOString()
+          await this.persist(document)
           return {
             operationId: existing.operationId,
             existingOperationId: existing.operationId,
-            requiresConfirmation: false,
+            requiresConfirmation: true,
+            previewRevision: existing.previewRevision,
             steps: existing.steps.map(step => ({
               stepId: step.stepId,
               workoutId: step.workoutId ?? '',
               date: step.date ?? '',
-              action: SATISFIED_STEP_STATUSES.has(step.status) ? 'skip_existing' : 'blocked',
+              action: step.status === 'prepared' ? 'write' : 'blocked',
               status: step.status,
               operationId: existing.operationId,
               workoutScheduleId: step.workoutScheduleId,
               errorCode: step.errorCode,
-              reason: SATISFIED_STEP_STATUSES.has(step.status) ? SKIP_REASON : BLOCKED_REASON,
+              reason: step.status === 'prepared' ? undefined : BLOCKED_REASON,
             })),
           }
         }
@@ -192,16 +231,32 @@ export class WriteCoordinator {
 
       const decisions = input.steps.map((step) => {
         const businessKey = scheduleBusinessKey(this.accountKey, step.workoutId, step.date)
-        const found = findStepByBusinessKey(document, businessKey)
-        if (!found) return { step, businessKey, action: 'write' as ScheduleAction }
-        if (BLOCKING_STEP_STATUSES.has(found.step.status)) {
-          return { step, businessKey, action: 'blocked' as ScheduleAction, found }
+        const verdict = findStepByBusinessKeySafe(document, businessKey)
+        if (verdict.kind === 'unresolved') {
+          return {
+            step,
+            businessKey,
+            action: 'blocked' as ScheduleAction,
+            found: { operation: verdict.operation, step: verdict.step },
+          }
         }
-        if (SATISFIED_STEP_STATUSES.has(found.step.status)) {
-          return { step, businessKey, action: 'skip_existing' as ScheduleAction, found }
+        if (verdict.kind === 'satisfied') {
+          return {
+            step,
+            businessKey,
+            action: 'skip_existing' as ScheduleAction,
+            found: { operation: verdict.operation, step: verdict.step },
+          }
         }
-        // prepared / failed / not_attempted may be attempted again.
-        return { step, businessKey, action: 'write' as ScheduleAction, found }
+        if (verdict.kind === 'retryable') {
+          return {
+            step,
+            businessKey,
+            action: 'write' as ScheduleAction,
+            found: { operation: verdict.operation, step: verdict.step },
+          }
+        }
+        return { step, businessKey, action: 'write' as ScheduleAction }
       })
 
       const writable = decisions.filter(decision => decision.action === 'write')
@@ -215,39 +270,86 @@ export class WriteCoordinator {
 
       const writableKeys = writable.map(decision => decision.businessKey)
       const reused = this.findReusableOperation(document, writableKeys)
+      const safeRequest = stripIdempotencyKey(input.request)
       const operation: WriteOperation = reused ?? {
         schemaVersion: 1,
         operationId: this.newOperationId(),
         kind: input.kind,
         accountKey: this.accountKey,
-        requestHash: requestHash(input.request),
+        requestHash: requestHash(safeRequest),
         idempotencyKeyHash: idemHash,
-        request: input.request,
+        previewRevision: 0,
+        // The on-disk request must never include the plaintext idempotencyKey.
+        // It's caller-metadata, not a template fingerprint input, and we never
+        // want to round-trip an unknown user-supplied string into a private
+        // journal. The hash is preserved in `idempotencyKeyHash` instead.
+        request: safeRequest,
         createdAt: this.now().toISOString(),
         updatedAt: this.now().toISOString(),
         steps: [],
       }
 
       operation.kind = input.kind
-      operation.requestHash = requestHash(input.request)
-      operation.request = input.request
+      operation.requestHash = requestHash(safeRequest)
+      operation.request = safeRequest
       if (idemHash) operation.idempotencyKeyHash = idemHash
       operation.updatedAt = this.now().toISOString()
-      operation.steps = writable.map((decision) => {
-        const existing = reused
+      // Persist EVERY requested item in the original order, including
+      // blocked/satisfied references. Only the writable items are turned into
+      // a fresh `prepared` step here; non-writable items reuse the existing
+      // stepId (if any) and pin a read-only `reference` to the blocker so the
+      // original batch is reconstructable across restarts.
+      operation.steps = decisions.map((decision) => {
+        const reusedStep = reused
           ? reused.steps.find(candidate => candidate.businessKey === decision.businessKey)
           : undefined
-        if (existing) return existing
+        if (decision.action === 'write') {
+          if (reusedStep && reusedStep.status === 'prepared') return reusedStep
+          return {
+            stepId: reusedStep?.stepId ?? this.newStepId(),
+            businessKey: decision.businessKey,
+            kind: 'schedule',
+            status: 'prepared',
+            attempt: reusedStep?.attempt ?? 0,
+            workoutId: decision.step.workoutId,
+            date: decision.step.date,
+            evidence: 'none',
+            attempts: reusedStep?.attempts ?? [],
+          }
+        }
+        // Non-writable: anchor a reference to the blocker / satisfaction
+        // holder. The original batch's order and identity are preserved.
+        const ref = decision.found
+          ? {
+              operationId: decision.found.operation.operationId,
+              stepId: decision.found.step.stepId,
+              status: decision.found.step.status,
+              workoutScheduleId: decision.found.step.workoutScheduleId,
+              errorCode: decision.found.step.errorCode,
+            }
+          : undefined
+        if (reusedStep) {
+          reusedStep.reference = ref
+          reusedStep.status = decision.action === 'blocked' ? 'not_attempted' : 'skipped'
+          reusedStep.errorCode = decision.action === 'blocked'
+            ? ref?.errorCode ?? WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN
+            : undefined
+          return reusedStep
+        }
         return {
           stepId: this.newStepId(),
           businessKey: decision.businessKey,
           kind: 'schedule',
-          status: 'prepared',
+          status: decision.action === 'blocked' ? 'not_attempted' : 'skipped',
           attempt: 0,
           workoutId: decision.step.workoutId,
           date: decision.step.date,
-          evidence: 'none',
+          evidence: decision.action === 'blocked' ? 'none' : 'response',
           attempts: [],
+          ...(ref ? { reference: ref } : {}),
+          ...(decision.action === 'blocked'
+            ? { errorCode: ref?.errorCode ?? WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN }
+            : {}),
         }
       })
 
@@ -295,24 +397,41 @@ export class WriteCoordinator {
       const receipts: ScheduleStepReceipt[] = []
       for (const step of operation.steps) {
         if (step.status !== 'prepared') {
+          // Either a non-writable entry (blocked / skipped) already finalized
+          // at preview time, or a step mutated by an earlier confirm attempt.
           receipts.push(this.receiptFor(operation, step))
           continue
         }
 
-        // Re-check the business key inside the lock: another operation may have
-        // taken ownership of the same workout/date since the preview.
-        const holder = findStepByBusinessKey(document, step.businessKey)
-        if (holder && holder.step.stepId !== step.stepId) {
-          if (BLOCKING_STEP_STATUSES.has(holder.step.status)) {
+        // Re-check the business key inside the lock using history aggregation
+        // so a stale not_attempted / prepared from an earlier operation cannot
+        // authorize a duplicate dispatch while a newer in_flight / unknown /
+        // succeeded step exists.
+        const holder = findStepByBusinessKeySafe(document, step.businessKey)
+        if (holder.kind !== 'absent' && holder.step.stepId !== step.stepId) {
+          if (holder.kind === 'unresolved') {
             step.status = 'not_attempted'
             step.errorCode = holder.step.errorCode ?? WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN
+            step.reference = {
+              operationId: holder.operation.operationId,
+              stepId: holder.step.stepId,
+              status: holder.step.status,
+              workoutScheduleId: holder.step.workoutScheduleId,
+              errorCode: holder.step.errorCode,
+            }
             await this.persist(document)
             receipts.push(this.blockedReceipt(holder.operation, step))
             continue
           }
-          if (SATISFIED_STEP_STATUSES.has(holder.step.status)) {
+          if (holder.kind === 'satisfied') {
             step.status = 'skipped'
             step.evidence = 'none'
+            step.reference = {
+              operationId: holder.operation.operationId,
+              stepId: holder.step.stepId,
+              status: holder.step.status,
+              workoutScheduleId: holder.step.workoutScheduleId,
+            }
             await this.persist(document)
             receipts.push(this.receiptFor(operation, step))
             continue
@@ -450,24 +569,31 @@ export class WriteCoordinator {
   }
 
   private receiptFor(operation: WriteOperation, step: WriteStep): ScheduleStepReceipt {
-    const satisfied = SATISFIED_STEP_STATUSES.has(step.status)
-    const resumable = step.status === 'failed' || step.status === 'not_attempted'
-    const unknown = step.status === 'unknown' || step.status === 'in_flight'
+    // A non-prepared step that pins a read-only reference to an existing
+    // blocker / satisfied holder is reported in the holder's status, not the
+    // local step's bookkeeping status. The plan requires blocked-by-unknown
+    // to surface as `unknown` to the caller, and blocked-by-satisfied to
+    // surface as the holder's `succeeded` (i.e. desiredStateSatisfied:true).
+    const referenceStatus = step.reference?.status
+    const reportedStatus = referenceStatus ?? step.status
+    const satisfied = SATISFIED_STEP_STATUSES.has(reportedStatus)
+    const resumable = reportedStatus === 'failed' || reportedStatus === 'not_attempted'
+    const unknown = reportedStatus === 'unknown' || reportedStatus === 'in_flight'
     return {
       stepId: step.stepId,
       workoutId: step.workoutId ?? '',
       date: step.date ?? '',
-      status: step.status,
+      status: reportedStatus,
       success: satisfied,
       desiredStateSatisfied: satisfied,
       evidence: step.evidence,
-      workoutScheduleId: step.workoutScheduleId,
-      errorCode: step.errorCode,
+      workoutScheduleId: step.reference?.workoutScheduleId ?? step.workoutScheduleId,
+      errorCode: step.errorCode ?? step.reference?.errorCode,
       canResume: resumable,
       manualReviewRequired: unknown,
       nextAction: unknown
         ? 'reconcile_garmin_write_operation'
-        : resumable
+        : resumable && !step.reference
           ? 'resume_garmin_write_operation'
           : undefined,
       operationId: operation.operationId,
@@ -477,4 +603,21 @@ export class WriteCoordinator {
 
 function corrupt(detail: string): GarminWriteError {
   return new GarminWriteError(WRITE_ERROR_CODES.STATE_CORRUPT, 'not_applied', detail)
+}
+
+/**
+ * Strip caller-supplied metadata (the raw idempotencyKey) before persisting
+ * the request. The hash is kept separately on the operation. This is a
+ * shallow strip: arrays and nested objects are returned by reference, and
+ * only top-level keys named in RESULT_CONTROL_FIELDS are removed.
+ */
+const RESULT_CONTROL_FIELDS = ['idempotencyKey', 'confirmationId', 'confirmed'] as const
+
+function stripIdempotencyKey(request: Record<string, unknown>): Record<string, unknown> {
+  const clone: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(request)) {
+    if ((RESULT_CONTROL_FIELDS as readonly string[]).includes(key)) continue
+    clone[key] = value
+  }
+  return clone
 }

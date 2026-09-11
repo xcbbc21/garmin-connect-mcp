@@ -238,7 +238,7 @@ function makeCoordinator(store: OperationStore, writer: { schedule: jest.Mock })
 }
 
 describe('coordinator state machine', () => {
-  const request = { operation: 'schedule', workoutId: 'w9', date: '2026-09-30', timezone: TIMEZONE, idempotencyKey: null }
+  const request = { operation: 'schedule', workoutId: 'w9', date: '2026-09-30', timezone: TIMEZONE }
 
   it('persists in_flight before dispatch and sends nothing if that write fails', async () => {
     const store = new FailingStore(ACCOUNT)

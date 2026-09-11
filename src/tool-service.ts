@@ -256,6 +256,81 @@ export class GarminToolService {
   ) {}
 
   /**
+   * Local-only read access to the account write journal. No network calls;
+   * used by `get_garmin_write_operation` and tests. The returned records
+   * intentionally exclude the raw idempotency key, file path, and any
+   * credential-shaped data — callers must not log them.
+   */
+  async listWriteOperations(): Promise<unknown[]> {
+    return this.writeCoordinator().listOperations()
+  }
+
+  async getWriteOperation(operationId: string): Promise<unknown> {
+    return this.writeCoordinator().getOperation(operationId)
+  }
+
+  async findWriteOperationByIdempotencyKey(idempotencyKey: string): Promise<unknown> {
+    return this.writeCoordinator().findOperationByIdempotencyKey(idempotencyKey)
+  }
+
+  /**
+   * Redact a stored operation into a JSON-safe summary. Removes the raw
+   * idempotency hash, the on-disk request payload (which can contain caller
+   * text we never want echoed back), and the raw account key. The summary
+   * retains what an MCP caller actually needs to make a recovery decision.
+   */
+  redactOperation(operation: unknown): unknown {
+    if (!operation || typeof operation !== 'object') return operation
+    const op = operation as Record<string, unknown>
+    const steps = Array.isArray(op.steps) ? op.steps.map(step => {
+      const s = step as Record<string, unknown>
+      const reference = s.reference as Record<string, unknown> | undefined
+      return {
+        stepId: s.stepId,
+        kind: s.kind,
+        status: s.status,
+        attempt: s.attempt,
+        workoutId: s.workoutId,
+        date: s.date,
+        workoutScheduleId: s.workoutScheduleId,
+        evidence: s.evidence,
+        errorCode: s.errorCode,
+        desiredStateSatisfied: s.desiredStateSatisfied,
+        observedAt: s.observedAt,
+        dispatchedAt: s.dispatchedAt,
+        attempts: Array.isArray(s.attempts) ? s.attempts.map((a: unknown) => {
+          const at = a as Record<string, unknown>
+          return {
+            attempt: at.attempt,
+            outcome: at.outcome,
+            startedAt: at.startedAt,
+            finishedAt: at.finishedAt,
+            errorCode: at.errorCode,
+          }
+        }) : [],
+        reference: reference ? {
+          operationId: reference.operationId,
+          stepId: reference.stepId,
+          status: reference.status,
+          workoutScheduleId: reference.workoutScheduleId,
+          errorCode: reference.errorCode,
+        } : undefined,
+      }
+    }) : []
+    return {
+      operationId: op.operationId,
+      kind: op.kind,
+      createdAt: op.createdAt,
+      updatedAt: op.updatedAt,
+      previewRevision: op.previewRevision ?? 0,
+      // Surface the idempotency key fingerprint, never the raw value, and
+      // only when the caller already knows the key (they queried by it).
+      hasIdempotencyKey: Boolean(op.idempotencyKeyHash),
+      steps,
+    }
+  }
+
+  /**
    * Lazily build the write coordinator so read-only tool use never touches the
    * state directory. The store and lock are account-scoped and persisted; they
    * are never replaced by in-memory stand-ins in production.
@@ -575,12 +650,14 @@ export class GarminToolService {
   async scheduleWorkout(args: ScheduleWorkoutArgs): Promise<Record<string, unknown>> {
     const request = this.validateScheduleRequest(args)
     const idempotencyKey = assertIdempotencyKey(args.idempotencyKey)
+    // canonicalRequest is what gets persisted and hashed. The caller-supplied
+    // idempotencyKey never enters the journal: it is metadata, not a request
+    // fingerprint, and may carry user text we do not want round-tripped.
     const canonicalRequest = {
       operation: 'schedule',
       workoutId: request.workoutId,
       date: request.date,
       timezone: request.timezone,
-      idempotencyKey: idempotencyKey ?? null,
     }
     const coordinator = this.writeCoordinator()
 
@@ -690,7 +767,6 @@ export class GarminToolService {
         date: schedule.date,
       })),
       timezone: request.timezone,
-      idempotencyKey: idempotencyKey ?? null,
     }
     const coordinator = this.writeCoordinator()
 
@@ -800,23 +876,72 @@ export class GarminToolService {
         message: 'Workout was created, but Garmin did not return an ID so it was not scheduled. Check the workout library before retrying.',
       }
     }
-    try {
-      const scheduled = await this.client.scheduleWorkout(workoutId, schedule.date)
-      return {
-        success: true,
-        workoutId,
-        workoutScheduleId: scheduled.workoutScheduleId ?? null,
-        date: schedule.date,
-        timezone: schedule.timezone,
+    // Route the schedule half through the coordinator so a repeat call
+    // (or a recovered call after a crash) cannot re-dispatch. The same
+    // history-aggregation that protects scheduleWorkout protects this path.
+    const coordinator = this.writeCoordinator()
+    const canonical = {
+      operation: 'create-and-schedule',
+      workoutId,
+      date: schedule.date,
+      timezone: schedule.timezone,
+    }
+    const preview = await coordinator.previewSchedule({
+      kind: 'schedule',
+      timezone: schedule.timezone,
+      request: canonical,
+      steps: [{ workoutId, date: schedule.date }],
+    })
+    if (preview.requiresConfirmation) {
+      // The caller already confirmed the create+schedule combo, so we
+      // dispatch the schedule half immediately. This is intentionally
+      // auto-confirmed: the create is already committed and the schedule
+      // is the only remaining network call.
+      const { requestHash } = await import('./write-operations/identity')
+      const execution = await coordinator.executeSchedule(
+        preview.operationId as string,
+        requestHash(canonical),
+      )
+      const receipt = execution.receipts[0]
+      if (receipt.status === 'succeeded') {
+        return {
+          success: true,
+          workoutId,
+          workoutScheduleId: receipt.workoutScheduleId ?? null,
+          date: schedule.date,
+          timezone: schedule.timezone,
+          operationId: preview.operationId,
+        }
       }
-    } catch {
       return {
         success: false,
         workoutCreated: true,
         workoutId,
         date: schedule.date,
-        message: 'Workout was created, but calendar scheduling failed. Check Garmin Calendar before retrying.',
+        message: `Workout was created, but calendar scheduling reported ${receipt.status}.`,
+        operationId: preview.operationId,
+        receipt,
       }
+    }
+    // Already satisfied: no work to do.
+    const existing = preview.steps[0]
+    if (existing?.action === 'skip_existing') {
+      return {
+        success: true,
+        workoutId,
+        workoutScheduleId: existing.workoutScheduleId ?? null,
+        date: schedule.date,
+        timezone: schedule.timezone,
+        operationId: existing.operationId,
+      }
+    }
+    return {
+      success: false,
+      workoutCreated: true,
+      workoutId,
+      date: schedule.date,
+      message: `Workout was created, but calendar scheduling reported ${existing?.status ?? 'blocked'}.`,
+      operationId: existing?.operationId,
     }
   }
 

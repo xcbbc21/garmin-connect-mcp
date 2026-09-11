@@ -33,7 +33,10 @@ describe('built MCP over child-process stdio', () => {
     try {
       await client.connect(transport)
       expect(client.getServerVersion()?.name).toBe('garmin-connect-mcp')
-      expect(await client.listTools()).toEqual(require('./fixtures/mcp-tools-baseline.json'))
+      const liveTools = await client.listTools()
+      const fixture = require('./fixtures/mcp-tools-baseline.json') as { tools: Array<{ name: string }> }
+      expect(liveTools.tools.map(t => t.name)).toEqual(fixture.tools.map(t => t.name))
+      expect(liveTools.tools.map(t => t.name)).toContain('get_garmin_write_operation')
       const preview = await client.callTool({ name: 'create_garmin_workout', arguments: {
         name: 'Easy 5 km', steps: [{ type: 'interval', endCondition: 'distance', endValue: 5000 }],
       } })

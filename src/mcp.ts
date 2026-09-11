@@ -50,6 +50,10 @@ type ToolService = Pick<
   | 'batchScheduleWorkouts'
   | 'createAndScheduleWorkout'
   | 'unscheduleWorkout'
+  | 'getWriteOperation'
+  | 'findWriteOperationByIdempotencyKey'
+  | 'listWriteOperations'
+  | 'redactOperation'
   | 'downloadActivityFit'
 >
 
@@ -420,6 +424,57 @@ export function createMcpServer(
     // OUTPUT_EXISTS, so this intentionally shares the non-idempotent hint.
     WRITE_ANNOTATIONS,
     false,
+  )
+
+  register(
+    'get_garmin_write_operation',
+    'Read the local account-scoped write journal without any network access. ' +
+      'Supply either an operationId or an idempotencyKey to look up a single ' +
+      'operation. Supplying neither lists recent operations for the active ' +
+      'account (limit/offset supported). The returned records are redacted: ' +
+      'the raw idempotency key, the request payload, and the account key are ' +
+      'never echoed back. Use the returned nextAction to drive reconcile_garmin_write_operation ' +
+      'or resume_garmin_write_operation. Does not require login and never ' +
+      'contacts Garmin.',
+    {
+      operationId: z.string().uuid().optional().describe(
+        'Operation ID returned by a previous schedule_garmin_workout, batch_schedule_garmin_workouts, ' +
+        'create_garmin_workout, create_and_schedule_garmin_workout or unschedule_garmin_workout call.',
+      ),
+      idempotencyKey: z.string().min(1).max(128)
+        .regex(/^[A-Za-z0-9._:-]+$/, 'Use 1-128 characters from A-Z a-z 0-9 . _ : -')
+        .optional()
+        .describe('Caller-supplied stable request label; only its hash is matched against the journal.'),
+      limit: z.number().int().min(1).max(100).optional(),
+      offset: z.number().int().min(0).optional(),
+    },
+    async (args: { operationId?: string; idempotencyKey?: string; limit?: number; offset?: number }) => {
+      if (args.operationId) {
+        const op = await service.getWriteOperation(args.operationId)
+        if (!op) {
+          return successResult({ found: false, operationId: args.operationId })
+        }
+        return successResult({ found: true, operation: service.redactOperation(op) })
+      }
+      if (args.idempotencyKey) {
+        const op = await service.findWriteOperationByIdempotencyKey(args.idempotencyKey)
+        if (!op) {
+          return successResult({ found: false, hasIdempotencyKey: true })
+        }
+        return successResult({ found: true, operation: service.redactOperation(op) })
+      }
+      const all = await service.listWriteOperations() as Array<{ createdAt: string }>
+      const offset = args.offset ?? 0
+      const limit = args.limit ?? 20
+      const slice = all.slice(offset, offset + limit)
+      return successResult({
+        total: all.length,
+        offset,
+        limit,
+        operations: slice.map(op => service.redactOperation(op)),
+      })
+    },
+    READ_ONLY_ANNOTATIONS,
   )
 
   return server

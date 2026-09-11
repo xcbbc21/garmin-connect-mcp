@@ -37,6 +37,7 @@ describe('MCP adapter', () => {
         'create_and_schedule_garmin_workout',
         'unschedule_garmin_workout',
         'download_garmin_activity_fit',
+        'get_garmin_write_operation',
       ])
       const scheduleWorkout = result.tools.find(tool => tool.name === 'schedule_garmin_workout')!
       expect(scheduleWorkout.inputSchema).toMatchObject({

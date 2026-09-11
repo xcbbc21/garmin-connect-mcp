@@ -57,6 +57,18 @@ export interface WriteStep {
   desiredStateSatisfied?: boolean
   observedAt?: string
   attempts: WriteAttempt[]
+  /**
+   * A read-only reference to a step in another operation that explains why
+   * this step is in a non-write state. The original blocker (unknown /
+   * succeeded / etc.) is never duplicated; the new step is anchored to it.
+   */
+  reference?: {
+    operationId: string
+    stepId: string
+    status: StepStatus
+    workoutScheduleId?: string | null
+    errorCode?: string
+  }
 }
 
 export interface WriteOperation {
@@ -66,6 +78,14 @@ export interface WriteOperation {
   accountKey: string
   requestHash: string
   idempotencyKeyHash?: string
+  /**
+   * Monotonic counter advanced every time a preview is re-issued for the same
+   * operation without dispatch. ConfirmationIds are bound to the
+   * previewRevision at issue time; old confirmations are invalidated when the
+   * counter moves. Optional in the on-disk type so older journals (or test
+   * fixtures) without the field continue to parse; readers must default to 0.
+   */
+  previewRevision?: number
   request: Record<string, unknown>
   createdAt: string
   updatedAt: string
@@ -137,4 +157,76 @@ export function findStepByBusinessKey(
     if (step) return { operation, step }
   }
   return undefined
+}
+
+/**
+ * Per-step verdict derived from a business key's full history, in priority order:
+ *   1. Any in_flight step (other or self) is unresolved.
+ *   2. Any unknown step proves the write may have reached Garmin.
+ *   3. A succeeded step is the durable receipt for this target.
+ *   4. A skipped step is the durable "already satisfied by another path" receipt.
+ *   5. Otherwise the most recent failed / not_attempted / prepared wins.
+ *
+ * The function intentionally does not look at operation insertion order; the
+ * first hit in `Object.values(document.operations)` is allowed to be a stale
+ * `not_attempted` and must never authorize a fresh dispatch.
+ */
+export type BusinessHistoryVerdict =
+  | { kind: 'unresolved'; operation: WriteOperation; step: WriteStep }
+  | { kind: 'satisfied'; operation: WriteOperation; step: WriteStep }
+  | { kind: 'retryable'; operation: WriteOperation; step: WriteStep }
+  | { kind: 'absent' }
+
+export function collectBusinessHistory(
+  document: OperationDocument,
+  businessKey: string,
+): BusinessHistoryVerdict {
+  let blockingHit: { operation: WriteOperation; step: WriteStep } | undefined
+  let satisfiedHit: { operation: WriteOperation; step: WriteStep } | undefined
+  let retryableHit: { operation: WriteOperation; step: WriteStep } | undefined
+
+  for (const operation of Object.values(document.operations)) {
+    for (const step of operation.steps) {
+      if (step.businessKey !== businessKey) continue
+      if (BLOCKING_STEP_STATUSES.has(step.status)) {
+        // In_flight or unknown: never look past this. Even if a later record
+        // is "succeeded", we may be observing a duplicate identity, not the
+        // post-recovery state.
+        return { kind: 'unresolved', operation, step }
+      }
+      if (!satisfiedHit && SATISFIED_STEP_STATUSES.has(step.status)) {
+        satisfiedHit = { operation, step }
+        continue
+      }
+      if (!retryableHit && RETRYABLE_STEP_STATUSES.has(step.status)) {
+        retryableHit = { operation, step }
+      }
+      // prepared steps are treated as retryable too, but the explicit rule in
+      // the spec means we prefer the explicit retryable statuses when both
+      // exist. We still need a fallback that picks a prepared step if no
+      // failed/not_attempted is present.
+      if (!retryableHit && step.status === 'prepared') {
+        retryableHit = { operation, step }
+      }
+    }
+  }
+
+  if (blockingHit) return { kind: 'unresolved', ...blockingHit }
+  if (satisfiedHit) return { kind: 'satisfied', ...satisfiedHit }
+  if (retryableHit) return { kind: 'retryable', ...retryableHit }
+  return { kind: 'absent' }
+}
+
+/**
+ * The single source of truth for whether a new dispatch is allowed for this
+ * business key. Returns the strongest verdict collected from history. The
+ * `operation` field is the source of `operationId` to report to the caller;
+ * it is NOT a permission to mutate a different operation than the one
+ * currently being authored.
+ */
+export function findStepByBusinessKeySafe(
+  document: OperationDocument,
+  businessKey: string,
+): BusinessHistoryVerdict {
+  return collectBusinessHistory(document, businessKey)
 }

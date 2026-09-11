@@ -838,6 +838,47 @@
       "execution": {
         "taskSupport": "forbidden"
       }
+    },
+    {
+      "name": "get_garmin_write_operation",
+      "description": "Read the local account-scoped write journal without any network access. Supply either an operationId or an idempotencyKey to look up a single operation. Supplying neither lists recent operations for the active account (limit/offset supported). The returned records are redacted: the raw idempotency key, the request payload, and the account key are never echoed back. Use the returned nextAction to drive reconcile_garmin_write_operation or resume_garmin_write_operation. Does not require login and never contacts Garmin.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Operation ID returned by a previous schedule_garmin_workout, batch_schedule_garmin_workouts, create_garmin_workout, create_and_schedule_garmin_workout or unschedule_garmin_workout call."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Caller-supplied stable request label; only its hash is matched against the journal."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
     }
   ]
 }
