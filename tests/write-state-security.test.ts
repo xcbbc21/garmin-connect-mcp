@@ -599,7 +599,10 @@ describe('write-state security: durability failures', () => {
     },
   )
 
-  it('refuses to treat a different inode as the file it committed', async () => {
+  it('refuses a file swapped in at the committed name', async () => {
+    // On Linux the swap below reuses the committed inode number, so this case
+    // is decided by the byte comparison rather than by the identity pair; on
+    // macOS the identity pair differs first. Either way the commit is refused.
     const swapped: WriteStoreFileSystem = {
       ...nodeStoreFileSystem,
       rename: async (from, to) => {
@@ -614,6 +617,52 @@ describe('write-state security: durability failures', () => {
       .rejects.toMatchObject({
         code: WRITE_ERROR_CODES.STATE_CORRUPT,
         message: expect.stringContaining('not the one this process wrote') as unknown as string,
+      })
+  })
+
+  it('refuses a replacement that reuses the inode and matches the size', async () => {
+    // A replacement is not obliged to change the identity pair. Linux hands the
+    // number of a just-unlinked inode straight back to the next create (proven
+    // against overlayfs in the platform matrix), so `rm` + a same-length write
+    // reproduces `dev:ino` and `size` exactly. The inode signal is neutralised
+    // here on purpose, on every platform, so the assertion pins the bytes
+    // instead of a host-specific inode allocator: with an identity-only proof
+    // this resolves, and the journal is silently a file nobody wrote.
+    let reused: { dev: number; ino: number } | undefined
+    let committedName: string | undefined
+    const impostor = (bytes: Buffer): Buffer => {
+      const mutated = Buffer.from(bytes)
+      mutated[0] = bytes[0] === 0x7b ? 0x5b : 0x7b
+      return mutated
+    }
+    const swapped: WriteStoreFileSystem = {
+      ...nodeStoreFileSystem,
+      rename: async (from, to) => {
+        const staged = await nodeStoreFileSystem.lstat(from)
+        const replacement = impostor(await readFile(from))
+        await nodeStoreFileSystem.rename(from, to)
+        await rm(to)
+        await writeFile(to, replacement, { mode: 0o600 })
+        reused = { dev: staged.dev, ino: staged.ino }
+        committedName = to
+      },
+      lstat: async (path) => {
+        const real = await nodeStoreFileSystem.lstat(path)
+        if (reused === undefined || path !== committedName) return real
+        return {
+          isFile: () => real.isFile(),
+          isSymbolicLink: () => real.isSymbolicLink(),
+          size: real.size,
+          dev: reused.dev,
+          ino: reused.ino,
+        }
+      },
+    }
+
+    await expect(new FileOperationStore(base, ACCOUNT, swapped).save(documentWith(ACCOUNT, 1)))
+      .rejects.toMatchObject({
+        code: WRITE_ERROR_CODES.STATE_CORRUPT,
+        message: expect.stringContaining('different bytes') as unknown as string,
       })
   })
 })

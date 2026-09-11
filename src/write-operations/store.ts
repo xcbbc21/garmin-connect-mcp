@@ -24,6 +24,12 @@
  *   3. *Durability failures are reported.* Only a platform that genuinely has
  *      no directory fsync is tolerated; EIO and friends are surfaced instead of
  *      being swallowed as success.
+ *   4. *The commit is read back.* The rename must have published the bytes this
+ *      process wrote, and that is proven by reading them back rather than by
+ *      trusting the name. An identity check on `dev:ino` alone is not enough:
+ *      POSIX filesystems recycle the number of a just-unlinked inode, so on
+ *      Linux a replacement file can land on the same pair and pass while the
+ *      journal is no longer the one this process wrote.
  */
 
 import { promises as nodeFs, type Stats } from 'node:fs'
@@ -324,11 +330,15 @@ export class FileOperationStore implements OperationStore {
       await this.stateGuard.verifyOpenHandle(staged, tempFile)
       await handle.write(payload)
       await handle.sync()
+      // Re-read the size of the bytes that are now durably in the file: the
+      // commit proof compares the landed file against this, not against the
+      // empty file that existed before the write.
+      staged = await handle.stat()
       await handle.close()
       handle = undefined
       await this.fs.rename(tempFile, file)
       committed = true
-      await this.assertLandedFile(file, staged)
+      await this.assertLandedFile(file, staged, payload)
       await this.syncDirectory(file)
       staged = undefined
     } catch (error) {
@@ -394,8 +404,19 @@ export class FileOperationStore implements OperationStore {
     return root
   }
 
-  /** The rename must have published the very inode this process wrote. */
-  private async assertLandedFile(file: string, staged: Stats): Promise<void> {
+  /**
+   * The rename must have published the very file this process wrote.
+   *
+   * The identity pair is the cheap signal; the bytes are the decisive one.
+   * POSIX filesystems hand the number of a just-unlinked inode straight back to
+   * the next `create`, so `rm` + `writeFile` on the committed name reproduces
+   * `dev:ino` exactly (observed on Linux overlayfs) and an identity-only check
+   * returns success for a file this process never wrote. Comparing what landed
+   * against the payload closes that hole on every platform, and the comparison
+   * is bounded by the size the caller already settled, so no unbounded read is
+   * introduced here.
+   */
+  private async assertLandedFile(file: string, staged: Stats, payload: string): Promise<void> {
     let landed: StoreStat
     try {
       landed = await this.fs.lstat(file)
@@ -407,12 +428,49 @@ export class FileOperationStore implements OperationStore {
           `inspected: ${describe(error)}`,
       )
     }
-    if (landed.dev !== staged.dev || landed.ino !== staged.ino) {
+    const mismatch =
+      landed.dev !== staged.dev || landed.ino !== staged.ino
+        ? 'a different inode'
+        : landed.size !== staged.size
+          ? 'a different size'
+          : await this.hasDifferentBytes(file, staged.size, payload)
+            ? 'different bytes'
+            : undefined
+    if (mismatch !== undefined) {
       throw new GarminWriteError(
         WRITE_ERROR_CODES.STATE_CORRUPT,
         'not_applied',
-        'Operation journal was replaced but the file that landed is not the one this process wrote',
+        `Operation journal was replaced but the file that landed is not the one ` +
+          `this process wrote (${mismatch})`,
       )
+    }
+  }
+
+  /**
+   * Read the committed file back and compare it with the payload.
+   *
+   * The caller has already rejected a size that differs, so this reads only
+   * that many bytes and a larger file on disk is never read at all. A file that
+   * changes size mid-read is reported by the shared bounded-read helper and
+   * propagates as the same fail-closed corruption verdict.
+   */
+  private async hasDifferentBytes(file: string, size: number, payload: string): Promise<boolean> {
+    let handle: StoreFileHandle | undefined
+    try {
+      handle = await this.fs.open(file, 'r', 0o600)
+      const info = await handle.stat()
+      if (info.size !== size) return true
+      return (await readExactly(handle, info.size)) !== payload
+    } catch (error) {
+      if (error instanceof GarminWriteError) throw error
+      throw new GarminWriteError(
+        WRITE_ERROR_CODES.STATE_CORRUPT,
+        'not_applied',
+        `Operation journal was replaced but the committed bytes could not be ` +
+          `inspected: ${describe(error)}`,
+      )
+    } finally {
+      if (handle) await handle.close().catch(() => undefined)
     }
   }
 
