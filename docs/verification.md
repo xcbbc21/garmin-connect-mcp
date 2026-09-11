@@ -95,10 +95,13 @@ macOS-only: `refuses a journal carrying a granting macOS ACL` runs only where `c
 
 ### Final-commit re-measurement
 
-The round's last commit that touches `src/` or `tests/` is `db66d01`. The delivered commit is the
-documentation-only commit immediately after it, so the figures below were measured on a tree whose
-compiled and tested content is `db66d01`'s; `git diff --stat db66d01..HEAD` prints nothing outside
-`docs/`, which is what makes that statement checkable rather than asserted. They were measured on
+The round's last commit that touches `src/`, `tests/` or `scripts/` is `db66d01`; every commit after
+it is documentation-only. The figures below were therefore measured on a tree whose compiled and
+tested content is `db66d01`'s, and they still describe the delivered code because later commits
+cannot change it: `git diff --stat db66d01..HEAD -- src tests scripts package.json jest.config.js
+tsconfig.json` prints nothing, which is what makes that statement checkable rather than asserted.
+(Naming a "delivered commit" sha in prose would go stale as soon as another documentation commit
+lands, so this file pins the tree instead.) They were measured on
 this machine (macOS arm64, Node v25.2.1, npm 11.19.0) after every source and test change of the
 round had landed. Nothing here is carried over from `3a82e4f`.
 
@@ -294,9 +297,9 @@ What the continuation round added, each backed by committed tests:
   differs from CI is the runner: an arm64 Docker Desktop container on macOS rather than a
   GitHub-hosted `ubuntu-latest` x64 VM. The results are therefore not interchangeable with a CI
   job, and no CI job has run for this round.
-- **CI has no result for this round.** None of the 28 commits between `a527c7e` and `73e16a2` has
-  been pushed, so the Linux, macOS and Windows jobs all lack a run. Nothing in this file should be
-  read as a green pipeline.
+- **CI has no result for this round.** No commit of this round has been pushed — `git rev-list
+  --count origin/main..HEAD` returns 30 (`origin/main` is still `a527c7e`) — so the Linux, macOS and
+  Windows jobs all lack a run. Nothing in this file should be read as a green pipeline.
 - Deleting the state directory still removes the only record preventing duplicate scheduling;
   a journal with no archive refuses writes past 32 MiB.
 - The same inode-identity weakness that was fixed in the journal store still exists in
@@ -358,9 +361,9 @@ reach `CalendarCapabilityError` / `CALENDAR_WARNING_CODES` through the package e
 exercise a re-export wrapper there. Every other row of the coverage table is identical, so this is a
 reported change in one counter and not a general drift in the figures.
 
-The battery above was exported from `90ae9a8`. The delivered commit is later than that export by
-documentation and one test comment, and by nothing under `src/` — `git diff --stat 90ae9a8..HEAD
--- src/` is one of the mechanical checks recorded with the round.
+The battery above was exported from `90ae9a8`. The delivered code tree is later than that export only
+by the test cases listed earlier and one test comment, and by nothing under `src/` —
+`git diff --stat 90ae9a8..HEAD -- src/` is one of the mechanical checks recorded with the round.
 
 **What this battery found.** Before the fix, the Linux Node 20 run aborted at
 `tests/write-state-security.test.ts:613`, `refuses to treat a different inode as the file it
@@ -374,7 +377,7 @@ is guarded to darwin because it exercises a real POSIX ACL through `/bin/chmod +
 does not provide. The macOS host runs it, so the ACL path is exercised on exactly one platform and
 skipped on the other rather than mocked on either.
 
-### Linux, delivered commit `73e16a2`
+### Linux, official `node:20` / `node:22` images on the delivered tree (`73e16a2`)
 
 This run replaces the tarball channel described above with the **official `node:20` / `node:22`
 images pulled from Docker Hub** (`node@sha256:8f693eaa7e0a…` and `node@sha256:8a34c4ab3ea2…`,
@@ -414,8 +417,9 @@ macOS, not a GitHub-hosted `ubuntu-latest` x64 VM, with no `actions/setup-node` 
 no checkout action. Those rows are still not evidence of a green CI run; CI has not run for any
 commit in this round (see the end of this section).
 
-**CI.** Not run for this round. None of the 28 commits between `a527c7e` and `73e16a2` has been
-pushed, so no GitHub Actions run exists for any of them: the Linux Node 20/22 build-and-test jobs,
+**CI.** Not run for this round. No commit of this round has been pushed (`git rev-list --count
+origin/main..HEAD` = 30, against `origin/main` = `a527c7e`), so no GitHub Actions run exists for any
+of them: the Linux Node 20/22 build-and-test jobs,
 both `platform-runtime` jobs (macOS and Windows) and their packed-runtime install step all have no
 result. The Linux rows above are local container runs on this machine, not CI jobs, and must not be
 read as a green pipeline. Pushing to trigger CI is a separate decision that has not been taken.
