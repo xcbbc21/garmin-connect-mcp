@@ -29,6 +29,11 @@ All notable changes to this project will be documented in this file.
   batch adds `skippedCount`, `unknownCount`, `notAttemptedCount` and `definiteFailureCount`.
 - `docs/calendar-write-recovery.md`, `docs/calendar-api-verification.md` and
   `docs/calendar-write-delivery.md`.
+- `npm run demo:recovery`: a runnable harness (`scripts/demo-write-recovery.ts`) for the three
+  required scenarios — history shadowing, a batch mixing an `unknown` entry with a new one, and
+  cross-process reconcile without a resend. It drives the real built MCP server as a child
+  process against the out-of-process fake Garmin service, so every write count it asserts on is
+  observed rather than composed. It is a source-tree command; `scripts/` is not shipped.
 
 ### Changed
 - The server exposes 18 tools. The previous 14 names, required arguments and success fields

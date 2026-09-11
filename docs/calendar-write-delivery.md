@@ -22,6 +22,7 @@
 > | "文档：完成" | **当时即不成立**——文档同时存在"已完成"与"未实现"两种口径；续修已按实际状态统一 |
 > | **§8 "下一批"第 1、2 条** | 均**已完成**：CI 平台作业已接入 journal/lock/migration/private-state/stdio 恢复用例；3 个工具的协调器托管与 5 工具 `idempotencyKey` 已落地（后者含参数层修复） |
 > | "三平台验证：仅 macOS；Linux/Windows 未跑，CI 也未接入新用例" | CI 平台作业**已接入**并覆盖上述恢复用例。**实测结果：** macOS 本机 12 套件 / 189 用例（两批：6/55 + 6/134）exit 0；Linux `arm64v8/ubuntu:22.04` 容器上 Node 20 与 Node 22 各自跑完整 7 条命令全部 exit 0（该电池正是发现 inode 回收缺陷的通道）；**Windows 本机无执行能力，仍未实测**。逐项数字与通道差异见 `docs/verification.md` 的 "Platform results, continuation round" 一节 |
+> | **§7「三段可复现演示」列的三条 `jest -t` 命令** | 三条用例仍在且仍通过，但演示已升级为**可运行脚本** `npm run demo:recovery`（真实 MCP 子进程 + 进程外 fake Garmin 对端驱动，三段各打印断言证据，末行 `ALL THREE DEMOS OK`）。见 §7 之后的续修小节 |
 >
 > 续修逐项状态、真实命令结果与证据边界以 `docs/calendar-write-recovery.md` 与
 > `docs/verification.md` 的 "continuation round" 一节为准。
@@ -152,6 +153,29 @@ npx jest --runInBand tests/write-coordinator.test.ts \
 npx jest --runInBand tests/write-coordinator.test.ts \
   -t "concurrent confirmations cannot double-write the same workout and date"
 ```
+
+### 7b. 续修：三段演示现在是可运行脚本（权威）
+
+上面的三条 `jest -t` 仍然有效，但它们只断言协调器内部函数。续修把方案要求的三个场景改写成一个
+**可运行的断言脚本**，它驱动**真实构建产物的 MCP 子进程**打到**进程外的 fake Garmin 对端**，
+因此 POST 次数、`applied` 次数、日志条目、锁属主与进程号都是**观察到的**而不是编排出来的：
+
+```bash
+npm run demo:recovery        # = npm run build && tsx scripts/demo-write-recovery.ts
+```
+
+源码：`scripts/demo-write-recovery.ts`。每一段用**独立的 peer**（`fromCall` 序号按段独立），
+任一断言失败即非零退出并打印失败的断言，正常结束时末行为 `ALL THREE DEMOS OK`。
+
+| 演示 | 场景 | 关键断言（脚本实测） |
+|---|---|---|
+| 1 | **历史遮蔽**：周一先单独预览（从未确认），随后被"周一 + 周二"的扩展批次取代 | 旧的 `not_attempted` + `CONFIRMATION_STALE` 记录**仍然可见**；新批次把周一写成 `succeeded` 并落 `workoutScheduleId`；不带 `idempotencyKey` 重问 ⇒ `requiresConfirmation:false` / `action:"skip_existing"` / `success:true`；**换新 `idempotencyKey`** 重问 ⇒ 完整 fresh read 发现条目，仍然 `skip_existing`，**不发新确认**；fake 侧周一 POST 恰好 1 次、`applied` 恰好 1 次 |
+| 2 | **unknown 混合批次**：周一被"先落库再丢响应"，随后与全新周二一起提交批量 | 丢响应那次结果为 `status:"unknown"` / `success:false` / `canResume:false` / `nextAction:"reconcile_garmin_write_operation"`，而 fake 侧 `scheduleApplied` 已是 1；混合预览里周一 `action:"blocked"`、周二 `action:"write"`；批量结果 `total:2` 且**每项各有自己的条目**，`success:false`、`unknownCount:1`，周一仍 `unknown`、周二 `succeeded`；fake 侧周一 POST 仍 1 次（**未重发**）、周二 1 次；随后读回原 operation，周一仍 `unknown` / `canResume:false`——**后一个批次不得"顺手"把被引用的未知条目改写成已解决** |
+| 3 | **跨进程核对且不重发**：3 条目批量，第二条响应被丢弃且子进程因此自杀（SIGKILL），日志留下 1 条 `succeeded` + 1 条 `in_flight` + 1 条 `prepared` | 遗留 `write.lock/owner.json` 的 `pid` 等于被杀的进程且**确已消失**（`kill(pid,0)` ⇒ `ESRCH`）；按 `docs/calendar-write-recovery.md` 的离线步骤，**只把 `write.lock/` 目录**移到临时备份（**不删 state root**）；由**不同 pid** 的新进程读日志；`reconcile` 的 `wroteToGarmin:false`，只追加 `evidence:"observed_present"`，**周二 `status` 仍为 `unknown`、周三仍为 `prepared`**（核对不改写状态）；resume 候选只含周三，周二被 `WRITE_OUTCOME_UNKNOWN` 拒绝；确认后周一 / 周二 / 周三各自 POST **恰好 1 次**，`schedulePosts` 与 `scheduleApplied` 各只 +1，周三拿到真回执 `succeeded`、周二**仍 `unknown`** |
+
+演示 3 的故障注入只用于**制造**崩溃：恢复前已清除（`POST /__fault {"mode":"none"}`，脚本会打印
+`the response fault is cleared before the resume — the outage is over`），否则重发的周三也会是
+`unknown`——脚本如实打印了这一点，而不是让断言变松。
 
 ## 8. 剩余限制与下一批
 

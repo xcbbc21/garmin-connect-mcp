@@ -52,6 +52,7 @@
     "auth:canary": "node lib/auth-cli.js canary",
     "auth:serve": "node lib/auth-cli.js serve --open",
     "pack:smoke": "npm run build && node scripts/audit-package.mjs",
+    "demo:recovery": "npm run build && tsx scripts/demo-write-recovery.ts",
     "prepare": "npm run build"
   },
   "keywords": [

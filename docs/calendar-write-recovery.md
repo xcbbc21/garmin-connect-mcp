@@ -209,6 +209,13 @@ A read budget bounds step 2: at most `RECONCILE_MAX_READS` (3) calendar reads in
 `RECONCILE_BUDGET_MS` (20 s) window. Exhausting it does not fail the reconcile; the
 unread steps are reported as deferred and stay undetermined.
 
+Every behaviour on this page is also demonstrated by a runnable harness rather than described
+here: `npm run demo:recovery` drives real MCP child processes against an out-of-process fake
+Garmin service and asserts on the POST counts it observes — including a kill of the writing
+process, a second process reading the journal it left behind, a reconcile that writes nothing,
+and a resume that re-sends nothing. Each scenario is listed in
+[docs/calendar-write-delivery.md](calendar-write-delivery.md) §7b.
+
 ## Reading the calendar
 
 `get_garmin_calendar` returns a range read: `entries`, `complete`, `missingRanges`,
