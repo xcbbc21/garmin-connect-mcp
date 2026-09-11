@@ -51,25 +51,36 @@ one file and are not interchangeable: the macOS rows were measured on the releas
 that adds `docs/calendar-write-delivery.md` to `package.json` `files` — while the Linux rows were
 measured on a clean `git archive ff128b6` export, whose `package.json` predates that addition.
 Source-level results (`lint`, `test`, coverage, `build`) are identical on both because no source
-file differs. Exact packed byte totals move whenever any shipped document changes, including this
-one; the stable audited properties are that every required document is present, the file count is
-204 on the release tree, and no forbidden content is included.
+file differs. The audited properties of the release tree are that every required document is
+present, the file count is 204, and no forbidden content is included. Exact packed byte totals are
+deliberately **not** recorded: `package.json` ships in every tarball whether or not `files` names
+it, so any edit to a script or to this document moves the totals, and a number quoted here would
+be stale the moment it was written. The file count and the audit verdict are the stable claims.
+
+The suite count is the same on both hosts but the pass/skip split is not, because one test is
+macOS-only: `refuses a journal carrying a granting macOS ACL` runs only where `chmod +a` exists.
 
 | Check | Command | Result |
 | --- | --- | --- |
 | Clean install | `npm ci` | exit 0 |
 | Lint | `npm run lint` | exit 0, 0 warnings |
-| Full suite | `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests (1137 passed, 1 skipped) |
+| Full suite (macOS host) | `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests, **1138 passed, 0 skipped** |
+| Full suite (Linux container) | `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests, **1137 passed, 1 skipped** — the macOS-ACL test |
 | Coverage with all gates | `npm run test:coverage` | exit 0. All files 87.29% statements / 77.59% branches / 87.44% functions / 89.92% lines (gates 75/70/65/78). `src/write-operations` 85.32 / 72.73 / 87.30 / 87.71; `src/calendar` 96.69 / 93.42 / 97.50 / 98.06 |
 | Packaged build | `npm run build` (`clean` + `tsc`) | exit 0 |
-| Package content audit (release tree) | `npm run pack:smoke` | exit 0. 204 files, 445,869 B packed, 1,921,108 B unpacked, `"audit": "passed"`; no `src`, `tests`, `node_modules`, session or journal content |
-| Package content audit (clean `git archive ff128b6`) | `npm run pack:smoke` | exit 0. 203 files, 426,608 B packed, 1,868,038 B unpacked, `"audit": "passed"` |
+| Package content audit (release tree) | `npm run pack:smoke` | exit 0. 204 files, `"audit": "passed"`; no `src`, `tests`, `node_modules`, session or journal content |
+| Package content audit (clean `git archive ff128b6`) | `npm run pack:smoke` | exit 0. 203 files, `"audit": "passed"` |
 | Runtime-only distribution install | `npm run test:distribution` | exit 0 on both trees. `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` |
+| Three required demos, end to end | `npm run demo:recovery` (`build` + `tsx scripts/demo-write-recovery.ts`) | exit 0, prints `DEMO 1 OK`, `DEMO 2 OK`, `DEMO 3 OK`, `ALL THREE DEMOS OK`. Real MCP children against the out-of-process fake Garmin peer; each demo has its own peer. See `docs/calendar-write-delivery.md` §7b |
 | macOS write-state platform battery | `npx jest --runInBand` on the cross-platform write-state set, two batches | exit 0, 12 suites / 189 tests (6 suites / 55 tests, then 6 suites / 134 tests) |
 | Linux write-state platform battery, Node 20 | `arm64v8/ubuntu:22.04` container, official linux-arm64 Node tarballs, full command set | exit 0, all seven commands. See the platform section below |
 | Linux write-state platform battery, Node 22 | same container and channel | exit 0, all seven commands. See the platform section below |
 | Windows write-state platform battery | — | **not run** — no Windows host is available here; see limitations |
 | Live account integration | `npm run test:integration` | **not run** — no authorized real credentials were available; see limitations |
+
+`demo:recovery` is a source-tree command: `scripts/` is deliberately not in `package.json` `files`,
+so it runs from a repository checkout, like `test`, `lint` and `pack:smoke`. It was run twice on
+two independent invocations with identical results.
 
 Tool surface after this round: **18 tools** (14 read/preview tools plus
 `get_garmin_calendar`, `get_garmin_write_operation`, `reconcile_garmin_write_operation`,
@@ -186,10 +197,10 @@ source of lock-test flakiness.
 | --- | --- | --- |
 | `npm ci` | exit 0 | exit 0 |
 | `npm run lint` | exit 0, 0 warnings | exit 0, 0 warnings |
-| `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests (1 skipped) | exit 0, 57 suites / 1138 tests (1 skipped) |
+| `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests, 1137 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
 | `npm run test:coverage` | exit 0. All files 87.15% statements / 77.45% branches / 87.2% functions / 89.75% lines | exit 0, same figures |
 | `npm run build` | exit 0 | exit 0 |
-| `npm run pack:smoke` | exit 0, 203 files, 426,608 B packed, 1,868,038 B unpacked, `"audit": "passed"` | exit 0, same figures |
+| `npm run pack:smoke` | exit 0, 203 files, `"audit": "passed"` | exit 0, same figures |
 | `npm run test:distribution` | exit 0, `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` | exit 0, same figures |
 
 The container coverage figures are lower than the macOS host figures (87.15 / 77.45 / 87.2 / 89.75
