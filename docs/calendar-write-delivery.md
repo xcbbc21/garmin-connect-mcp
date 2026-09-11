@@ -1,143 +1,137 @@
-# Calendar write safety: delivery and acceptance
+# Garmin Calendar 写入安全与恢复：任务完成情况对照报告
 
-Date: 2026-09-11
-Baseline: `67f5ec9` (package `0.2.0`)
-Resulting commits: `08ac0f3`, `6268be7` on `main`. **Not pushed** — no push authorisation was
-given for this increment.
+对照文档：`docs/superpowers/plans/2026-09-11-calendar-write-recovery.md`（下称"方案"）
+基线：`67f5ec9`（包版本 `0.2.0`） · 报告日期：2026-09-11
 
-## 1. Scope delivered
+本地提交：`08ac0f3`、`6268be7`、`2934d5f`、`a527c7e`，**已推送**至 `origin/main`，远端 HEAD = `a527c7e`。
 
-| Plan task | Status |
+## 0. 总判
+
+**安全基础设施与模拟验收已完成；目标地区的日历查询与自动恢复受能力限制。**
+
+这正是方案第 12 节在"生产查询端点尚无法可靠核实"时规定的交付状态。核心安全不变量已成立并有测试证明；但方案要求的 4 个新工具、日历范围查询、只读核对与恢复**未实现**，创建与取消两个阶段**未纳入日志托管**。
+
+| 维度 | 完成度 |
 |---|---|
-| Task 0 — baseline and interface evidence | Done — `docs/calendar-api-verification.md` |
-| Task 2 — identity, persistent journal, cross-process lock | Done |
-| Task 3 — typed write outcomes, no replay | Done for the calendar/write paths |
-| Task 4 — single-day schedule coordinator with cross-request dedup | Done |
-| Task 6 — batch / create / unschedule coverage | **Partial** — batch scheduling is coordinated; create, create-and-schedule and unschedule are not |
-| Task 1 — calendar range query | **Not delivered** — no verified endpoint exists (see §5) |
-| Task 5 — reconcile and resume | **Not delivered** — depends on Task 1 |
-| Task 7 — MCP contract | **Partial** — `idempotencyKey` and corrected descriptions shipped; the 4 new tools did not |
-| Task 8 — documentation | Done for the new behaviour and the recovery procedure |
-| Task 9 — full acceptance | Done for local platforms; see §3 for what could not be executed |
+| 安全底座（持久日志 + 跨进程锁 + 类型化结果） | 完成 |
+| 排期去重与"不确定写入不被重发" | 完成（单日 + 批量） |
+| 创建 / 创建并排期 / 取消的日志托管 | 未完成 |
+| 日历查询 / 核对 / 恢复 与 4 个新工具 | 未完成 |
+| 文档 | 完成 |
+| 三平台验证 | 仅 macOS；Linux/Windows 未跑，CI 也未接入新用例 |
 
-Tool count is unchanged at 14 (the 4 new inspection/recovery tools are not implemented).
+## 1. 方案 Task 0–9 逐项对照
 
-## 2. Changed files
+| Task | 方案要求 | 状态 | 证据 / 缺口 |
+|---|---|---|---|
+| 0 | 冻结基线、记录环境与工具表、完成接口证据表 | **完成** | `docs/calendar-api-verification.md`；确认 HEAD 即基线 `67f5ec9` |
+| 1 | 查询模型与适配（日期范围、分页、完整性标志） | **未完成** | SDK 与本仓库均无可核验的日历读接口，未实现适配，也未做真实探测 |
+| 2 | 身份、持久日志、跨进程锁 | **完成** | `src/write-operations/{identity,store,lock,types,errors}.ts`；store 在每个写入故障点注入异常，锁用两个真实子进程竞争 |
+| 3 | 类型化写入结果与迟到请求 | **部分** | 分类与"永不自动重试"完成；**迟到 promise 按 operationId+stepId+attempt 回写、AbortSignal 取消、有界关闭未做** |
+| 4 | 单日排期统一协调器 | **完成** | `coordinator.ts`；四条绕过路径均有测试 |
+| 5 | 只读核对与批准恢复 | **未完成** | 依赖 Task 1 |
+| 6 | 批量、创建与取消覆盖 | **部分** | 批量完成（逐条状态 + 5 个计数）；**创建 / 创建并排期 / 取消未托管** |
+| 7 | MCP 契约与子进程链路 | **部分** | 幂等键与文案修正完成，stdio 子进程去重有测试；**4 个新工具未实现，公共类型未从根入口导出** |
+| 8 | 文档、技能与交付物 | **完成** | README(en/zh)、CHANGELOG、manual.zh-CN、migration、verification、SKILL 全部更新；新增 3 篇文档；链接 33 条 0 断链 |
+| 9 | 全量验收与证据交付 | **部分** | 本机 lint / 测试 / 覆盖率 / 打包审计 / 分发校验全绿；**CI 平台作业未接入新用例，Linux/Windows 未实测** |
 
-`08ac0f3` — safety substrate (17 files): new `src/write-operations/{types,errors,identity,store,lock}.ts`;
-`src/config.ts` and `src/account-session.ts`; tests for each; `jest.config.js` isolation;
-`.env.example`.
+### 仍未托管日志的写入路径（已逐行核实）
 
-`6268be7` — integration (12 files): new `src/write-operations/coordinator.ts`;
-`src/client.ts`, `src/tool-service.ts`, `src/mcp.ts`; the two new docs;
-`tests/write-coordinator.test.ts` and three migrated suites; the reviewed
-`tests/fixtures/mcp-tools-baseline.json`.
+`src/tool-service.ts` 中仍有 4 处直接调用底层写入、绕过协调器：
 
-`docs/superpowers/` is the user's own plan directory and is left untracked and untouched.
-
-## 3. Verification results
-
-Commands run from the repository root. `NODE_OPTIONS=""` is used for jest because this
-sandbox injects a `--require` shim that the browser-auth canary correctly rejects as a
-weakened HTTP policy; the suite passes without it.
-
-| Command | Result |
-|---|---|
-| `npx tsc --noEmit` | Clean |
-| `npm run lint` (`eslint src tests scripts --max-warnings 0`) | Clean, 0 warnings |
-| `npx jest --runInBand` | **41 suites, 847 tests, all passing** |
-| `npx jest --coverage --runInBand` | All thresholds met. All files 87.03% stmts / 78.81% branch / 87.16% func / 89.83% lines (gates 75/70/65/78). `src/write-operations` 88.22 / 71.25 / 87.27 / 89.44 |
-| `npm run build` | **Blocked in this sandbox** — `scripts/clean.mjs` is refused by the environment's bulk-delete guard (140 files > threshold). `npx tsc` was used instead and compiles cleanly into `lib/`. Not a code failure. |
-| `npm run pack:smoke` (audit) | Passed — 179 files, 270,729 B packed, no `tests`/`src`/`node_modules`/session/journal content |
-| `npm run test:distribution` | Passed — `runtimeOnlyInstall:true`, 14 tools |
-| `npm run test:integration` | **Not run** — requires real account access, which was not authorised |
-
-Platforms: macOS (this machine) executed everything above. Linux and Windows were **not**
-exercised, so atomic-rename semantics, private ACLs and subprocess lock release on those
-platforms remain unverified.
-
-## 4. Interface evidence
-
-Full table in `docs/calendar-api-verification.md`. Summary:
-
-| Capability | Source-verified | Live-verified |
+| 位置 | 调用 | 影响 |
 |---|---|---|
-| `POST /workout-service/schedule/{workoutId}` (global, cn) | Yes — `src/client.ts` | No |
-| `DELETE /workout-service/schedule/{workoutScheduleId}` | Yes — `src/client.ts` | No |
-| SDK exposes `scheduleWorkout` | Disproven — absent from `garmin-connect@1.6.2` dist despite its README | n/a |
-| Calendar range query | Absent from the SDK and from this repository | n/a |
+| `:566` `createWorkout` | `client.addWorkout` | 创建超时无记账，可能重复创建模板 |
+| `:791` `createAndScheduleWorkout` | `client.addWorkout` | 同上 |
+| `:804` `createAndScheduleWorkout` | `client.scheduleWorkout` | 排期阶段未走去重 |
+| `:836` `unscheduleWorkout` | `client.unscheduleWorkout` | 取消超时无记账 |
 
-No endpoint, field or region is claimed to work from assumption alone.
+（`:274` 是协调器内部的 writer 适配，属正常路径。）
 
-## 5. Reproducible demonstrations
+后果：这 3 个工具也**不接受 `idempotencyKey`**——方案要求 5 个写工具都支持，实际只有 `schedule_garmin_workout` 与 `batch_schedule_garmin_workouts` 2 个。
 
-Each of the three required scenarios is a named regression test.
+## 2. 方案第 2 节"完成后的用户行为"对照
+
+| # | 预期行为 | 状态 |
+|---|---|---|
+| 1 | 查询某日期范围内的排期（而非下载全部历史） | **未实现** |
+| 2 | 同一 workout 可安排在不同日期；同账号同 workout 同日期保持一条 | 完成（默认跳过已存在项；不自动清理历史重复，符合方案"明确不做"） |
+| 3 | 重复请求返回已有操作 / 已存在排期，不再发出相同写入 | **完成**，四条绕过路径均被阻断 |
+| 4 | 超时返回 `unknown` 与可持久查询的 `operationId` | **部分**：`unknown` + `operationId` 已返回且已持久化，但**没有查询工具**，只能读本地日志 |
+| 5 | 用户可查询状态、只读核对、仅恢复有证据的安全项 | **未实现** |
+| 6 | 批量逐条列出成功 / 跳过 / 明确失败 / 未执行 / 不确定，不整批重发 | **完成** |
+| 7 | 重启、关闭客户端或更换登录别名后写入记录不失效 | **完成**（重启与别名共享均有测试） |
+
+## 3. 方案第 11 节测试矩阵覆盖
+
+| 类别 | 状态 |
+|---|---|
+| 日期、ID、预览、去重、账号、状态、并发、超时、批量（部分）、认证、MCP、打包 | 已覆盖 |
+| **日历查询**、**核对**、**创建**、**取消** | 未覆盖（功能未实现） |
+| 崩溃（发出后被杀、批量中途被杀） | 部分：重启与发包前失败已覆盖，进程被杀的中间态未覆盖 |
+| 批量（认证失效中断） | 未覆盖 |
+
+## 4. 方案第 12 节交付清单对照
+
+| # | 要求 | 状态 |
+|---|---|---|
+| 1 | 变更文件、提交列表、接口与行为变化说明 | 完成（本文件 + `git log`） |
+| 2 | 新增工具 schema / 示例 / 状态 / 错误码，旧工具兼容测试结果 | 部分（**无新增工具**；新字段与错误码已述；旧工具兼容测试全绿） |
+| 3 | 测试命令与结果、覆盖率、三平台状态、产物审计、干净安装 | 部分（本机全绿；运行时分发安装通过；**三平台未达**） |
+| 4 | 查询 / 取消接口证据表，分源码核验 / 模拟 / 真实、国内 / 国际 | 完成（`docs/calendar-api-verification.md` §2、§6） |
+| 5 | 至少 3 段可复现演示 | 完成（本文件 §7） |
+| 6 | 仍无法解决的边界 | 完成（本文件 §8） |
+
+方案第 12 节末尾的禁止条款已遵守：**没有**以"加了查询工具 / 延长超时 / 只加了 idempotencyKey 字段 / 内存 Set 通过测试"充当完成标准；幂等键与业务键均经持久化、跨工具 / 跨请求检查、发包前生效、重启与真实双进程并发验证。
+
+## 5. Global Constraints 对照
+
+| 约束 | 状态 |
+|---|---|
+| 保持独立本地 stdio MCP，不恢复 DSH / Cordis / React | 遵守（未触碰） |
+| 包继续 `private: true`，本轮不发布 npm | 遵守（审计脚本亦校验） |
+| 保留已有工具名称、必填参数与正常成功字段 | 遵守（14 个工具名不变；`workoutId` / `date` / `timezone` / `workoutScheduleId` 保留） |
+| 一次性确认、10 分钟、内容绑定；凭证与幂等键不混用 | 遵守 |
+| 禁止 POST / DELETE 自动重试（含拦截器、认证刷新、批量恢复） | 遵守（拦截器仅重放 GET / HEAD / OPTIONS） |
+| 休息日不创建 workout；训练内合法 `rest` 保留 | 遵守 |
+| 不修改真实 Garmin 数据 | 遵守（全程未接触真实账号） |
+| 不承诺服务端 exactly-once | 遵守（文档明示） |
+| GitHub 动作走已授权接口，不索取凭证 | 遵守（同步前仅用 MCP 只读核验；推送经一次性明确授权） |
+
+## 6. 验证结果（本机 macOS arm64 / Node v22.22.2）
+
+| 命令 | 结果 |
+|---|---|
+| `npx tsc --noEmit` | 干净 |
+| `eslint src tests scripts --max-warnings 0` | 干净，0 warning |
+| `NODE_OPTIONS="" npx jest --runInBand` | **41 套件 / 847 用例全过** |
+| `npx jest --coverage --runInBand` | 全文件 87.03 / 78.81 / 87.16 / 89.83（门槛 75 / 70 / 65 / 78）；`src/write-operations` 88.22 / 71.25 / 87.27 / 89.44 |
+| `npm run pack:smoke`（审计） | 通过：179 文件、270,729 B，无 `src` / `tests` / `node_modules` / 会话 / 日志泄漏 |
+| `npm run test:distribution` | 通过：`runtimeOnlyInstall:true`，14 工具 |
+| `npm run test:integration` | **未运行**（需真实账号授权） |
+| `npm run build` | **本机不可运行**：`clean` 被环境批量删除守卫拦截；改用 `npx tsc`。打包产物以 CI 为准 |
+
+## 7. 三段可复现演示
 
 ```bash
-# 1. A new preview for the same workout/date is blocked and re-sends nothing.
+# 1. 换新预览也无法绕过
 npx jest --runInBand tests/write-coordinator.test.ts \
   -t "a brand-new preview cannot bypass an existing unknown write"
-
-# 2. After a restart, the new process still refuses to re-send the write.
+# 2. 重启后仍拒绝重发
 npx jest --runInBand tests/write-coordinator.test.ts \
   -t "a restarted process cannot bypass an existing unknown write"
-
-# 3. Two callers confirming the same workout/date send exactly one POST.
+# 3. 两方并发确认只发出一次 POST
 npx jest --runInBand tests/write-coordinator.test.ts \
   -t "concurrent confirmations cannot double-write the same workout and date"
-
-# Supporting: a different idempotency key is also blocked, and in_flight is
-# persisted before dispatch (a failed persistence sends nothing).
-npx jest --runInBand tests/write-coordinator.test.ts
 ```
 
-Each test asserts the Garmin write count stays at 1 across the attempt, which is the
-property that actually matters.
+## 8. 剩余限制与下一批
 
-## 6. Acceptance matrix coverage
+**能力边界（不是漏做）**：无服务端 exactly-once；外部设备 / 网页端可并发修改；无可用日历读接口，故**永远无法证明"不存在"**；`unknown` 永久占据该 workout + date；不同 state 根互不锁定；日志无归档，32 MiB 上限后拒写。
 
-| Category | Covered |
-|---|---|
-| Dates (leap, invalid, DST boundary, timezone boundaries) | Existing suite, unchanged |
-| Calendar query (missing page, cursor loop, region capability) | **Not covered** — feature absent |
-| IDs (empty/over-long, wrong type, activity id) | Existing suite |
-| Preview (unconfirmed, expired, replayed, changed params, changed account) | Existing + migrated regression tests |
-| Dedup (new preview, new key, no key, single vs batch) | New coordinator suite |
-| Account (case, unicode, alias, region, identity switch) | New identity suite |
-| State (fault at each write point, before/after) | New store suite (open/write/sync/rename) |
-| Concurrency (two processes, held lock, non-owner release, wait timeout) | New lock suite, real subprocesses |
-| Crash (mid-write, restart) | Partial — restart and pre-dispatch failure covered; process-kill mid-dispatch not covered |
-| Timeout (response lost, late result) | Covered for classification and single dispatch; late-result log update not implemented |
-| Reconcile | **Not covered** — feature absent |
-| Create (created then schedule failed, unknown id, same template across tools) | Existing behaviour only; not journal-backed |
-| Unschedule | Existing behaviour only |
-| Batch (partial unknown, auth loss, storage failure, interruption) | Partial — per-step states and counts covered; auth-loss interruption not covered |
-| Auth (missing/expired, no auto-replay after login) | Existing suite |
-| MCP (real stdio subprocess, restart, result loss) | stdio dedup covered; restart over stdio not covered |
-| Packaging (runtime-only install, no private content) | Distribution + audit scripts |
+**下一批（按性价比排序）**
 
-## 7. Remaining limitations
-
-1. **No server-side exactly-once.** Deduplication is client-side and only covers writers that
-   share this journal. Another device, the Garmin web UI, or a second machine with a different
-   state root can still create a duplicate.
-2. **No verified calendar query, so absence can never be proven.** The coordinator therefore
-   never concludes "not found" and never clears a business key from an empty read.
-3. **An `unknown` write blocks its workout/date permanently.** Deliberate: recoverability is
-   not traded for duplicate-write risk. There is currently no automatic recovery tool.
-4. **Create and unschedule are not journal-backed.** A create that times out after the workout
-   exists still cannot be matched to a template, and unschedule cannot verify absence.
-5. **Leaked locks are not auto-cleared** and require the documented offline procedure.
-6. **Cross-platform behaviour is unverified** on Linux and Windows.
-7. **`npm run build` cannot run in this sandbox** because its `clean` step is blocked; `tsc`
-   was used directly. CI should be the authority for the packaged build.
-8. Known-stale items that were deliberately left as-is: `src/di-session.ts` auth-epoch replay
-   rules, FIT export, and the running-advice knowledge base were not touched.
-
-## 8. Follow-up work
-
-- Implement `docs/calendar-api-verification.md` §4 once a calendar range endpoint is verified
-  for both regions, then reconcile/resume plus the 4 inspection tools.
-- Extend journal coverage to create, create-and-schedule and unschedule.
-- Add late-result handling (operationId + stepId + attempt bound) and bounded shutdown.
-- Add Linux/Windows CI for atomic rename, private ACLs and lock release.
+1. `src/index.ts` 导出新增公共类型；`.github/workflows/ci.yml` 平台作业接入 `write-operation-store/lock` 测试（消除"验证充分性"短板，不依赖外部接口）。
+2. 把 create / create-and-schedule / unschedule 接入协调器，一次性消掉 §1 的 4 处绕过，并让 5 个写工具统一支持 `idempotencyKey`。
+3. 日历范围查询：需先决定——授权一次真实账号**只读**探测，或明确"永久不做"并为核对 / 恢复设计人工替代方案。
+4. Task 3 收尾：迟到结果回写、AbortSignal 取消、有界关闭。
