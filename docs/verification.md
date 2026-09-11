@@ -114,6 +114,20 @@ What the continuation round added, each backed by committed tests:
   than deleted; a missing or unsupported `schemaVersion`, an account mismatch, an index entry
   pointing at a missing operation or an invalid step all raise `STATE_CORRUPT` and no write is
   issued.
+- **An untrustworthy journal stops the write before dispatch, proven through the tool path and
+  not only at the store.** The store-level cases assert that `read()` refuses; the property that
+  actually protects the calendar is that the *tool* call refuses and sends nothing. Three shapes
+  are covered end to end in `tests/write-coordinator.test.ts`: an unsupported `schemaVersion`, an
+  `accountKey` that is not this account, and a step `status` outside the enum. Each case performs
+  one real successful write first (so the journal holds a step worth corrupting and the writer
+  call count has a baseline), corrupts the journal **on disk at the path the service itself
+  derived** — no injected store, no mock — then calls `scheduleWorkout` for a *different* target
+  and asserts a `STATE_CORRUPT` rejection, an unchanged writer call count, and that the journal
+  was not silently repaired out from under the refusal. All three shapes were mutation-proved and
+  reverted: silently returning an empty document for an unknown version failed the schema case
+  only, tolerating an account mismatch failed the account case only, and dropping the status enum
+  failed the status case only — one mutation each, no cross-contamination — after which `src/`
+  returned byte-identical (`migration.ts` sha256 `7f1fc274…`).
 - **Calendar range query with an explicit capability boundary.** `get_garmin_calendar` is
   read-only; a region without a verifiable read endpoint fails closed with
   `CALENDAR_QUERY_UNSUPPORTED` instead of returning an empty snapshot, so absence is never

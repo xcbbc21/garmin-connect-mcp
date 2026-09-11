@@ -1,4 +1,5 @@
 import { mkdtempSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
@@ -7,7 +8,7 @@ import { WriteCoordinator, previewRevisionOf } from '../src/write-operations/coo
 import { GarminWriteError, WRITE_ERROR_CODES } from '../src/write-operations/errors'
 import { accountKey, decodeConfirmationId, requestHash } from '../src/write-operations/identity'
 import { FileAccountLock } from '../src/write-operations/lock'
-import { type OperationStore } from '../src/write-operations/store'
+import { FileOperationStore, type OperationStore } from '../src/write-operations/store'
 import { emptyOperationDocument, type OperationDocument } from '../src/write-operations/types'
 
 const ACCOUNT = accountKey('runner@example.test', 'cn')
@@ -337,5 +338,89 @@ describe('coordinator state machine', () => {
     })
     expect(execution.receipts[0].status).toBe('not_attempted')
     expect(writer.schedule).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Row 7 of the plan's §7 matrix: a journal that cannot be trusted must stop
+ * the write *before* anything reaches Garmin.
+ *
+ * `tests/write-operation-store.test.ts` already asserts that the store refuses
+ * a corrupt journal on `read()`. That is necessary but not sufficient: the
+ * property the matrix asks for is about the *tool* path, which is the only
+ * thing that can send a request. So these cases drive the public write tool,
+ * corrupt the real journal file on disk (no injected store, no mock), and then
+ * assert two things at once — the refusal is reported as `STATE_CORRUPT`, and
+ * the injected Garmin writer was not called a second time.
+ *
+ * The three shapes are the ones the store treats as fatal and distinct:
+ * an unsupported schema version, an account mismatch, and a step status
+ * outside the enum. Every one of them is a *pre-dispatch* problem, so the
+ * correct behaviour is identical: refuse, send nothing.
+ */
+describe('an untrustworthy journal stops the write before dispatch', () => {
+  type MutableDocument = {
+    schemaVersion: number
+    accountKey: string
+    operations: Record<string, { steps: Array<{ status: string }> }>
+  }
+
+  /** The first recorded step, so a corruption can target a nested field. */
+  function firstStep(document: MutableDocument): { status: string } {
+    for (const operation of Object.values(document.operations)) {
+      const step = operation.steps[0]
+      if (step) return step
+    }
+    throw new Error('the journal recorded no step to corrupt')
+  }
+
+  const corruptions: Array<{ label: string; mutate: (document: MutableDocument) => void }> = [
+    {
+      label: 'a schema version it does not implement',
+      mutate: document => {
+        document.schemaVersion = 3
+      },
+    },
+    {
+      label: 'an account key that is not this account',
+      mutate: document => {
+        document.accountKey = 'someone-else'
+      },
+    },
+    {
+      label: 'a step status outside the enum',
+      mutate: document => {
+        firstStep(document).status = 'not-a-status'
+      },
+    },
+  ]
+
+  it.each(corruptions)('refuses the next write when the journal holds $label', async ({ mutate }) => {
+    const state = freshState()
+    const writer = jest.fn().mockResolvedValue({ workoutScheduleId: 's9' })
+    const { service } = makeService(state, writer)
+
+    // One real, successful write first: the journal now holds a step worth
+    // corrupting, and the writer call count is a meaningful baseline.
+    await confirm(service, { workoutId: 'w11', date: '2026-10-05', timezone: TIMEZONE })
+    expect(writer).toHaveBeenCalledTimes(1)
+
+    // Corrupt the journal through the real filesystem, at the path the service
+    // itself derived — not a path this test chose.
+    const store = new FileOperationStore(state, ACCOUNT)
+    const document = JSON.parse(await readFile(store.filePath, 'utf8')) as MutableDocument
+    mutate(document)
+    await writeFile(store.filePath, JSON.stringify(document), 'utf8')
+
+    // A different target, so the refusal cannot be explained by the previous
+    // operation being replayed from an in-memory copy.
+    await expect(
+      service.scheduleWorkout({ workoutId: 'w12', date: '2026-10-06', timezone: TIMEZONE } as never),
+    ).rejects.toMatchObject({ code: WRITE_ERROR_CODES.STATE_CORRUPT })
+
+    // The whole point: nothing was sent, and the journal was not "repaired"
+    // out from under the refusal either.
+    expect(writer).toHaveBeenCalledTimes(1)
+    await expect(store.read()).rejects.toMatchObject({ code: WRITE_ERROR_CODES.STATE_CORRUPT })
   })
 })
