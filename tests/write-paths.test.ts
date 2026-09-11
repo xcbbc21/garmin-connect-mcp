@@ -7,9 +7,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GarminToolService, type GarminDataClient } from '../src/tool-service'
-import { accountKey } from '../src/write-operations/identity'
 
-const ACCOUNT = accountKey('runner@example.test', 'cn')
 const TIMEZONE = 'Asia/Shanghai'
 
 function freshState(): string {
@@ -56,8 +54,9 @@ describe('createAndScheduleWorkout routes through the coordinator', () => {
     // call; the plan's crash-recovery contract is on the schedule step.
     const second = await service.createAndScheduleWorkout(payload as never) as { requiresConfirmation: boolean; confirmationId: string; status?: string }
     expect(second.requiresConfirmation).toBe(true)
-    const secondResult = await service.createAndScheduleWorkout({ ...payload, confirmed: true, confirmationId: second.confirmationId } as never) as { status?: string; success?: boolean }
+    await service.createAndScheduleWorkout({ ...payload, confirmed: true, confirmationId: second.confirmationId } as never)
     expect((writer as jest.Mock).mock.calls.length).toBe(firstScheduleCount)
+    void firstDispatchCount
   })
 
   it('createAndSchedule records the schedule operation in the journal', async () => {

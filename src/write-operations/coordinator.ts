@@ -25,9 +25,7 @@ import {
 } from './errors'
 import { idempotencyKeyHash, requestHash, scheduleBusinessKey } from './identity'
 import {
-  BLOCKING_STEP_STATUSES,
   SATISFIED_STEP_STATUSES,
-  findStepByBusinessKey,
   findStepByBusinessKeySafe,
   type OperationDocument,
   type StepStatus,

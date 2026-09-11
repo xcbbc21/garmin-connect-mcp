@@ -112,7 +112,7 @@ describe('F5: persisted document never stores the raw idempotency key', () => {
       async read() { throw new Error('not used') },
       async save() {},
     }
-    const coordinator = new WriteCoordinator({
+    void new WriteCoordinator({
       store,
       lock: new FileAccountLock(freshState(), ACCOUNT),
       accountKey: ACCOUNT,
