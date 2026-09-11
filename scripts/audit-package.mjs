@@ -25,7 +25,8 @@ assert.equal(result.status, 0, result.stderr)
 const [pack] = JSON.parse(result.stdout)
 const files = pack.files.map(file => file.path)
 for (const name of ['lib/mcp.js', 'lib/auth-cli.js', 'lib/index.js', 'LICENSE',
-  'NOTICE.md', 'skills/garmin-connect-mcp/SKILL.md', 'docs/migration.md', 'docs/client-setup.md']) {
+  'NOTICE.md', 'skills/garmin-connect-mcp/SKILL.md', 'docs/manual.zh-CN.md',
+  'docs/migration.md', 'docs/client-setup.md']) {
   assert(files.includes(name), 'Missing package file: ' + name)
 }
 const forbidden = /(^|\/)(node_modules|tests|coverage|src|\.git)(\/|$)|dsh-client|cordis[.]patch|^lib\/(client\/|types\/client\/|tools\/)|embedded-auth-rpc|[.]session[.]json$|^CNAME$|^\.env$/

@@ -2,7 +2,7 @@
 
 面向智能体的独立 Garmin Connect MCP 服务。任何支持本地 MCP stdio 的客户端，都可以通过它读取运动数据、创建结构化训练，并把训练安排到 Garmin 日历。
 
-[English](README.md) · [客户端配置](docs/client-setup.md) · [迁移说明](docs/migration.md) · [验证报告](docs/verification.md)
+[English](README.md) · [完整中文说明书](docs/manual.zh-CN.md) · [客户端配置](docs/client-setup.md) · [迁移说明](docs/migration.md) · [验证报告](docs/verification.md)
 
 服务自身不需要模型 API Key 或智能体框架。访问佳明使用你自己的账号。随包技能是可选的使用说明，连接 MCP 不需要先安装技能。
 
