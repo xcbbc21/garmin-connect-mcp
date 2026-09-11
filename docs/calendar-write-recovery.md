@@ -311,10 +311,13 @@ concurrently. Keep one writer per state root.
   handle's `fstat` immediately afterwards, and anyone able to write into the private state
   directory could already produce a schema-valid journal. Recorded as a residual risk, not as a
   verified absence of one.
-- **Platform coverage is uneven.** macOS arm64 is verified on the host (12 write-state suites /
-  189 tests). Linux aarch64 is verified in a container only, and on a channel that mounts the
-  official `linux-arm64` Node tarball onto an `arm64v8/ubuntu:22.04` image rather than using the
-  official `node:20` / `node:22` images — real POSIX semantics, but not the CI runner image.
+- **Platform coverage is uneven.** macOS arm64 is verified on the host (full suite 58 suites /
+  1143 tests, all passing; 12 write-state suites / 189 tests in the targeted battery). Linux
+  aarch64 is verified in a container only, and on a channel that mounts the official
+  `linux-arm64` Node tarball onto an `arm64v8/ubuntu:22.04` image rather than using the official
+  `node:20` / `node:22` images — real POSIX semantics, but not the CI runner image. Both Linux
+  Node versions run the full command set with exit 0, including the three recovery demos; on
+  Linux one test is skipped, the macOS-only `chmod +a` ACL case.
   **Windows is not verified at all** for this commit: no Windows host or runner was available,
   so DACL enforcement, NTFS atomic rename and subprocess lock release are untested. See
   `docs/verification.md`, "Platform results, continuation round".

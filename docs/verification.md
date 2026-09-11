@@ -1,6 +1,7 @@
 # Standalone MCP 0.2.0 verification
 
-Verification started 2026-09-10; final clean-install rerun 2026-09-11.
+Verification started 2026-09-10; final clean-install rerun 2026-09-11; the calendar
+write-safety continuation round was re-measured on 2026-09-12.
 Local environment: macOS arm64, Node v25.2.1, npm 11.19.0.
 This report covers the standalone refactor against baseline commit `52b67cd`.
 
@@ -40,23 +41,27 @@ wrong, and are corrected here rather than left standing:
 
 ## Calendar write-safety and recovery, continuation round (2026-09-12)
 
-Verified at commit `2f40cce`, baselines for comparison `e091d1b` (round start) and `ff128b6`
+Verified at commit `3a82e4f`, baselines for comparison `e091d1b` (round start) and `ff128b6`
 (the commit at which the product defect below was fixed). Local environment: macOS arm64
-(darwin), Node v25.2.1, npm 11.19.0. Every command below was run from a clean `npm ci` install
-on this machine, in this order, with no pre-script bypassed.
+(darwin), Node v25.2.1, npm 11.19.0. The macOS rows were run from a clean `npm ci` install on
+this machine, in this order, with no pre-script bypassed; the Linux rows were measured on the
+same commit inside a container (see the platform section).
 
-`2f40cce` is the final commit of the round. No file under `src/` has changed since `ff128b6`:
-the commits in between add documentation and `scripts/demo-write-recovery.ts`, which `tsconfig`
-does not compile (`include: ["src"]`). The full command set was therefore re-measured at the
-final commit and returned the identical figures reported below; the re-run is the source of the
-macOS rows, not a copy of the earlier ones.
+`3a82e4f` is the final commit of the round. No file under `src/` has changed since `ff128b6`:
+the commits in between add documentation, `scripts/demo-write-recovery.ts` and one test file,
+none of which `tsconfig` compiles (`include: ["src"]`, so `scripts/` and `tests/` are outside the
+build). The full command set was nevertheless re-measured at the final commit on both platforms.
+Every number below comes from that re-run; none of them is carried over from an earlier commit,
+and the suite and test counts moved by the five cases the new guard test adds.
 
-The packaged-artifact rows are reported **per measured tree**, because the two trees differ by
-one file and are not interchangeable: the macOS rows were measured on the release tree at
-`2f40cce`, which includes the documentation changes and the `package.json` entry that adds
-`docs/calendar-write-delivery.md` to `files`, while the Linux rows were measured on a clean
-`git archive ff128b6` export, whose `package.json` predates that addition. Source-level results
-(`lint`, `test`, coverage, `build`) are identical on both because no source file differs. The audited properties of the release tree are that every required document is
+The packaged-artifact rows are reported **per measured tree**: the macOS rows were measured on the
+release tree at `3a82e4f`, and the Linux rows on a clean `git archive 3a82e4f` export carrying
+neither `node_modules` nor `.git`, so `npm ci` there is a genuine clean install. Both trees audit
+to the same 204 files, because the `package.json` entry that adds `docs/calendar-write-delivery.md`
+to `files` and that document itself are both present in the export. Source-level results (`lint`,
+`test`, `build`) are identical across all three hosts because no source file differs; coverage
+differs only in platform-conditional branches, and that difference is reported rather than
+averaged away. The audited properties of the release tree are that every required document is
 present, the file count is 204, and no forbidden content is included. Exact packed byte totals are
 deliberately **not** recorded: `package.json` ships in every tarball whether or not `files` names
 it, so any edit to a script or to this document moves the totals, and a number quoted here would
@@ -69,24 +74,27 @@ macOS-only: `refuses a journal carrying a granting macOS ACL` runs only where `c
 | --- | --- | --- |
 | Clean install | `npm ci` | exit 0 |
 | Lint | `npm run lint` | exit 0, 0 warnings |
-| Full suite (macOS host) | `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests, **1138 passed, 0 skipped** |
-| Full suite (Linux container) | `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests, **1137 passed, 1 skipped** — the macOS-ACL test |
-| Coverage with all gates | `npm run test:coverage` | exit 0. All files 87.29% statements / 77.59% branches / 87.44% functions / 89.92% lines (gates 75/70/65/78). `src/write-operations` 85.32 / 72.73 / 87.30 / 87.71; `src/calendar` 96.69 / 93.42 / 97.50 / 98.06 |
+| Full suite (macOS host) | `npm test -- --runInBand` | exit 0, 58 suites / 1143 tests, **1143 passed, 0 skipped** |
+| Full suite (Linux container, Node 20 and Node 22) | `npm test -- --runInBand` | exit 0 on both, 58 suites / 1143 tests, **1142 passed, 1 skipped** — the macOS-ACL test |
+| Coverage with all gates | `npm run test:coverage` | exit 0 on all three hosts. macOS All files 87.29% statements / 77.59% branches / 87.44% functions / 89.92% lines; Linux All files 87.15 / 77.45 / 87.20 / 89.75. Gates 75/70/65/78. `src/write-operations` 85.32 / 72.73 / 87.30 / 87.71 on macOS and 85.32 / 72.62 / 87.30 / 87.71 on Linux; `src/calendar` 96.69 / 93.42 / 97.50 / 98.06 on both |
 | Packaged build | `npm run build` (`clean` + `tsc`) | exit 0 |
 | Package content audit (release tree) | `npm run pack:smoke` | exit 0. 204 files, `"audit": "passed"`; no `src`, `tests`, `node_modules`, session or journal content |
-| Package content audit (clean `git archive ff128b6`) | `npm run pack:smoke` | exit 0. 203 files, `"audit": "passed"` |
-| Runtime-only distribution install | `npm run test:distribution` | exit 0 on both trees. `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` |
-| Three required demos, end to end | `npm run demo:recovery` (`build` + `tsx scripts/demo-write-recovery.ts`) | exit 0, prints `DEMO 1 OK`, `DEMO 2 OK`, `DEMO 3 OK`, `ALL THREE DEMOS OK`. Real MCP children against the out-of-process fake Garmin peer; each demo has its own peer. See `docs/calendar-write-delivery.md` §7b |
+| Package content audit (clean `git archive 3a82e4f`) | `npm run pack:smoke` | exit 0. 204 files, `"audit": "passed"` |
+| Runtime-only distribution install | `npm run test:distribution` | exit 0 on every host and tree. `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` |
+| Three required demos, end to end | `npm run demo:recovery` (`build` + `tsx scripts/demo-write-recovery.ts`) | exit 0 on all three hosts, printing `DEMO 1 OK`, `DEMO 2 OK`, `DEMO 3 OK`, `ALL THREE DEMOS OK`. Real MCP children against the out-of-process fake Garmin peer; each demo has its own peer. See `docs/calendar-write-delivery.md` §7b |
 | macOS write-state platform battery | `npx jest --runInBand` on the cross-platform write-state set, two batches | exit 0, 12 suites / 189 tests (6 suites / 55 tests, then 6 suites / 134 tests) |
-| Linux write-state platform battery, Node 20 | `arm64v8/ubuntu:22.04` container, official linux-arm64 Node tarballs, full command set | exit 0, all seven commands. See the platform section below |
-| Linux write-state platform battery, Node 22 | same container and channel | exit 0, all seven commands. See the platform section below |
+| Linux write-state platform battery, Node 20 | `arm64v8/ubuntu:22.04` container, official linux-arm64 Node tarballs, full command set | exit 0, all eight commands. See the platform section below |
+| Linux write-state platform battery, Node 22 | same container and channel | exit 0, all eight commands. See the platform section below |
 | Windows write-state platform battery | — | **not run** — no Windows host is available here; see limitations |
 | Live account integration | `npm run test:integration` | **not run** — no authorized real credentials were available; see limitations |
 
 `demo:recovery` is a source-tree command: `scripts/` is deliberately not in `package.json` `files`,
-so it runs from a repository checkout, like `test`, `lint` and `pack:smoke`. It was run three times
-on three independent invocations with identical results — twice standalone and once as the last
-step of the standard battery recorded above.
+so it runs from a repository checkout, like `test`, `lint` and `pack:smoke`. It was run repeatedly
+at the round's final commits — including once as the last step of each platform battery recorded
+above, in the Linux container on both Node versions — and printed the same three `OK` lines and
+`ALL THREE DEMOS OK` every time. It also asserts its own negative evidence: each demo reads the
+fake peer's POST and applied counters and fails if any step it was not allowed to re-send was
+re-sent.
 
 Tool surface after this round: **18 tools** (14 read/preview tools plus
 `get_garmin_calendar`, `get_garmin_write_operation`, `reconcile_garmin_write_operation`,
@@ -153,6 +161,24 @@ What the continuation round added, each backed by committed tests:
   which is the false green; removing identity and size and leaving bytes alone still passed all
   51 tests in the suite, so the byte check alone carries the guarantee and the identity pair and
   size are defence in depth. `STATE_CORRUPT` and `not_applied` are unchanged.
+- **The write-dispatch scan is pinned as a test, not left as a one-off grep.** C10 required every
+  write call in `src/` to be enumerated and justified. A manual grep in a report has no hold on
+  the next commit, so the enumeration is committed as `tests/write-path-inventory.test.ts`, which
+  fails if an unreviewed dispatch point appears. It asserts that every transport-verb call
+  (`addWorkout`, `scheduleWorkout`, `unscheduleWorkout`) and every coordinator writer-verb call
+  (`addWorkout`, `schedule`, `unschedule`) is made on a receiver that has been reviewed; that
+  inside `src/tool-service.ts` the receiver is one of `writeCoordinator`, `resumeWriter`,
+  `createWorkout`, `createAndScheduleWorkout`, `unscheduleWorkout`; that `src/mcp.ts` never
+  touches `.client`; and that the remaining `src` files contain no write dispatch at all. The
+  inventory is pinned by name and receiver, not by count or line number, so a new write path has
+  to be reviewed rather than merely make a number move. The recorded inventory: `src/mcp.ts` has
+  two facade calls (`:412` `service.scheduleWorkout`, `:474` `service.unscheduleWorkout`) and zero
+  `.client` references; `src/tool-service.ts` has eight `this.client.<verb>` sites, each inside a
+  reviewed window (`:654`, `:1024`, `:1370`, `:1372`, `:1495`, `:1731`, `:1738`, `:1742`); and
+  `src/write-operations/coordinator.ts` has four (`:1479`, `:2226`, `:2262`, `:2284`). A mutation
+  proof was run and reverted: injecting an extra `this.client.scheduleWorkout(...)` into the
+  `batchScheduleWorkouts` handler made the guard fail on exactly that new site, and restoring the
+  file returned it byte-for-byte to the committed version with the guard green again.
 
 **Not verified — stated as gaps, not as scope exclusions.**
 
@@ -190,35 +216,37 @@ process model or permission semantics: `session-store`, `session-store-write`, `
 `index`, `darwin-private-acl`, `stdio-protocol`, `write-stdio-recovery`, `write-operation-lock`,
 `write-state-security`, `write-operation-store` and `write-operation-migration`.
 
-**macOS arm64 (darwin), Node v25.2.1.** Run in two batches on the host; both exited 0:
-6 suites / 55 tests, then 6 suites / 134 tests — 12 suites / 189 tests in total. The second batch
-is one test larger than the pre-fix count because the inode-reuse regression test was added.
+**macOS arm64 (darwin), Node v25.2.1.** Run in two batches on the host at `3a82e4f`; both exited
+0: 6 suites / 55 tests, then 6 suites / 134 tests — 12 suites / 189 tests in total. The second
+batch is one test larger than the pre-fix count because the inode-reuse regression test was added.
 
-**Linux aarch64, container `arm64v8/ubuntu:22.04`, kernel `6.12.76-linuxkit`.** Exported with
-`git archive ff128b6` into a tree carrying neither `node_modules` nor `.git`, so `npm ci` is a
-genuine clean install. Node 20 and Node 22 were run serially, to remove CPU contention as a
-source of lock-test flakiness.
+**Linux aarch64, container `arm64v8/ubuntu:22.04`, kernel `6.12.76-linuxkit`, Ubuntu 22.04.5 LTS.**
+Exported with `git archive 3a82e4f` into a tree carrying neither `node_modules` nor `.git`, so
+`npm ci` is a genuine clean install. Node 20 and Node 22 were run serially, to remove CPU
+contention as a source of lock-test flakiness.
 
-| Command | Node v20.19.5 / npm 10.8.2 | Node v22.22.2 |
+| Command | Node v20.19.5 / npm 10.8.2 | Node v22.22.2 / npm 10.9.7 |
 | --- | --- | --- |
 | `npm ci` | exit 0 | exit 0 |
 | `npm run lint` | exit 0, 0 warnings | exit 0, 0 warnings |
-| `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests, 1137 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
-| `npm run test:coverage` | exit 0. All files 87.15% statements / 77.45% branches / 87.2% functions / 89.75% lines | exit 0, same figures |
+| `npm test -- --runInBand` | exit 0, 58 suites / 1143 tests, 1142 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
+| `npm run test:coverage` | exit 0. All files 87.15% statements / 77.45% branches / 87.20% functions / 89.75% lines; `src/write-operations` 85.32 / 72.62 / 87.30 / 87.71 | exit 0, same figures |
 | `npm run build` | exit 0 | exit 0 |
-| `npm run pack:smoke` | exit 0, 203 files, `"audit": "passed"` | exit 0, same figures |
+| `npm run pack:smoke` | exit 0, 204 files, `"audit": "passed"` | exit 0, same figures |
 | `npm run test:distribution` | exit 0, `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` | exit 0, same figures |
+| `npm run demo:recovery` | exit 0, `DEMO 1 OK` / `DEMO 2 OK` / `DEMO 3 OK` / `ALL THREE DEMOS OK` | exit 0, same figures |
 
-The container coverage figures are lower than the macOS host figures (87.15 / 77.45 / 87.2 / 89.75
-against 87.29 / 77.59 / 87.44 / 89.92) because platform-conditional branches differ per host.
-Both sets clear every configured gate.
+The container coverage figures are lower than the macOS host figures (87.15 / 77.45 / 87.20 / 89.75
+against 87.29 / 77.59 / 87.44 / 89.92) because platform-conditional branches differ per host — the
+affected counter is `src/write-operations` branches, 72.62 on Linux against 72.73 on macOS. Every
+set clears every configured gate, and nothing here is an average across hosts.
 
 **What this battery found.** Before the fix, the Linux Node 20 run aborted at
 `tests/write-state-security.test.ts:613`, `refuses to treat a different inode as the file it
 committed`. That was a genuine product defect on Linux, not a test artifact, and it is described
 in the continuation-round list above. After the fix, both Node versions complete the whole
-command set with exit 0. The macOS host never failed this case, which is exactly why the defect
-shipped.
+command set with exit 0, including the three demos. The macOS host never failed this case, which
+is exactly why the defect shipped.
 
 **Channel caveat.** Node in the container is the official `linux-arm64` tarball, mounted
 read-only and prepended to `PATH`, on an `arm64v8/ubuntu:22.04` base image. This exercises real
@@ -307,7 +335,7 @@ so the macOS and Windows jobs also run the write journal, account lock, migratio
 private-state and stdio recovery suites; the extension has been verified on macOS
 locally and has **not** been run on a Windows or Linux runner for any commit of this
 round. No push was performed either, so the commits it reports —
-`e091d1b` through `2f40cce`, the final commit — have no CI result at all. The Linux,
+`e091d1b` through `3a82e4f`, the final commit — have no CI result at all. The Linux,
 macOS and Windows platform claims in this report rest on the local and container
 evidence described in the platform section above, not on CI.
 

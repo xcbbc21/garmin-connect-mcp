@@ -5,7 +5,7 @@
 
 本地提交：`08ac0f3`、`6268be7`、`2934d5f`、`a527c7e`，**已推送**至 `origin/main`，远端 HEAD = `a527c7e`。
 
-> ## ⚠ 续修更新（2026-09-12，代码状态截至 `ff128b6`，最终提交 `2f40cce`）
+> ## ⚠ 续修更新（2026-09-12，代码状态截至 `ff128b6`，最终提交 `3a82e4f`）
 >
 > **本文件 §0–§8 是第一轮（`a527c7e`）的历史快照，其中多行已被续修推翻。** 保留原文以便追溯，
 > 但**不得**把下面的判断当作当前状态：
@@ -21,7 +21,7 @@
 > | "日志无归档，32 MiB 上限后拒写" | 仍成立（限制条款未改） |
 > | "文档：完成" | **当时即不成立**——文档同时存在"已完成"与"未实现"两种口径；续修已按实际状态统一 |
 > | **§8 "下一批"第 1、2 条** | 均**已完成**：CI 平台作业已接入 journal/lock/migration/private-state/stdio 恢复用例；3 个工具的协调器托管与 5 工具 `idempotencyKey` 已落地（后者含参数层修复） |
-> | "三平台验证：仅 macOS；Linux/Windows 未跑，CI 也未接入新用例" | CI 平台作业**已接入**并覆盖上述恢复用例。**实测结果：** macOS 本机 12 套件 / 189 用例（两批：6/55 + 6/134）exit 0；Linux `arm64v8/ubuntu:22.04` 容器上 Node 20 与 Node 22 各自跑完整 7 条命令全部 exit 0（该电池正是发现 inode 回收缺陷的通道）；**Windows 本机无执行能力，仍未实测**。逐项数字与通道差异见 `docs/verification.md` 的 "Platform results, continuation round" 一节 |
+> | "三平台验证：仅 macOS；Linux/Windows 未跑，CI 也未接入新用例" | CI 平台作业**已接入**并覆盖上述恢复用例。**实测结果（全部在最终提交 `3a82e4f` 上重测）：** macOS 本机完整套件 58 套件 / 1143 用例（1143 通过、0 跳过）exit 0，平台电池 12 套件 / 189 用例（两批：6/55 + 6/134）exit 0；Linux `arm64v8/ubuntu:22.04` 容器上 Node 20 与 Node 22 各自跑完整 **8 条命令**（含 `npm run demo:recovery`）全部 exit 0，完整套件 58 套件 / 1143 用例（1142 通过、1 跳过 = macOS-only 的 ACL 用例）。**Windows 本机无执行能力，仍未实测**。逐项数字与通道差异见 `docs/verification.md` 的 "Platform results, continuation round" 一节 |
 > | **§7「三段可复现演示」列的三条 `jest -t` 命令** | 三条用例仍在且仍通过，但演示已升级为**可运行脚本** `npm run demo:recovery`（真实 MCP 子进程 + 进程外 fake Garmin 对端驱动，三段各打印断言证据，末行 `ALL THREE DEMOS OK`）。见 §7 之后的续修小节 |
 >
 > 续修逐项状态、真实命令结果与证据边界以 `docs/calendar-write-recovery.md` 与
