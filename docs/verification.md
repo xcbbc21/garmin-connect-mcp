@@ -88,7 +88,7 @@ macOS-only: `refuses a journal carrying a granting macOS ACL` runs only where `c
 | Runtime-only distribution install | `npm run test:distribution` | exit 0 on every host and tree. `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` |
 | Three required demos, end to end | `npm run demo:recovery` (`build` + `tsx scripts/demo-write-recovery.ts`) | exit 0 on all three hosts, printing `DEMO 1 OK`, `DEMO 2 OK`, `DEMO 3 OK`, `ALL THREE DEMOS OK`. Real MCP children against the out-of-process fake Garmin peer; each demo has its own peer. See `docs/calendar-write-delivery.md` §7b |
 | macOS write-state platform battery | `npx jest --runInBand` on the cross-platform write-state set, two batches | exit 0, 12 suites / 189 tests (6 suites / 55 tests, then 6 suites / 134 tests) |
-| Linux write-state platform battery, Node 20 | `arm64v8/ubuntu:22.04` container, official linux-arm64 Node tarballs, full command set | exit 0, all eight commands. See the platform section below |
+| Linux write-state platform battery, Node 20 | `arm64v8/ubuntu:22.04` container, official linux-arm64 Node tarballs, full command set | exit 0, all eight commands. See the platform section below, which also carries the delivered commit's re-run on the official `node:20` / `node:22` images |
 | Linux write-state platform battery, Node 22 | same container and channel | exit 0, all eight commands. See the platform section below |
 | Windows write-state platform battery | — | **not run** — no Windows host is available here; see limitations |
 | Live account integration | `npm run test:integration` | **not run** — no authorized real credentials were available; see limitations |
@@ -287,12 +287,16 @@ What the continuation round added, each backed by committed tests:
   run for this commit, so native DACL enforcement, atomic rename semantics and subprocess lock
   release on NTFS remain unverified here. This is a missing external evidence source, not a
   scope exclusion.
-- **Linux is verified in a container, and the channel is not the official Node image.** Both
-  Node 20 and Node 22 pass the full command set on a real Linux/aarch64 kernel, libc and
-  filesystem, but Node is delivered as the official `linux-arm64` tarball mounted read-only
-  onto an `arm64v8/ubuntu:22.04` image rather than as the official `node:20` / `node:22` images.
-  The results are therefore not interchangeable with a run on those images or on the CI runner
-  image. The exact results and this caveat are restated in the platform section below.
+- **Linux is verified in a container, not on the CI runner.** Both Node 20 and Node 22 pass the
+  full command set on a real Linux/aarch64 kernel, libc and filesystem, and the delivered commit
+  was re-run on the **official `node:20` and `node:22` images** (see the platform section below),
+  so the earlier objection about a hand-mounted tarball no longer applies to it. What still
+  differs from CI is the runner: an arm64 Docker Desktop container on macOS rather than a
+  GitHub-hosted `ubuntu-latest` x64 VM. The results are therefore not interchangeable with a CI
+  job, and no CI job has run for this round.
+- **CI has no result for this round.** None of the 28 commits between `a527c7e` and `73e16a2` has
+  been pushed, so the Linux, macOS and Windows jobs all lack a run. Nothing in this file should be
+  read as a green pipeline.
 - Deleting the state directory still removes the only record preventing duplicate scheduling;
   a journal with no archive refuses writes past 32 MiB.
 - The same inode-identity weakness that was fixed in the journal store still exists in
@@ -322,7 +326,9 @@ run in two batches at `3a82e4f`; both exited 0: 6 suites / 55 tests, then
 6 suites / 134 tests — 12 suites / 189 tests in total. The second batch is one test
 larger than the pre-fix count because the inode-reuse regression test was added.
 
-**Linux aarch64, container `arm64v8/ubuntu:22.04`, kernel `6.12.76-linuxkit`, Ubuntu 22.04.5 LTS.**
+### Linux, probe-repair commit `90ae9a8`
+
+**Channel: mounted Node tarball on `arm64v8/ubuntu:22.04`, kernel `6.12.76-linuxkit`, Ubuntu 22.04.5 LTS.**
 Exported with `git archive 90ae9a8` into a tree carrying neither `node_modules` nor `.git`, so
 `npm ci` is a genuine clean install. Node 20 and Node 22 were run serially, to remove CPU
 contention as a source of lock-test flakiness. `npm run build` is an explicit step in this battery
@@ -344,19 +350,17 @@ The container coverage figures are lower than the macOS host figures (87.59 / 78
 against 87.73 / 78.13 / 88.08 / 90.33) because platform-conditional branches differ per host.
 Every set clears every configured gate, and nothing here is an average across hosts.
 
-These Linux rows are the only ones in this section measured at `90ae9a8` rather than `3a82e4f`;
-no file under `src/` differs between those commits, which is why the two sets agree apart from the
-platform-conditional rows. Against the previous battery at `6bc16d6`, the whole coverage delta is
-one row: `src/index.ts` functions moved 0% → 16.66%, because the probe's tests reach
-`CalendarCapabilityError` / `CALENDAR_WARNING_CODES` through the package entry point and so
-exercise a re-export wrapper there. Every other row of the coverage table is identical, so this is
-a reported change in one counter and not a general drift in the figures.
+The rows in the table directly above are the ones measured at `90ae9a8` rather than at `3a82e4f` or
+`73e16a2`; no file under `src/` differs between `90ae9a8` and `3a82e4f`, which is why those two sets
+agree apart from the platform-conditional rows. Against the previous battery at `6bc16d6`, the whole
+coverage delta is one row: `src/index.ts` functions moved 0% → 16.66%, because the probe's tests
+reach `CalendarCapabilityError` / `CALENDAR_WARNING_CODES` through the package entry point and so
+exercise a re-export wrapper there. Every other row of the coverage table is identical, so this is a
+reported change in one counter and not a general drift in the figures.
 
 The battery above was exported from `90ae9a8`. The delivered commit is later than that export by
 documentation and one test comment, and by nothing under `src/` — `git diff --stat 90ae9a8..HEAD
--- src/` is one of the mechanical checks recorded with the round. The host rows were re-measured at
-the delivered commit afterwards and reproduce the same figures, so the numbers here describe the
-delivered tree rather than only its export.
+-- src/` is one of the mechanical checks recorded with the round.
 
 **What this battery found.** Before the fix, the Linux Node 20 run aborted at
 `tests/write-state-security.test.ts:613`, `refuses to treat a different inode as the file it
@@ -370,13 +374,69 @@ is guarded to darwin because it exercises a real POSIX ACL through `/bin/chmod +
 does not provide. The macOS host runs it, so the ACL path is exercised on exactly one platform and
 skipped on the other rather than mocked on either.
 
-**Channel caveat.** Node in the container is the official `linux-arm64` tarball, mounted
-read-only and prepended to `PATH`, on an `arm64v8/ubuntu:22.04` base image. This exercises real
-POSIX semantics on a real Linux kernel, but it is neither the official `node:20` / `node:22`
-image nor the CI runner image, and it must not be read as equivalent to either.
+### Linux, delivered commit `73e16a2`
 
-**Windows.** Not run. No Windows host or runner was available for this commit, so DACL
-enforcement, atomic rename behaviour on NTFS and subprocess lock release remain unverified here.
+This run replaces the tarball channel described above with the **official `node:20` / `node:22`
+images pulled from Docker Hub** (`node@sha256:8f693eaa7e0a…` and `node@sha256:8a34c4ab3ea2…`,
+`linux/arm64`, Debian GNU/Linux 12 "bookworm"), which is a materially closer analogue of the
+`ubuntu-latest` + `actions/setup-node` runner the CI matrix uses. The tree came from
+`git archive 73e16a2` — no `node_modules`, no `.git` — so `npm ci` is again a genuine clean
+install, and the two Node versions ran serially. The step list mirrors `.github/workflows/ci.yml`
+and adds an explicit `npm run build`.
+
+| Command | Node v20.20.2 / npm 10.8.2 | Node v22.23.2 / npm 10.9.8 |
+| --- | --- | --- |
+| `npm ci` | exit 0 | exit 0 |
+| `npm run build` (`clean` + `tsc`) | exit 0 | exit 0 |
+| `npm run lint` | exit 0, 0 warnings | exit 0, 0 warnings |
+| `npm test -- --runInBand` | exit 0, 59 suites / 1215 tests, 1214 passed, 1 skipped (macOS-ACL test) | exit 0, same figures |
+| `npm run test:coverage` | exit 0. All files 87.59% / 78.01% / 87.84% / 90.16%; `src/write-operations` 86.52% / 74.28% / 87.93% / 88.79% | exit 0, same figures |
+| `npm run pack:smoke` | exit 0, 204 files, `"audit": "passed"` | exit 0, same figures |
+| `npm run test:distribution` | exit 0, `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` | exit 0, same figures |
+| `npm run demo:recovery` | exit 0, `DEMO 1 OK` / `DEMO 2 OK` / `DEMO 3 OK` / `ALL THREE DEMOS OK` | exit 0, same figures |
+
+Both Node versions produce **identical** figures, including the 1215-test count, so the delivered
+commit's Linux result does not depend on the Node minor in the matrix. Against the `90ae9a8`
+battery the coverage percentages are unchanged to two decimals on every row; the test count is 10
+higher, which is exactly the 3 corrupted-journal tool-path cases, the reversed-order history case
+and the 6 lock cases added after that export. `src/write-operations` branches are 74.28 here
+against 74.39 on the macOS host — one platform-conditional branch, and every counter still clears
+every configured gate (75 / 70 / 65 / 78).
+
+Logs: `/tmp/c27-linux-node20.log`, `/tmp/c27-linux-node22.log`; driver `/tmp/c27-linux.sh`
+(`COMMIT=73e16a2`).
+
+**Channel caveat, corrected.** The earlier caveat — that the container was neither the official
+`node:20` / `node:22` image nor the CI runner image — applies to the `90ae9a8` battery, not to
+this one. This run **is** on the official Node images, which removes that objection for the
+delivered commit. What still differs from CI is the runner: an arm64 Docker Desktop container on
+macOS, not a GitHub-hosted `ubuntu-latest` x64 VM, with no `actions/setup-node` cache restore and
+no checkout action. Those rows are still not evidence of a green CI run; CI has not run for any
+commit in this round (see the end of this section).
+
+**CI.** Not run for this round. None of the 28 commits between `a527c7e` and `73e16a2` has been
+pushed, so no GitHub Actions run exists for any of them: the Linux Node 20/22 build-and-test jobs,
+both `platform-runtime` jobs (macOS and Windows) and their packed-runtime install step all have no
+result. The Linux rows above are local container runs on this machine, not CI jobs, and must not be
+read as a green pipeline. Pushing to trigger CI is a separate decision that has not been taken.
+
+**Windows.** Not run. No Windows host or runner was available for this commit, and the Windows CI
+job has no result either, so real DACL enforcement, atomic rename behaviour on NTFS and subprocess
+lock-worker spawn and exit remain unverified on Windows. It matters that this is stated precisely,
+because two different kinds of coverage exist here and only one of them is Windows evidence:
+
+- `tests/windows-acl-adapter.test.ts` is **adapter-contract** coverage. It drives the ACL adapter
+  with `jest.mock('node:child_process')`, so it asserts which commands and validation the adapter
+  builds and how it reacts to their outputs. It executes no real PowerShell/.NET call, no real
+  DACL, and no Windows filesystem operation, and it runs on macOS. It is not DACL verification.
+- `tests/write-operation-lock.test.ts`, `tests/write-state-security.test.ts` and the stdio suites
+  spawn **real** child processes against the **real** filesystem, but they have only ever run on
+  macOS and Linux.
+
+`windows-private-acl.ts:332` also has one permanently uncovered branch: the default value of
+`windowsCommandOptions`'s `allowMissing` parameter has no call path that takes the default, so it
+cannot be reached by any current test. That is recorded in the commit message for the round rather
+than papered over with a call added only to cover it.
 
 Details, per-tool behaviour and evidence boundaries:
 [docs/calendar-write-recovery.md](calendar-write-recovery.md),

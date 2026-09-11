@@ -71,6 +71,21 @@ All notable changes to this project will be documented in this file.
   the handle after the write and compares the landed bytes with the payload, keeping the
   identity pair and the size as cheap pre-signals. Found by the Linux platform battery —
   macOS/APFS allocates a fresh inode, so the host battery stayed green.
+- A write authorization read only the one journal record it happened to reach first for a
+  workout and date, in stored order, so an older `prepared`, `not_attempted` or `failed`
+  record could stand in front of a newer unresolved attempt for the same target and let a
+  duplicate dispatch through. Every record sharing the business key is now reduced to a single
+  verdict in priority order — unresolved (`in_flight` / `unknown`) outranks a satisfied receipt,
+  which outranks a retryable outcome — so neither of the two insertion orders can authorize a
+  second write. Preview and execute consult the same function, so there is no second precedence
+  list to drift.
+- The lock-contention test used to sleep 250 ms and assume the competing process had reached
+  the lock. The worker fixture now reports `ready` before it contends and `start` from inside
+  the critical section, the test waits for that event, and any unexpected exit — uncaught
+  error, `SIGINT`/`SIGTERM`/`SIGHUP`, watchdog expiry or a parent-side timeout — fails the test
+  with the child's captured stderr instead of silently leaving a claim that was never proven.
+  The stderr is passed through the same redaction as upstream logs, and the fixture echoes its
+  own arguments so that redaction is falsifiable rather than merely asserted.
 
 ### Known limitations
 - Calendar reads and writes are exercised only against the simulated Garmin service. No live

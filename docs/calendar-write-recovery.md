@@ -311,13 +311,15 @@ concurrently. Keep one writer per state root.
   handle's `fstat` immediately afterwards, and anyone able to write into the private state
   directory could already produce a schema-valid journal. Recorded as a residual risk, not as a
   verified absence of one.
-- **Platform coverage is uneven.** macOS arm64 is verified on the host (full suite 58 suites /
-  1143 tests, all passing; 12 write-state suites / 189 tests in the targeted battery). Linux
-  aarch64 is verified in a container only, and on a channel that mounts the official
-  `linux-arm64` Node tarball onto an `arm64v8/ubuntu:22.04` image rather than using the official
-  `node:20` / `node:22` images — real POSIX semantics, but not the CI runner image. Both Linux
-  Node versions run the full command set with exit 0, including the three recovery demos; on
-  Linux one test is skipped, the macOS-only `chmod +a` ACL case.
+- **Platform coverage is uneven.** macOS arm64 is verified on the host (full suite 59 suites /
+  1215 tests, 1215 passing, 0 skipped). Linux aarch64 is verified in a container, and the
+  delivered commit was run on the official `node:20` and `node:22` images: both Node versions run
+  the full command set with exit 0, including the three recovery demos, at 59 suites / 1215 tests
+  with one skip — the macOS-only `chmod +a` ACL case. What is still not the same as CI is the
+  runner, an arm64 Docker Desktop container rather than a GitHub-hosted `ubuntu-latest` x64 VM, and
+  no CI job has run for this round because it has not been pushed.
   **Windows is not verified at all** for this commit: no Windows host or runner was available,
-  so DACL enforcement, NTFS atomic rename and subprocess lock release are untested. See
-  `docs/verification.md`, "Platform results, continuation round".
+  so DACL enforcement, NTFS atomic rename and subprocess lock release are untested.
+  `tests/windows-acl-adapter.test.ts` is adapter-contract coverage with a mocked
+  `node:child_process` and is not DACL verification. See `docs/verification.md`, "Platform
+  results, continuation round".
