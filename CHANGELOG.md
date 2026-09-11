@@ -6,11 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - Account-scoped local write journal (`GARMIN_STATE_DIR`, default
-  `<platform config root>/garmin-connect-mcp/state`) that records a Calendar scheduling
-  attempt before it is sent, so an uncertain write is recoverable without being replayed.
+  `<platform config root>/garmin-connect-mcp/state`) that records every write phase before it
+  is sent, so an uncertain write is recoverable without being replayed. It now covers all five
+  write tools: `create_garmin_workout`, `schedule_garmin_workout`,
+  `batch_schedule_garmin_workouts`, `create_and_schedule_garmin_workout` and
+  `unschedule_garmin_workout`.
 - Account-level cross-process write lock with an owner token, a bounded wait and no
-  time-based preemption.
-- Optional `idempotencyKey` on `schedule_garmin_workout` and `batch_schedule_garmin_workouts`.
+  time-based preemption. A refused exclusive create counts as contention evidence; every other
+  acquisition failure stays fail-closed.
+- Automatic in-lock migration of version 1 journals to version 2: plaintext idempotency keys
+  become salted hashes, the dedupe index is rebuilt, and ambiguous duplicate bindings are
+  quarantined for manual review rather than silently rebound. A corrupt journal reports
+  `STATE_CORRUPT` and sends nothing.
+- Optional `idempotencyKey` on all five write tools, reachable through the MCP parameter layer.
+- `get_garmin_calendar` for reading a bounded Calendar date range, with an explicit `complete`
+  flag and a `CALENDAR_QUERY_UNSUPPORTED` failure instead of a fabricated empty Calendar.
+- `get_garmin_write_operation`, `reconcile_garmin_write_operation` and
+  `resume_garmin_write_operation` for reading the durable record, re-reading Garmin inside a
+  fixed budget, and re-dispatching only the steps that were never sent.
 - Structured write results: `status`, `action`, `operationId`, `evidence`,
   `desiredStateSatisfied`, `canResume`, `manualReviewRequired`, `errorCode`, `nextAction`;
   batch adds `skippedCount`, `unknownCount`, `notAttemptedCount` and `definiteFailureCount`.
@@ -18,23 +31,50 @@ All notable changes to this project will be documented in this file.
   `docs/calendar-write-delivery.md`.
 
 ### Changed
-- A repeated workout/date is now skipped when Garmin already has it, and blocked when an
-  earlier write for the same workout and date has an unknown outcome. A new preview, a
-  different idempotency key, a restart or a concurrent caller cannot bypass the block.
+- The server exposes 18 tools. The previous 14 names, required arguments and success fields
+  are unchanged; the additions are a Calendar read plus the three inspection/recovery tools.
+- A repeated workout/date is now skipped when the Calendar read already shows that entry, and
+  blocked when an earlier write for the same workout and date has an unknown outcome. A new
+  preview, a different idempotency key, a restart or a concurrent caller cannot bypass the
+  block. The guarantee is local: it covers the machines that share one `GARMIN_STATE_DIR`, and
+  Garmin exposes no server-side idempotency.
 - A write timeout returns a durable `unknown` receipt with an `operationId` instead of a bare
-  failure. Calendar writes are never automatically retried.
+  failure. Calendar writes are never automatically retried, and `reconcile` records evidence
+  without rewriting `status`.
 - `in_flight` is persisted before the single dispatch; if that persistence fails, nothing is
   sent. Only `prepared` steps may dispatch, so a superseded preview cannot add a write.
 - Batch entries report their own status; legacy `failureCount` is documented as
   "not confirmed complete" rather than "definitely failed".
-- Documented that the SDK has no Calendar scheduling or range-query capability: scheduling is
-  a project-owned adapter over unofficial endpoints, and no calendar range query exists, so
-  absence can never be proven.
+- A `confirmationId` is now `<operationId>:<previewRevision>`. The revision and its deadline
+  are stored with the operation, so an unexpired handle still resolves after a restart, and
+  re-previewing invalidates every earlier handle.
+- Documented that the SDK has no Calendar scheduling or range-query capability: both are
+  project-owned adapters over unofficial endpoints, and no live response from either has been
+  captured yet.
 
-### Not yet covered
-- `create_garmin_workout`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout`
-  are not journal-backed. Calendar range query, reconcile/resume and the four planned
-  inspection/recovery tools are not implemented.
+### Fixed
+- The journal commit proof verified only `dev:ino`, which is not sound on Linux: POSIX hands
+  the number of a just-unlinked inode straight back to the next create, so removing the
+  committed name and writing a same-length file reproduced the pair exactly and the store
+  accepted a journal this process never wrote. `assertLandedFile` now settles the size from
+  the handle after the write and compares the landed bytes with the payload, keeping the
+  identity pair and the size as cheap pre-signals. Found by the Linux platform battery —
+  macOS/APFS allocates a fresh inode, so the host battery stayed green.
+
+### Known limitations
+- Calendar reads and writes are exercised only against the simulated Garmin service. No live
+  response from the real endpoints has been captured, so a Calendar read cannot prove absence
+  and the adapter's field mapping remains unconfirmed against the service.
+- Deleting the state directory removes the only record that prevents duplicate scheduling; a
+  journal with no archive refuses new writes past 32 MiB.
+- The macOS and Windows jobs in CI carry the journal, lock, migration, state and stdio
+  recovery suites but have not been run for this revision. Windows DACL and NTFS rename
+  behaviour remain unverified here.
+- Inode-based change detection (`assertSameFileSystemEntry` in `src/private-path.ts`) is
+  shared with the session-token state path and keeps the same recycling weakness. It is not
+  the commit proof: the properties it guards are re-asserted from the open handle afterwards,
+  and an actor who can write inside the private state directory can author a schema-valid
+  journal directly.
 
 ## [0.2.0] - 2026-09-10
 

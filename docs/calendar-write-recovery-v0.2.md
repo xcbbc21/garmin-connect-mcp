@@ -1,5 +1,19 @@
 # Calendar Write Recovery v0.2 — Migration and Use Guide
 
+> **Historical note (superseded).** This is the design note written while the 0.2 recovery
+> work was still scoped to a single journal version and one new tool. It is kept for the
+> record and is **not** a description of the shipped behaviour. Three of its statements have
+> since been overtaken:
+>
+> | This document says | The shipped revision does |
+> | --- | --- |
+> | "Calendar reads … Deferred; tools unchanged" | `get_garmin_calendar` exists and reads a bounded date range |
+> | "The on-disk format is unchanged for v1.0 … the plaintext field is harmless to leave in place" | journals migrate from v1 to v2 automatically under the account lock; the plaintext key becomes a salted hash and is not retained |
+> | "Public MCP tool names: 15 (was 14)" | 18 tools |
+>
+> For the current contract read `docs/calendar-write-recovery.md`,
+> `docs/calendar-api-verification.md` and `docs/migration.md`.
+
 This document covers what changed in 0.2 for the calendar-write safety
 guarantees, how to migrate from 0.1.x, and how to use the new
 `get_garmin_write_operation` tool to recover from interruptions.
@@ -41,10 +55,13 @@ without the field).
    (status `unknown` or `in_flight`).
 
 3. Re-confirm or pause:
-   - If you want to retry, call `get_garmin_write_operation` again with
-     the same `idempotencyKey` (or just re-call the original write tool)
-     to get a fresh preview. The new confirmationId is bound to the
-     advanced `previewRevision`.
+   - **Correction (superseded guidance):** do **not** re-call the original write tool to
+     "retry" a step whose outcome is unknown — that is exactly the duplicate dispatch the
+     journal exists to prevent. Use `reconcile_garmin_write_operation` to record what Garmin
+     currently shows, then `resume_garmin_write_operation`, which re-arms only the steps that
+     were never dispatched. For a step that is merely `prepared` (never sent), a fresh preview
+     with the same `idempotencyKey` is legitimate: it advances `previewRevision` and issues a
+     new `confirmationId`, invalidating every earlier handle.
    - If you want to abandon, do nothing: the operation stays in
      `unknown` until you explicitly resolve it.
 

@@ -4,11 +4,14 @@ Verification started 2026-09-10; final clean-install rerun 2026-09-11.
 Local environment: macOS arm64, Node v25.2.1, npm 11.19.0.
 This report covers the standalone refactor against baseline commit `52b67cd`.
 
-## Calendar write-safety increment (2026-09-11)
+## Calendar write-safety increment, first round (2026-09-11)
 
-Verified against baseline `67f5ec9` on macOS arm64, Node v22.22.2, npm 10.9.7.
+This subsection is the report of the **first** round only. It was verified against baseline
+`67f5ec9` on macOS arm64, Node v22.22.2, npm 10.9.7, and its numbers are retained as history;
+they are not the current result. The continuation round below supersedes every row whose
+status changed.
 
-| Check | Result |
+| Check | Result (at `67f5ec9`) |
 | --- | --- |
 | Full suite | 41 suites / 847 tests passed |
 | Coverage with all gates | Passed. All files 87.03% statements / 78.81% branches / 87.16% functions / 89.83% lines (gates 75/70/65/78). `src/write-operations` 88.22 / 71.25 / 87.27 / 89.44 |
@@ -23,21 +26,201 @@ Verified against baseline `67f5ec9` on macOS arm64, Node v22.22.2, npm 10.9.7.
 | Supersession | A widened second preview demoted the first to `not_attempted`; confirming it dispatched nothing |
 | stdio child process | Preview, confirmed write, replay rejection and post-write dedup passed through the built server |
 
-**Not verified.** No real Garmin account was contacted; no live schedule, cancellation or
-watch sync was performed. Linux and Windows were not exercised, so atomic-rename semantics,
-private ACLs and subprocess lock release on those platforms remain unverified. The packaged
-build (`npm run build`) could not run in this environment because its `clean` step is refused
-by a bulk-delete guard; `npx tsc` was used instead, so CI remains the authority for the
-packaged artifact. `npm run test:integration` was not run.
+Two claims that this first round made about the environment and the scope turned out to be
+wrong, and are corrected here rather than left standing:
 
-**Deliberately not implemented.** Calendar range query, reconcile/resume and the four planned
-inspection/recovery tools. Because no verified calendar range endpoint exists, absence can
-never be proven, so the coordinator never clears a business key from an empty read and an
-`unknown` write blocks its workout/date permanently. Details and evidence boundaries:
+- **`npm run build` was reported as unrunnable** because its `clean` step was refused by a
+  bulk-delete guard. That was an artifact of the shell used at the time, not of the project.
+  `npm run build`, `npm run pack:smoke` and `npm run test:distribution` all complete
+  successfully in the continuation round (see below), so the packaged artifact no longer
+  depends on CI alone.
+- **"Deliberately not implemented" was wrong.** Calendar range query, reconcile and resume were
+  not an accepted scope exclusion; they were unfinished work. The continuation round
+  implemented them.
+
+## Calendar write-safety and recovery, continuation round (2026-09-12)
+
+Verified at commit `ff128b6`, baselines for comparison `e091d1b` (round start) and `ede191f`
+(the commit this report previously described; `ff128b6` supersedes it). Local environment:
+macOS arm64 (darwin), Node v25.2.1, npm 11.19.0. Every command below was run from a clean
+`npm ci` install on this machine, in this order, with no pre-script bypassed.
+
+The packaged-artifact rows are reported **per measured tree**, because the two trees differ by
+one file and are not interchangeable: the macOS rows were measured on the release tree — commit
+`ff128b6`'s source plus the documentation update that adds this section, which is also the change
+that adds `docs/calendar-write-delivery.md` to `package.json` `files` — while the Linux rows were
+measured on a clean `git archive ff128b6` export, whose `package.json` predates that addition.
+Source-level results (`lint`, `test`, coverage, `build`) are identical on both because no source
+file differs. Exact packed byte totals move whenever any shipped document changes, including this
+one; the stable audited properties are that every required document is present, the file count is
+204 on the release tree, and no forbidden content is included.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Clean install | `npm ci` | exit 0 |
+| Lint | `npm run lint` | exit 0, 0 warnings |
+| Full suite | `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests (1137 passed, 1 skipped) |
+| Coverage with all gates | `npm run test:coverage` | exit 0. All files 87.29% statements / 77.59% branches / 87.44% functions / 89.92% lines (gates 75/70/65/78). `src/write-operations` 85.32 / 72.73 / 87.30 / 87.71; `src/calendar` 96.69 / 93.42 / 97.50 / 98.06 |
+| Packaged build | `npm run build` (`clean` + `tsc`) | exit 0 |
+| Package content audit (release tree) | `npm run pack:smoke` | exit 0. 204 files, 445,869 B packed, 1,921,108 B unpacked, `"audit": "passed"`; no `src`, `tests`, `node_modules`, session or journal content |
+| Package content audit (clean `git archive ff128b6`) | `npm run pack:smoke` | exit 0. 203 files, 426,608 B packed, 1,868,038 B unpacked, `"audit": "passed"` |
+| Runtime-only distribution install | `npm run test:distribution` | exit 0 on both trees. `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` |
+| macOS write-state platform battery | `npx jest --runInBand` on the cross-platform write-state set, two batches | exit 0, 12 suites / 189 tests (6 suites / 55 tests, then 6 suites / 134 tests) |
+| Linux write-state platform battery, Node 20 | `arm64v8/ubuntu:22.04` container, official linux-arm64 Node tarballs, full command set | exit 0, all seven commands. See the platform section below |
+| Linux write-state platform battery, Node 22 | same container and channel | exit 0, all seven commands. See the platform section below |
+| Windows write-state platform battery | — | **not run** — no Windows host is available here; see limitations |
+| Live account integration | `npm run test:integration` | **not run** — no authorized real credentials were available; see limitations |
+
+Tool surface after this round: **18 tools** (14 read/preview tools plus
+`get_garmin_calendar`, `get_garmin_write_operation`, `reconcile_garmin_write_operation`,
+`resume_garmin_write_operation`). The 14 baseline tool names, required parameters and success
+fields are unchanged.
+
+What the continuation round added, each backed by committed tests:
+
+- **Create, create-and-schedule and unschedule now go through the coordinator.** All five
+  write verbs are journaled; a repeated request and a restart can no longer create a duplicate
+  template or a duplicate schedule. The previous four direct `client.addWorkout` /
+  `client.scheduleWorkout` / `client.unscheduleWorkout` call sites in `src/tool-service.ts`
+  are gone.
+- **Journal migration v1 → v2 runs automatically under the lock.** Plaintext idempotency keys
+  are removed from live records and replaced by a salted hash; unindexed keys are added to the
+  index; duplicate bindings produced by the old defect are quarantined for manual review rather
+  than deleted; a missing or unsupported `schemaVersion`, an account mismatch, an index entry
+  pointing at a missing operation or an invalid step all raise `STATE_CORRUPT` and no write is
+  issued.
+- **Calendar range query with an explicit capability boundary.** `get_garmin_calendar` is
+  read-only; a region without a verifiable read endpoint fails closed with
+  `CALENDAR_QUERY_UNSUPPORTED` instead of returning an empty snapshot, so absence is never
+  inferred from an unavailable read.
+- **Reconcile records evidence and never rewrites status.** `reconcile_garmin_write_operation`
+  only appends `evidence` / `observedAt`; `status` stays `unknown` until a real response
+  receipt exists. `wroteToGarmin` is false for every reconcile.
+- **Resume is bounded to steps proven never to have applied.** `resume_garmin_write_operation`
+  re-reads Garmin under a read budget (3 reads / 20 s) and refuses any step whose outcome is
+  unknown (`WRITE_OUTCOME_UNKNOWN`); a timeout is never re-sent.
+- **Confirmation handles are `<operationId>:<previewRevision>`**, persisted with their
+  deadline, so an unexpired handle survives a restart while a re-preview invalidates the old
+  one with `CONFIRMATION_STALE`.
+- **Lock contention is decided by the refused exclusive create itself.** A failed `mkdir` is
+  treated as contention evidence whether or not a follow-up existence check still sees the
+  holder, closing a window in which a holder releasing between two observations was reported
+  as `STATE_UNAVAILABLE` ("Write lock could not be created: EEXIST"). Non-`EEXIST` failures
+  still fail closed.
+- **All five write tools accept `idempotencyKey` at the real MCP parameter layer.** Having the
+  parameter on the service signature is not the same as a client being able to send it: the
+  input schemas of `create_and_schedule_garmin_workout` (`src/mcp.ts:455`) and
+  `unschedule_garmin_workout` (`src/mcp.ts:472`) did not expose it, so `idempotencyKey` was
+  unreachable for any MCP caller. Both schemas now carry it, `tests/mcp.test.ts` calls each of
+  the five tools through the MCP layer and asserts the key reaches the service, and one case
+  asserts an invalid key is rejected before the service is called. The committed tool-schema
+  fixture was regenerated from the reviewed diff rather than by relaxing an expected count.
+- **The journal commit is now proven by reading the committed bytes back, not by inode identity.**
+  This closes a real defect that the round shipped with and that macOS could not see. The
+  previous `save()` treated a landed file as committed when its `(dev, ino)` pair matched the
+  staged file. POSIX permits an implementation to reuse the inode number of a file that was just
+  unlinked, so on Linux the check accepted a file the store never wrote. Reproduced in the same
+  container image this report uses, on overlayfs: a staged file reported `ino=120222`, and after
+  unlink plus a fresh write the landed file reported `ino=120222` again — identical `(dev, ino)`,
+  different content. `assertLandedFile` now takes the payload, keeps `(dev, ino)` and the size as
+  cheap pre-signals (the size is re-read from the write handle after `write` + `sync`, since the
+  pre-write `stat` was stale), and then opens the landed file read-only and compares the bytes
+  through the same bounded `readExactly` reader, so the read is size-limited before it starts.
+  The error text names which check failed: a different inode, a different size, or different
+  bytes. The regression test
+  `refuses a replacement that reuses the inode and matches the size` deliberately masks the
+  inode signal by injecting an `lstat` that reports the staged `dev`/`ino` and tampering with
+  same-length bytes inside the `rename` hook, so the assertion pins the byte check on every
+  platform instead of only on the one that recycles inodes. Two mutation proofs were run and
+  reverted: reverting to identity-only made the old test pass on macOS while the new one failed,
+  which is the false green; removing identity and size and leaving bytes alone still passed all
+  51 tests in the suite, so the byte check alone carries the guarantee and the identity pair and
+  size are defence in depth. `STATE_CORRUPT` and `not_applied` are unchanged.
+
+**Not verified — stated as gaps, not as scope exclusions.**
+
+- No real Garmin account was contacted and no live schedule, cancellation or watch sync was
+  performed. `npm run test:integration` was not run.
+- **Read-side live evidence is zero.** The calendar read adapter is exercised only against the
+  mocked adapter and the simulated Garmin service in the test fixtures. No single live
+  response from the real endpoint has been captured, so the adapter's field mapping and
+  pagination assumptions remain unconfirmed against the service.
+- **Windows was not exercised in this round.** This machine has no Windows execution
+  capability. The Windows job in `.github/workflows/ci.yml` now includes the write journal,
+  account lock, migration, private-state and stdio recovery suites, but the job has not been
+  run for this commit, so native DACL enforcement, atomic rename semantics and subprocess lock
+  release on NTFS remain unverified here. This is a missing external evidence source, not a
+  scope exclusion.
+- **Linux is verified in a container, and the channel is not the official Node image.** Both
+  Node 20 and Node 22 pass the full command set on a real Linux/aarch64 kernel, libc and
+  filesystem, but Node is delivered as the official `linux-arm64` tarball mounted read-only
+  onto an `arm64v8/ubuntu:22.04` image rather than as the official `node:20` / `node:22` images.
+  The results are therefore not interchangeable with a run on those images or on the CI runner
+  image. The exact results and this caveat are restated in the platform section below.
+- Deleting the state directory still removes the only record preventing duplicate scheduling;
+  a journal with no archive refuses writes past 32 MiB.
+- The same inode-identity weakness that was fixed in the journal store still exists in
+  `assertSameFileSystemEntry` (`src/private-path.ts`), which is shared with the session-token
+  path. It is recorded as a residual limitation in `CHANGELOG.md` rather than changed here: the
+  properties it guards are re-asserted from the opened handle's `fstat` immediately afterwards,
+  and an attacker able to write into the private state directory could already produce a
+  schema-valid journal. This is a reasoned residual risk, not a verified absence of one.
+
+## Platform results, continuation round
+
+The cross-platform write-state set is the suites whose behaviour depends on the host filesystem,
+process model or permission semantics: `session-store`, `session-store-write`, `stdio`, `scripts`,
+`index`, `darwin-private-acl`, `stdio-protocol`, `write-stdio-recovery`, `write-operation-lock`,
+`write-state-security`, `write-operation-store` and `write-operation-migration`.
+
+**macOS arm64 (darwin), Node v25.2.1.** Run in two batches on the host; both exited 0:
+6 suites / 55 tests, then 6 suites / 134 tests — 12 suites / 189 tests in total. The second batch
+is one test larger than the pre-fix count because the inode-reuse regression test was added.
+
+**Linux aarch64, container `arm64v8/ubuntu:22.04`, kernel `6.12.76-linuxkit`.** Exported with
+`git archive ff128b6` into a tree carrying neither `node_modules` nor `.git`, so `npm ci` is a
+genuine clean install. Node 20 and Node 22 were run serially, to remove CPU contention as a
+source of lock-test flakiness.
+
+| Command | Node v20.19.5 / npm 10.8.2 | Node v22.22.2 |
+| --- | --- | --- |
+| `npm ci` | exit 0 | exit 0 |
+| `npm run lint` | exit 0, 0 warnings | exit 0, 0 warnings |
+| `npm test -- --runInBand` | exit 0, 57 suites / 1138 tests (1 skipped) | exit 0, 57 suites / 1138 tests (1 skipped) |
+| `npm run test:coverage` | exit 0. All files 87.15% statements / 77.45% branches / 87.2% functions / 89.75% lines | exit 0, same figures |
+| `npm run build` | exit 0 | exit 0 |
+| `npm run pack:smoke` | exit 0, 203 files, 426,608 B packed, 1,868,038 B unpacked, `"audit": "passed"` | exit 0, same figures |
+| `npm run test:distribution` | exit 0, `{"distribution":"passed","version":"0.2.0","tools":18,"runtimeOnlyInstall":true}` | exit 0, same figures |
+
+The container coverage figures are lower than the macOS host figures (87.15 / 77.45 / 87.2 / 89.75
+against 87.29 / 77.59 / 87.44 / 89.92) because platform-conditional branches differ per host.
+Both sets clear every configured gate.
+
+**What this battery found.** Before the fix, the Linux Node 20 run aborted at
+`tests/write-state-security.test.ts:613`, `refuses to treat a different inode as the file it
+committed`. That was a genuine product defect on Linux, not a test artifact, and it is described
+in the continuation-round list above. After the fix, both Node versions complete the whole
+command set with exit 0. The macOS host never failed this case, which is exactly why the defect
+shipped.
+
+**Channel caveat.** Node in the container is the official `linux-arm64` tarball, mounted
+read-only and prepended to `PATH`, on an `arm64v8/ubuntu:22.04` base image. This exercises real
+POSIX semantics on a real Linux kernel, but it is neither the official `node:20` / `node:22`
+image nor the CI runner image, and it must not be read as equivalent to either.
+
+**Windows.** Not run. No Windows host or runner was available for this commit, so DACL
+enforcement, atomic rename behaviour on NTFS and subprocess lock release remain unverified here.
+
+Details, per-tool behaviour and evidence boundaries:
+[docs/calendar-write-recovery.md](calendar-write-recovery.md),
 [docs/calendar-api-verification.md](calendar-api-verification.md) and
 [docs/calendar-write-delivery.md](calendar-write-delivery.md).
 
 ## Recorded results
+
+This table is the standalone-refactor round (baseline `52b67cd`, 14 tools). It is a historical
+record; the current tool count is 18 and the current results are in the continuation round
+above.
 
 | Check | Result |
 | --- | --- |
@@ -47,7 +230,7 @@ never be proven, so the coordinator never clears a business key from an empty re
 | Existing coverage thresholds | Preserved: 75% / 70% / 65% / 78%, all passed |
 | TypeScript build | Passed, after cleaning the generated lib directory |
 | Non-mutating ESLint | Passed |
-| MCP compatibility | All 14 tool definitions, descriptions, input schemas and annotations match the captured fixture |
+| MCP compatibility | All 14 tool definitions of that baseline — names, descriptions, input schemas and annotations — match the captured fixture (that fixture now carries 18 entries) |
 | Actual executable over stdio | Initialization, discovery, no-network preview, missing-session fallback and shutdown passed |
 | Simulated Calendar operation over stdio | Preview, confirmed write, replay rejection and child shutdown passed |
 | Package-root import | No dotenv loading, logs or service startup |
@@ -101,6 +284,15 @@ validation. [Remote CI run 34543981619](https://github.com/xcbbc21/garmin-connec
 passed all four jobs, including native macOS/Windows permission checks and
 isolated packed-runtime installs. Linux runs the full coverage suite; platform
 jobs run the relevant native permissions and process/protocol tests.
+
+That CI run predates the continuation round. The workflow has since been extended
+so the macOS and Windows jobs also run the write journal, account lock, migration,
+private-state and stdio recovery suites; the extension has been verified on macOS
+locally and has **not** been run on a Windows or Linux runner for commit `ff128b6`.
+No push was performed for this round either, so the commits it reports —
+`e091d1b` through `ff128b6` — have no CI result at all. The Linux, macOS and
+Windows platform claims in this report rest on the local and container evidence
+described in the platform section above, not on CI.
 
 Live read-only checks are available explicitly through `npm run test:integration`
 using the same public client and session configuration. They are excluded from CI.

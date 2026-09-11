@@ -29,7 +29,8 @@
     "docs/verification.md",
     "docs/client-setup.md",
     "docs/calendar-api-verification.md",
-    "docs/calendar-write-recovery.md"
+    "docs/calendar-write-recovery.md",
+    "docs/calendar-write-delivery.md"
   ],
   "repository": {
     "type": "git",

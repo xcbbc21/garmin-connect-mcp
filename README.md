@@ -63,12 +63,14 @@ If a client supports MCP URL elicitation, missing/expired sessions can prompt th
 | Create a template | `create_garmin_workout` |
 | Calendar scheduling | `schedule_garmin_workout`, `batch_schedule_garmin_workouts`, `create_and_schedule_garmin_workout`, `unschedule_garmin_workout` |
 | Activity export | `download_garmin_activity_fit` |
+| Calendar read | `get_garmin_calendar` |
+| Write inspection and recovery | `get_garmin_write_operation`, `reconcile_garmin_write_operation`, `resume_garmin_write_operation` |
 
-There are 14 tools. Workout-library templates describe **what to do**; Calendar entries describe **when to do it**. The guidance tool offers training-method knowledge and athlete-intake checks; it does not independently generate and execute a complete training plan.
+There are 18 tools. Workout-library templates describe **what to do**; Calendar entries describe **when to do it**. The guidance tool offers training-method knowledge and athlete-intake checks; it does not independently generate and execute a complete training plan.
 
-Workout creation and Calendar writes use two calls: first preview, then repeat the identical request with `confirmed: true` and the returned `confirmationId` after the user approves. IDs expire after ten minutes and cannot be reused. Pending previews are process-local: restarting the service invalidates them. The **write journal is not** process-local — Calendar schedule results are recorded on disk and survive a restart. See [write safety and recovery](docs/calendar-write-recovery.md).
+Workout creation and Calendar writes use two calls: first preview, then repeat the identical request with `confirmed: true` and the returned `confirmationId` after the user approves. IDs expire after ten minutes and cannot be reused. A `confirmationId` is `<operationId>:<previewRevision>`: because the revision and its deadline are stored with the operation, an unexpired handle still resolves after a restart, and re-previewing invalidates every earlier handle. The **write journal is durable** — Calendar results are recorded on disk and survive a restart. See [write safety and recovery](docs/calendar-write-recovery.md).
 
-`schedule_garmin_workout` and `batch_schedule_garmin_workouts` also accept an optional `idempotencyKey` (1–128 characters from `A-Z a-z 0-9 . _ : -`). It is a request label, not a permission token: reusing the same key with the same request returns the recorded receipt instead of writing again, and a different key never bypasses an in-flight or unknown write. `confirmationId` and `idempotencyKey` are never interchangeable.
+All five write tools — `create_garmin_workout`, `schedule_garmin_workout`, `batch_schedule_garmin_workouts`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout` — also accept an optional `idempotencyKey` (1–128 characters from `A-Z a-z 0-9 . _ : -`). It is a request label, not a permission token: reusing the same key with the same request returns the recorded receipt instead of writing again, and a different key never bypasses an in-flight or unknown write. `confirmationId` and `idempotencyKey` are never interchangeable.
 
 Calendar writes are recorded under an account-scoped local directory, `GARMIN_STATE_DIR` (absolute, local, private; default `<platform config root>/garmin-connect-mcp/state`). It is independent of your login alias, so two aliases for the same account share one recovery record while session files stay separate. Back it up; deleting it destroys the records that prevent duplicate scheduling.
 
@@ -97,14 +99,25 @@ After approval, send the same request to `batch_schedule_garmin_workouts`, addin
 
 - Dates are local `YYYY-MM-DD` values; the timezone defaults to the server host if omitted. Past or impossible dates and invalid IANA timezones are rejected.
 - Reusing a template on different dates is supported. Duplicate workout/date pairs within one batch are rejected before anything is sent.
-- The same template and date pair is never written twice. A repeated request is either skipped because Garmin already has that entry, or blocked because an earlier write for the same template and date has an unknown outcome. This holds across a new preview, a different `idempotencyKey`, a service restart and concurrent callers.
+- Within one shared write journal, a template/date pair is not written twice: a repeated request is either skipped because a Calendar read shows the entry already there, or blocked because an earlier write for the same pair has an unknown outcome. This holds across a new preview, a different `idempotencyKey`, a service restart and concurrent callers. The guarantee is local — it covers the machines that share `GARMIN_STATE_DIR`. Garmin exposes no server-side idempotency, so a second state directory, another device, or a hand-edited Calendar is outside it, and `skipped` reports what the read returned rather than proving that no other entry exists.
 - Rest days are omitted; a workout's internal recovery/rest step is still valid.
 - Preview checks existing template IDs. Each confirmed entry is committed separately and reports its own `status`. A batch continues after an individual failure: `successCount` counts `succeeded` + `skipped`, and the legacy `failureCount` means "not confirmed complete", not "definitely failed" — branch on per-entry `status` and `definiteFailureCount`, never on `failureCount`.
 - A timeout is reported as `status: "unknown"` together with a durable `operationId`, not as a plain failure. It is never re-sent. Check Garmin Calendar, then schedule a different date or template. Creation followed by failed scheduling reports the created workout ID when available.
 - Cancellation needs the `workoutScheduleId` from the scheduling result, not the template ID. If Garmin does not return that ID, do not invent one.
-- `create_garmin_workout`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout` do not yet use the write journal and do not accept `idempotencyKey`. See [remaining limitations](docs/calendar-write-recovery.md#remaining-limitations).
+- `create_garmin_workout`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout` are journal-backed and accept the same optional `idempotencyKey`. A create-and-schedule records both phases, so a crash after the template exists is recoverable without creating a second template, and a cancellation is logged rather than repeated. Read the current Calendar with `get_garmin_calendar`, then inspect and recover with `get_garmin_write_operation`, `reconcile_garmin_write_operation` and `resume_garmin_write_operation`. See [write safety and recovery](docs/calendar-write-recovery.md).
 
 The pinned `garmin-connect@1.6.2` does not export schedule/cancel helpers. The existing adapter uses authenticated `POST /workout-service/schedule/{workoutId}` and `DELETE /workout-service/schedule/{workoutScheduleId}` requests. These are unofficial endpoints; mocked protocol/transport tests are not proof of current live Garmin acceptance or watch synchronization.
+
+### Recovering an uncertain write
+
+The example above stops at the per-entry receipts. If one entry comes back `unknown`, the rest of the chain is:
+
+1. **Read the entries.** The batch result reports `status`, `action` and `evidence` per entry. `succeeded` carries a write receipt; `skipped` means the Calendar read already showed that entry.
+2. **Query the operation.** `get_garmin_write_operation` takes exactly one of `operationId` or `idempotencyKey`, or neither to page through the newest operations (`limit` defaults to 20, maximum 100). It returns the durable record — which steps are `succeeded`, `unknown`, `prepared` or `not_attempted`, plus `canResume`, `manualReviewRequired` and `nextAction`.
+3. **Reconcile.** `reconcile_garmin_write_operation` re-reads Garmin inside a fixed budget (at most 3 reads, 20 seconds) and reports what it observed. It never rewrites `status`: an `observed_present` result satisfies the desired state, but the original step stays `unknown`, because the observation cannot prove this request caused the entry. An empty Calendar read proves nothing, so it never authorizes an automatic re-post.
+4. **Resume only the safe steps.** `resume_garmin_write_operation` previews first, exactly like any other write. It arms only steps that were never dispatched; a step whose outcome is unknown is listed as `blocked` and is never re-sent. Confirm the preview with the returned ID to commit the remaining steps.
+
+Never delete the state directory, and never re-issue the same write to "clear" an unknown: neither removes the record, and the second write may duplicate the entry.
 
 ### Other examples
 
@@ -124,7 +137,8 @@ See [.env.example](.env.example) for all environment variables. MCP reads `.env`
 | Session missing or expired | Login with the same alias/region and exact destination. |
 | Session permissions rejected | Use a private, locally owned destination; keep the runtime's owner-only permissions. |
 | Confirmation expired or changed | Request a new preview and obtain approval again. |
-| Schedule blocked, `status: "unknown"` | An earlier write for that template/date is unresolved. Do not retry: check Garmin Calendar with the returned `operationId`, then use a different date or template. |
+| Schedule blocked, `status: "unknown"` | An earlier write for that template/date is unresolved. Do not retry the write: read Garmin Calendar with `get_garmin_calendar`, resolve the pending step with `reconcile_garmin_write_operation`, and only then use `resume_garmin_write_operation` for the steps it reports as safe. A `reconcile` that observes the entry is still not a write receipt — the original step stays `unknown`. |
+| Recorded operation not found | `get_garmin_write_operation` returns `OPERATION_NOT_FOUND` for both an unknown ID and an ID belonging to a different account, on purpose. Confirm you are on the account that wrote it and that `GARMIN_STATE_DIR` points at the same directory. |
 | New writes refused / state unavailable | Verify `GARMIN_STATE_DIR` is absolute and writable and the journal is under 32 MiB. Do not delete the state directory — see [recovery](docs/calendar-write-recovery.md). |
 | FIT export unavailable | Choose a trusted absolute `GARMIN_FIT_DOWNLOAD_DIR`; existing files are never overwritten. |
 

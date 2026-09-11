@@ -321,11 +321,17 @@ Claude Code、Cursor、Windsurf、WorkBuddy 和 ZCode 都使用同一组 `comman
 
 确认 ID：
 
-- 有效期 10 分钟。
-- 只能成功使用一次。
+- 形式为 `<operationId>:<预览版本号>`。
+- 有效期 10 分钟；版本号与截止时间随操作一起持久化，因此**未过期的句柄在服务重启后仍可解析**。
+- 只能成功使用一次；写入结果会落盘，重复提交同一个句柄会返回已有回执而不是再次下发。
 - 请求内容有变化时不能使用。
-- 服务重启后失效。
-- 过期或重放时必须重新预览。
+- 重新预览会让此前所有句柄失效（报 `CONFIRMATION_STALE`）；过期或重放时必须重新预览。
+
+幂等键（`idempotencyKey`）：
+
+- 上述 5 个写工具**都**接受这个可选参数，可经 MCP 参数层直接传入。
+- 它是「请求标签」，不是授权令牌：同一个 key 配同一个请求会返回已有回执而不重复写入；同一个 key 配不同请求会被拒绝（`IDEMPOTENCY_CONFLICT`）。
+- 换一个新的 key **不能**绕过待处理或结果不确定的写入。
 
 ## 9. 工具逐项说明
 
@@ -643,9 +649,9 @@ Claude Code、Cursor、Windsurf、WorkBuddy 和 ZCode 都使用同一组 `comman
 4. 用户确认后，使用相同请求加 `confirmed` 和 `confirmationId`。
 5. 保存返回的 `workoutScheduleId`，取消时使用这个 ID。
 
-同一个训练可以安排到不同日期；同一个 `workoutId + date` 组合不会被写入两次。重复请求要么因为 Garmin 已有该条目而跳过（`action: "skip_existing"`），要么因为该组合存在结果不确定的历史写入而阻断（`action: "blocked"`）。换新预览、换 `idempotencyKey`、重启服务或并发调用都不能绕过。
+同一个训练可以安排到不同日期；在共用同一份写入日志的范围内，同一个 `workoutId + date` 组合不会被写入两次。重复请求要么因为日历读取显示该条目已存在而跳过（`action: "skip_existing"`），要么因为该组合存在结果不确定的历史写入而阻断（`action: "blocked"`）。换新预览、换 `idempotencyKey`、重启服务或并发调用都不能绕过。Garmin 没有服务端幂等机制，所以换状态目录、换设备或手工改动日历都不在覆盖范围内。
 
-超时不会返回笼统失败，而是返回 `status: "unknown"` 与可持久查询的 `operationId`。该写入不会被自动重发：先核对 Garmin 日历，再改用其他日期或模板。
+超时不会返回笼统失败，而是返回 `status: "unknown"` 与可持久查询的 `operationId`。该写入不会被自动重发：先用 `get_garmin_calendar` 读取日历，再用 `reconcile_garmin_write_operation` 记录观测结果，之后只对 `resume_garmin_write_operation` 判定为安全的条目执行恢复，或改用其他日期/模板。核对观测到条目存在不等同于写入回执，原步骤仍保持 `unknown`。
 
 ### 9.11 `batch_schedule_garmin_workouts`：批量安排多天或多周
 
@@ -686,22 +692,32 @@ Claude Code、Cursor、Windsurf、WorkBuddy 和 ZCode 都使用同一组 `comman
 
 ### 9.11.1 完整流程示例：下周五次跑步（周一、二、四、六、日）
 
-周三和周五是休息日，**不生成任何训练**，而是直接从 `schedules` 中省略。
+周三和周五是休息日，**不生成任何训练**，而是直接从 `schedules` 中省略。下面是一条完整链路：查询 → 预览 → 确认 → 逐项回执 → 查询操作 → 核对 → 仅恢复安全项。
 
 1. **查模板**：调用 `get_garmin_workouts`，拿到轻松跑、门槛跑、长跑的真实 `workoutId`。
-2. **预览**：调用 `batch_schedule_garmin_workouts`，只带 5 条 `schedules` 和 `timezone`。返回 `requiresConfirmation: true`、`confirmationId` 和 `operationId`，此时**没有发出任何写入**。
+2. **查日历**：调用 `get_garmin_calendar`，传入目标周（例如 `startDate: "2026-09-14"`、`endDate: "2026-09-20"`）和 `timezone`，确认这 5 天已经有了什么。
+   - 返回的 `entries` 是观测到的条目，`complete` 才说明这段范围被完整读取。读取失败或能力不支持时返回 `CALENDAR_QUERY_UNSUPPORTED`，**不会**退化成“空日历”。
+   - 空结果不能证明没有条目，也**不会**被当作授权写入的依据；它只用于帮助用户判断日期选择。
+3. **预览**：调用 `batch_schedule_garmin_workouts`，只带 5 条 `schedules` 和 `timezone`。返回 `requiresConfirmation: true`、`confirmationId` 和 `operationId`，此时**没有发出任何写入**。
    - 若返回 `requiresConfirmation: false`，说明这 5 条都已存在或被阻断，**不会**签发确认 ID，也不会写入。
-3. **展示并确认**：把 5 条日期 + 训练名 + 时区展示给用户；批准后原样重发，补 `confirmed: true` 和该 `confirmationId`。
-4. **查看结果**：逐条读取 `status`。
-   - `succeeded`：已写入。
-   - `skipped`：Garmin 已有该条目，本次没有写入（也算目标已满足）。
-   - `not_attempted`：被阻断或未发出，可安全重新预览。
+4. **展示并确认**：把 5 条日期 + 训练名 + 时区展示给用户；批准后原样重发，补 `confirmed: true` 和该 `confirmationId`。确认句柄是 `<operationId>:<预览版本号>`，十分钟内有效、只能用一次；重新预览会使其失效，但未过期的句柄在服务重启后仍可解析。
+5. **查看逐项回执**：逐条读取 `status` 与 `evidence`。
+   - `succeeded`：已写入，`evidence` 来自 Garmin 的响应。
+   - `skipped`：日历读取已显示该条目存在，本次没有写入（目标状态已满足）。
+   - `not_attempted`：被阻断或未发出。若是因为认证失效、调用取消、存储错误、身份变化、确认授权到期或锁丢失而停止，它**不会**被自动重发，可安全重新预览。
    - `failed`：有证据证明未生效，可重新预览后重试。
    - `unknown`：**不要重试**。记下 `operationId`。
-5. **超时核对**：对 `unknown` 那条，去 Garmin 日历确认该日是否已出现该训练。
-   - 已出现 → 目标已满足，什么都不做。该条会**保持** `unknown`（因为无法证明是本次请求造成的）。
+6. **查询操作记录**：用 `get_garmin_write_operation` 读取该 `operationId`（`operationId` 与 `idempotencyKey` 二选一，两者都不传则列出最近记录，`limit` 默认 20、最大 100）。返回每条步骤的真实状态，以及 `canResume`、`manualReviewRequired`、`nextAction`。
+   - 返回 `OPERATION_NOT_FOUND` 时，「不存在的 ID」和「属于其他账号的 ID」是同一个响应：确认账号与 `GARMIN_STATE_DIR` 是否与写入时一致，不要靠换 `idempotencyKey` 重试。
+7. **核对**：用 `reconcile_garmin_write_operation` 在固定预算内（最多 3 次读取、20 秒）重读 Garmin。
+   - `observed_present` 表示目标状态已满足，但原步骤**保持** `unknown` —— 观测无法证明该条目是本次请求造成的；核对只记录证据，从不改写 `status`。
+   - 因此 reconcile 之后 `canResume` 仍可能为 `false`。空的读取结果不能证明任何事情，也永远不会授权自动重发。
    - 未出现且请求早已结束 → 只有两种安全做法：把**同一训练**改到别的日期，或把**别的训练**放到同一日期。
-6. **只恢复安全项**：重新预览时，协调器只会把 `failed` 与 `not_attempted` 的条目标记为可写；`succeeded`、`skipped`、`unknown` 的条目不会被再次发出。逐个分支都可复现：参见 `tests/write-coordinator.test.ts`。
+8. **只恢复安全项**：`resume_garmin_write_operation` 先返回预览（`previewRevision` 递增）。它只为**从未下发过**的步骤装载写入（`prepared`、`failed`、`not_attempted`）；`succeeded` 列为 `skip_existing`，`unknown` 列为 `blocked`，两者都不会被再次发出。确认该预览后提交剩余步骤，结果按条返回 `evidence` 与 `desiredStateSatisfied`。
+   - resume 不是迁移替代，也不能覆盖原有历史：它只追加本次下发的步骤记录。
+   - 逐个分支都可复现：参见 `tests/write-coordinator.test.ts`、`tests/write-recovery.test.ts` 与 `tests/write-create-recovery.test.ts`。
+
+无论走到哪一步：不要删除状态目录，不要用重发同一写入“清掉” unknown，也不要为了绕过阻断而改 `idempotencyKey`——这些做法都不会移除记录，反而可能产生重复条目。
 
 ### 9.12 `create_and_schedule_garmin_workout`：创建并安排一条训练
 
@@ -801,6 +817,107 @@ export GARMIN_FIT_DOWNLOAD_DIR='/Users/你的用户名/Documents/garmin-fit'
 服务不会在工具结果中返回 FIT 二进制，也不会把完整本地路径或会话信息发送给智能体。
 
 已有同名文件不会被覆盖。遇到 `OUTPUT_EXISTS` 时，不要删除旧文件来强行重试；换一个受控目录或先人工核对文件。
+
+### 9.15 `get_garmin_calendar`：读取训练日历范围
+
+用途：读取某段日期范围内已经存在的日历排期，不改动任何数据。
+
+参数：
+
+```json
+{
+  "startDate": "2026-09-14",
+  "endDate": "2026-09-20",
+  "timezone": "Asia/Shanghai"
+}
+```
+
+- `startDate`、`endDate` 必填，闭区间，最长 366 天。
+- `timezone` 可选，只用于在返回结果中回显时区标签；它**不会**移动日期。
+
+返回的是一个「快照」，关键是**读取是否完整**：
+
+- `entries` 是**实际观测到**的条目。
+- `complete` 为真才说明整个范围都被读到。
+- `warnings` / 未能读取的子区间会一并返回，表示哪些部分没有读到。
+
+三条硬规则：
+
+1. **读取不完整绝不等于空日历。** 读取失败或某个地区没有可核验的读接口时报 `CALENDAR_QUERY_UNSUPPORTED`，不会退化成「什么都没有」。
+2. **任何范围读取都不能证明某次写入没有到达 Garmin。** 要回答这个问题只能用 `reconcile_garmin_write_operation` 对着本地日志核对。
+3. **空结果不是写入授权。** 它只帮助用户选择日期，不能当作「没有冲突」的证明。
+
+### 9.16 `get_garmin_write_operation`：查询本地写入日志
+
+用途：不接触网络，直接读取当前账号在本地记录下来的写入操作。
+
+三种调用方式，**互斥**：
+
+```json
+{ "operationId": "8a12…" }
+```
+
+```json
+{ "idempotencyKey": "week-38-plan" }
+```
+
+```json
+{ "limit": 20 }
+```
+
+- 用 `operationId` 或 `idempotencyKey` 查单条时，**不能**同时传 `limit` / `cursor`。
+- 两个都不传则列出最近记录：默认 20 条，最多 100 条，返回 `nextCursor` 供翻页。
+- `cursor` 是不透明本地令牌（不是路径），只在日志未变动时有效；一旦记录发生变化，返回 `staleCursor: true` 且**不含** `operations` 字段——因此空页永远不会被误认为「日志是空的」。
+
+返回内容：
+
+- 每条记录带汇总判断：`status`、`canResume`、`manualReviewRequired`、`nextAction`。直接用 `nextAction` 决定走核对还是恢复。
+- 记录是**脱敏**的：原始幂等键、请求体、账号键都不会回显。
+- 不存在的 ID 与属于**其他账号**的 ID 返回同一个 `OPERATION_NOT_FOUND`，所以这个查询不能用来探知别的账号写了什么。
+
+这条查询不需要登录，也永远不会联系 Garmin——它只读本地磁盘。
+
+### 9.17 `reconcile_garmin_write_operation`：只读核对（记录证据）
+
+用途：针对一条结果不确定的操作，重新读取 Garmin，把可信观测记入本地恢复日志。
+
+```json
+{ "operationId": "8a12…" }
+```
+
+它**只记录证据**：
+
+- 不发送任何排期 / 创建 / 取消请求，在 Garmin 上不删除任何东西。
+- 结果不确定的步骤**保持不确定**，直到出现真实回执；核对不会改写 `status`。
+- 观测到条目存在 → `desiredStateSatisfied: true`、结论为 `observed_present`；观测到不存在 → 如实报告 `absent`，并且不会改写此前的任何结果。
+- 因为核对可能仍无法消除不确定性，之后 `canResume` 仍可能是 `false`。
+
+读取有固定预算（最多 3 次读取、20 秒），所以核对不会无限重试。它更新的是**本地**状态，因此没有被标注为纯只读工具，但它从不修改 Garmin。
+
+### 9.18 `resume_garmin_write_operation`：只恢复安全项
+
+用途：从日志推导出「还没下发过」的剩余步骤，在用户批准后下发。
+
+预览：
+
+```json
+{ "operationId": "8a12…" }
+```
+
+确认：
+
+```json
+{ "operationId": "8a12…", "confirmed": true, "confirmationId": "8a12…:1" }
+```
+
+要点：
+
+- **没有载荷参数。** 日期、`workoutId`、模板定义全部取自日志记录，所以恢复不可能把写入挪到别的日期或换成别的模板——那是新请求，不是恢复。
+- 只有**被证明从未生效**的步骤会被装载（`prepared`、`failed`、`not_attempted`）。
+- `succeeded` 列为 `skip_existing`；`unknown` 列为 `blocked`，**永不重发**，也无法从这里清除。
+- 预览返回 `previewRevision`；确认必须用该次预览签发的 `confirmationId`（`<operationId>:<previewRevision>`）。
+- 下发本身不是幂等的：要拿持久结果请用 `get_garmin_write_operation` 重新查询，**不要**重复调用本工具。
+- 恢复不是迁移的替代品，也不会覆盖既有历史，只追加本次下发的记录。
 
 ## 10. 日期、时区和训练日历规则
 
@@ -984,7 +1101,7 @@ npm run test:distribution
 当前项目明确不承诺：
 
 - 自动生成并执行完整长期训练计划。
-- 自动识别跨请求已有日历排期并去重。
+- 跨状态目录的自动去重：去重保证是**本地的**，只覆盖共用同一 `GARMIN_STATE_DIR` 的机器（同一状态目录内的重复请求会被跳过或阻断，见 9.10 与 9.11）。
 - 自动把休息日写入 Garmin。
 - 自动重试可能已经成功的写入请求。
 - 取消没有真实 `workoutScheduleId` 的排期。

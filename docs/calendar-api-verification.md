@@ -4,8 +4,15 @@ Verification date: 2026-09-11
 Package under test: `garmin-connect@1.6.2` (locked in `package-lock.json`)
 Repository HEAD at verification: `67f5ec9` (§1–§3, §5); §4 rewritten at `dd9f825` while the
 `src/calendar/` module it describes was still uncommitted, then updated when `src/calendar/` and
-the `GarminClient` read wiring landed (the C6 commit) — the wiring state and §4.3 rows below
-describe that revision.
+the `GarminClient` read wiring landed (the C6 commit).
+
+**Reachability updated 2026-09-12 (`ff128b6`).** §4.1 evidence, §4.2 region asymmetry and §4.3
+contract decisions are unchanged and still rest on the same public sources. What changed is
+only who may call the read: the `get_garmin_calendar` tool now exposes it over MCP, and
+`reconcile_garmin_write_operation` consults it under a read budget. The rows that previously
+said "not reachable from any MCP tool" and "no recovery path can consult a calendar read" have
+been corrected in place. **No live response has been captured in either region, so the read
+side of this document remains evidence-free against the real service.**
 
 This file records what was actually checked, how, and what remains unverified. It is
 deliberately conservative: a row marked "source-verified" was read in the installed
@@ -52,9 +59,9 @@ Observed in code and in returned shapes; not confirmed against live data.
 
 ## 4. Calendar range query — implemented behind an evidence gate
 
-**Status: implemented in `src/calendar/` (read adapter + conclusion contract) and wired into
-`GarminClient.getCalendarRange` (`src/client.ts`); **not reachable from any MCP tool**, not
-live-verified.**
+**Status: implemented in `src/calendar/` (read adapter + conclusion contract), wired into
+`GarminClient.getCalendarRange` (`src/client.ts`), exposed as the `get_garmin_calendar` MCP tool
+and consulted by `reconcile_garmin_write_operation`; not live-verified.**
 
 `src/calendar/adapter.ts` implements exactly one read: the GraphQL gateway query
 `workoutScheduleSummariesScalar(startDate, endDate)`. Every protocol claim in that module
@@ -64,10 +71,17 @@ rest on the public sources below, which agree with each other.
 
 Wiring state: `src/client.ts` imports `CALENDAR_SUPPORTED_REGIONS` and `createCalendarAdapter`
 from `src/calendar/adapter.ts` and exposes `getCalendarRange(range, options)` plus
-`calendarTransport()`; `tests/calendar-query.test.ts` and `tests/client.test.ts` are the test
-importers. No MCP tool, startup path or coordinator consults it yet (that is the C8 registration
-step), so **no recovery path can currently consult a calendar read**, and the coordinator still
-never clears a business key from one.
+`calendarTransport()`; `src/tool-service.ts` holds the `calendarReader` used by both the
+`get_garmin_calendar` tool and the coordinator. `tests/calendar-query.test.ts`,
+`tests/client.test.ts` and `tests/write-stdio-recovery.test.ts` are the test importers.
+
+**Reachability, precisely.** The read is reachable from two places and nowhere else:
+`get_garmin_calendar` (read-only; it issues no write) and the reconcile pass inside
+`reconcile_garmin_write_operation`, which is bounded to `RECONCILE_MAX_READS = 3` reads and
+`RECONCILE_BUDGET_MS = 20_000` ms and records a `deferred` note instead of an error when the
+budget runs out. Scheduling itself still never consults a calendar read before dispatching, and
+the coordinator still never clears a business key from an empty range, because absence is not
+provable from this read (§4.3).
 
 The read is wired in two independent gates, both against the same constant: the adapter refuses
 an unsupported region before it builds a request (`src/calendar/adapter.ts:748-756`), and the
@@ -139,9 +153,10 @@ differ today: the write path does send to `garmin.cn`, and that remains source-v
 | Path disagreement, recorded and not resolved | `barnes-c/go-garminconnect@fde79fa` `garminconnect/workouts.go:69-80` uses `/calendar-service/schedule/workout/{id}`, while `python-garminconnect` (`:584`, `:3610-3634`) and this repository (`src/client.ts:834-885`) use `/workout-service/schedule/{workoutId}` | one of the two is wrong and neither was exercised, so a by-id **read** would be built on a coin flip today |
 
 The `CALENDAR_QUERY_UNSUPPORTED` error code exists (`src/write-operations/errors.ts:26`) and is
-what an unsupported region raises, but the planned `get_garmin_calendar` tool is **not
-shipped**. When it is added, both regions must be verified separately, and "the day has no
-entry" may only ever be reported as a `complete` range fact — never as proof of absence.
+what an unsupported region raises. The `get_garmin_calendar` tool **is now shipped** and, for an
+unsupported region, fails closed with that code rather than returning an empty range. Both
+regions must still be verified separately, and "the day has no entry" may only ever be reported
+as a `complete` range fact — never as proof of absence.
 
 ## 5. Write-outcome classification evidence
 
@@ -175,8 +190,9 @@ given step at most once per confirmation.
   (`scheduledWorkoutId` vs `workoutScheduleId`);
 - anything at all about a `cn` response;
 - the month feed and the by-id read were never exercised, so their response shapes stay unknown;
-- `src/calendar/*` is reachable from production code (`GarminClient.getCalendarRange`) but is
-  still imported by no tool, startup path or coordinator: nothing consults a calendar read yet.
+- `src/calendar/*` is reachable from `GarminClient.getCalendarRange`, from the
+  `get_garmin_calendar` tool and from the reconcile pass — but **not one of those calls has ever
+  been made against the real service**, so the whole read side has zero live evidence;
 - what the gateway answers when asked with a cursor (the transport refuses to construct that
   request, so even the failure mode is unobserved).
 
@@ -189,7 +205,7 @@ Open about writes (unchanged from §2/§5):
 - Whether `DELETE` is idempotent.
 
 Until these are exercised with explicit user authorisation, delivery status is
-**"safety infrastructure complete with simulated verification; live calendar query and
-automatic recovery remain capability-limited"** — a read adapter now exists behind a two-layer
-evidence gate and is wired into `GarminClient`, but it is still **not** reachable from any MCP
-tool and **not** consulted by any recovery path.
+**"safety infrastructure, recovery tooling and simulated verification complete; live calendar
+read remains unverified"**. A read adapter exists behind a two-layer evidence gate, it is wired
+into `GarminClient`, it is reachable from the `get_garmin_calendar` tool and from the reconcile
+pass, and the whole read side is still backed by **no live observation in either region**.

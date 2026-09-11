@@ -2,7 +2,7 @@
 
 ## Existing MCP users
 
-The server name `garmin-connect-mcp`, entry file `lib/mcp.js`, authentication command `garmin-connect-auth`, 14 tools and their complete input schemas remain compatible with baseline `52b67cd`.
+The server name `garmin-connect-mcp`, entry file `lib/mcp.js`, authentication command `garmin-connect-auth`, the 14 baseline tools and their complete input schemas remain compatible with baseline `52b67cd`. Four tools have since been added — `get_garmin_calendar`, `get_garmin_write_operation`, `reconcile_garmin_write_operation` and `resume_garmin_write_operation` — for 18 in total; no baseline tool was renamed or removed.
 
 Update this checkout and run `npm ci`, then restart the client. Use the same GARMIN_* configuration, alias and session destination. Session formats and default paths have not changed in this refactor; no copying, deletion or re-login is required solely because of this upgrade. Pending confirmations are process-local and expire on restart.
 
@@ -27,9 +27,11 @@ changes below tighten scheduling safety and add auditability.
 
 **New optional inputs and fields**
 
-- `idempotencyKey` (optional, `A-Z a-z 0-9 . _ : -`, 1–128 chars) on
-  `schedule_garmin_workout` and `batch_schedule_garmin_workouts`. Invalid values are rejected
-  before Garmin is contacted. It is a request label, not a permission token.
+- `idempotencyKey` (optional, `A-Z a-z 0-9 . _ : -`, 1–128 chars) on all five write tools —
+  `create_garmin_workout`, `schedule_garmin_workout`, `batch_schedule_garmin_workouts`,
+  `create_and_schedule_garmin_workout` and `unschedule_garmin_workout`. Invalid values are
+  rejected before Garmin is contacted. It is a request label, not a permission token, and it
+  is exposed through the MCP parameter layer so any client can send it.
 - New result fields: `status`, `action`, `operationId`, `evidence`, `desiredStateSatisfied`,
   `canResume`, `manualReviewRequired`, `errorCode`, `nextAction`; batch adds `skippedCount`,
   `unknownCount`, `notAttemptedCount`, `definiteFailureCount`.
@@ -52,10 +54,50 @@ per-entry `status` / `definiteFailureCount`, and must never retry based on `fail
 - Back it up before migrating machines. **Deleting it removes the only record that prevents
   duplicate scheduling.** See [write safety and recovery](calendar-write-recovery.md).
 
-**Not yet migrated**
+**Create, create-and-schedule, unschedule and the inspection tools (added after the first round)**
 
-`create_garmin_workout`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout`
-keep their previous preview/confirmation behaviour and do not accept `idempotencyKey`.
+The first round left `create_garmin_workout`, `create_and_schedule_garmin_workout` and
+`unschedule_garmin_workout` unmanaged. They are now journaled by the same coordinator as
+`schedule_garmin_workout`, which changes three things:
+
+- All five write tools accept `idempotencyKey` (optional, same character set and length limit).
+  A repeated request with the same key returns the stored receipt instead of writing again.
+- A create that times out now returns `status: "unknown"` with an `operationId` instead of a bare
+  failure, and the same workout/date (or the same template creation) is blocked until that
+  outcome is resolved. This includes the create stage of
+  `create_and_schedule_garmin_workout`: if the template creation is unresolved, the schedule
+  stage is not dispatched.
+- `unschedule_garmin_workout` is journaled too, so a timeout on a cancellation is no longer
+  indistinguishable from "nothing happened".
+
+Four inspection/recovery tools are available:
+
+- `get_garmin_write_operation` — read one operation by `operationId` or `idempotencyKey`, or
+  page the journal (default 20, maximum 100). Operation detail mode rejects `limit`/`cursor`.
+  An unknown operation and another account's operation both return `OPERATION_NOT_FOUND`.
+- `reconcile_garmin_write_operation` — re-read Garmin and record what it observed. It **never
+  rewrites `status`**: a step stays `unknown` until a real response receipt exists. It issues at
+  most 3 reads within 20 seconds; past that it reports a `deferred` note rather than an error.
+- `resume_garmin_write_operation` — dispatch only the steps that provably never applied. A step
+  with an unknown outcome is refused with `WRITE_OUTCOME_UNKNOWN` and is never re-sent.
+- `get_garmin_calendar` — read-only calendar range query. For a region with no verifiable read
+  endpoint it fails closed with `CALENDAR_QUERY_UNSUPPORTED` instead of returning an empty range.
+  It never writes.
+
+**Existing journals are migrated automatically.** Version 1 records are upgraded to version 2 in
+place, under the account lock, the first time they are read: plaintext `idempotencyKey` values
+are removed from live records and replaced by a salted hash, missing index entries are rebuilt,
+and duplicate bindings written by the earlier defect are quarantined for manual review instead of
+being deleted. A record with a missing or unsupported `schemaVersion`, an account mismatch, an
+index entry pointing at a missing operation, or an invalid step is reported as `STATE_CORRUPT`
+and **no write is issued from it**. `reconcile` and `resume` are not substitutes for migration:
+re-previewing an operation does not remove a stale key from the journal.
+
+**Confirmation IDs changed shape.** A confirmation handle is now
+`<operationId>:<previewRevision>` rather than an opaque token, and both the revision and the
+deadline are persisted with the operation. A handle that has not expired still resolves after a
+restart; re-previewing the same request increments the revision and makes the old handle fail
+with `CONFIRMATION_STALE`.
 
 ## Former plugin users
 

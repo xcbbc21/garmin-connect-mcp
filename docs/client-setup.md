@@ -85,4 +85,4 @@ After connecting, try “Show my last five runs” or “Preview a workout; wait
 
 ## Optional skill
 
-Clients with skill support may load `skills/garmin-connect-mcp` through their own skill mechanism. Ordinary MCP clients can discover and call all 14 tools without it. Installing a skill does not register or start an MCP server.
+Clients with skill support may load `skills/garmin-connect-mcp` through their own skill mechanism. Ordinary MCP clients can discover and call all 18 tools without it. Installing a skill does not register or start an MCP server.

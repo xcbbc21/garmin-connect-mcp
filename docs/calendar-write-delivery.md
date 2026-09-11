@@ -5,6 +5,34 @@
 
 本地提交：`08ac0f3`、`6268be7`、`2934d5f`、`a527c7e`，**已推送**至 `origin/main`，远端 HEAD = `a527c7e`。
 
+> ## ⚠ 续修更新（2026-09-12，截至 `ff128b6`）
+>
+> **本文件 §0–§8 是第一轮（`a527c7e`）的历史快照，其中多行已被续修推翻。** 保留原文以便追溯，
+> 但**不得**把下面的判断当作当前状态：
+>
+> | 本文原判断 | 续修后的实际状态 |
+> |---|---|
+> | "创建 / 创建并排期 / 取消的日志托管：未完成" | **已完成**——5 个写工具全部经协调器下发，`src/tool-service.ts` 中 4 处直连底层写入的点已消除 |
+> | "日历查询 / 核对 / 恢复 与 4 个新工具：未完成" | **已完成**——`get_garmin_calendar`、`get_garmin_write_operation`、`reconcile_garmin_write_operation`、`resume_garmin_write_operation` 均已交付，工具总数 18 |
+> | "4 个新工具未实现，公共类型未从根入口导出" | 工具已实现；公共类型导出情况见 `docs/calendar-write-recovery.md` |
+> | **§1 末："这 3 个工具也不接受 `idempotencyKey`，实际只有 2 个支持"** | **续修后又发现一层缺口并已修复**：服务层签名接受并不等于 MCP 客户端可达。补齐 `create_and_schedule_garmin_workout` 与 `unschedule_garmin_workout` 的输入 schema 后，5 个写工具**全部**可经真实 MCP 参数层传入 `idempotencyKey`（提交 `ede191f`，`src/mcp.ts:455`、`:472`） |
+> | **§0/§2 "安全底座（持久日志 + 跨进程锁 + 类型化结果）：完成"** | 基础设施本身确已完成，但其中**"提交证明"这一条在 Linux 上不成立**：`assertLandedFile` 只比对 `(dev, ino)`，而 POSIX 在 unlink 后会**回收刚释放的 inode 号**，因此 `rm` + 同长度重写可冒充已提交日志，store 静默接受一个自己从未写过的文件。macOS/APFS 分配新 inode，所以本机一直是绿的——**是平台矩阵（C10）把它挖出来的**。已改为**回读落地字节**与 payload 比对（提交 `ff128b6`），并把 inode 对与 size 降为廉价前置信号；新增用例**主动屏蔽 inode 信号**，使断言在任何平台都钉住字节校验 |
+> | "`npm run build` 本机不可运行：`clean` 被批量删除守卫拦截" | **判断有误**：那是当时所用 shell 的行为，不是项目问题。`npm run build` / `pack:smoke` / `test:distribution` 本轮全部 exit 0 |
+> | "日志无归档，32 MiB 上限后拒写" | 仍成立（限制条款未改） |
+> | "文档：完成" | **当时即不成立**——文档同时存在"已完成"与"未实现"两种口径；续修已按实际状态统一 |
+> | **§8 "下一批"第 1、2 条** | 均**已完成**：CI 平台作业已接入 journal/lock/migration/private-state/stdio 恢复用例；3 个工具的协调器托管与 5 工具 `idempotencyKey` 已落地（后者含参数层修复） |
+> | "三平台验证：仅 macOS；Linux/Windows 未跑，CI 也未接入新用例" | CI 平台作业**已接入**并覆盖上述恢复用例。**实测结果：** macOS 本机 12 套件 / 189 用例（两批：6/55 + 6/134）exit 0；Linux `arm64v8/ubuntu:22.04` 容器上 Node 20 与 Node 22 各自跑完整 7 条命令全部 exit 0（该电池正是发现 inode 回收缺陷的通道）；**Windows 本机无执行能力，仍未实测**。逐项数字与通道差异见 `docs/verification.md` 的 "Platform results, continuation round" 一节 |
+>
+> 续修逐项状态、真实命令结果与证据边界以 `docs/calendar-write-recovery.md` 与
+> `docs/verification.md` 的 "continuation round" 一节为准。
+>
+> 另外，`a527c7e`（本文所称基线之一）的 `tests/fixtures/mcp-tools-baseline.json` 与当时的
+> `src/mcp.ts` **不一致**：源码已含 `duplicatePolicy`，夹具未同步，因此该修订上
+> `tests/mcp.test.ts` 实际是失败的。该缺陷已在续修 C8b 修复。
+>
+> **§1 的四处直连写入点已消除**（`:566` / `:791` / `:804` / `:836` 的行号属第一轮快照，
+> 不再对应当前源码）；§1 中"未托管日志的写入路径"一节只作为第一轮的缺陷记录阅读。
+
 ## 0. 总判
 
 **安全基础设施与模拟验收已完成；目标地区的日历查询与自动恢复受能力限制。**
