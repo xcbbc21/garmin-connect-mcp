@@ -1465,4 +1465,162 @@ describe('GarminClient', () => {
     ])
     expect(latestGarmin().getWorkouts).toHaveBeenCalledTimes(2)
   })
+
+  describe('calendar range reads', () => {
+    const range = {
+      startDate: '2026-09-14',
+      endDate: '2026-09-16',
+      timezone: 'Asia/Shanghai',
+    }
+
+    it('posts the verified GraphQL body to the global gateway and returns the parsed body', async () => {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+      latestGarmin().client.client.request.mockResolvedValue({
+        data: { data: { workoutScheduleSummariesScalar: [] } },
+      })
+
+      const snapshot = await client.getCalendarRange(range)
+
+      expect(latestGarmin().client.client.request).toHaveBeenCalledTimes(1)
+      expect(latestGarmin().client.client.request).toHaveBeenCalledWith({
+        method: 'POST',
+        url: 'https://connectapi.garmin.com/graphql-gateway/graphql',
+        data: {
+          query: 'query{workoutScheduleSummariesScalar(' +
+            'startDate:"2026-09-13", endDate:"2026-09-17")}',
+        },
+      })
+      expect(snapshot.requestsIssued).toBe(1)
+      expect(snapshot.probedRange).toEqual({
+        startDate: '2026-09-13',
+        endDate: '2026-09-17',
+        timezone: 'Asia/Shanghai',
+      })
+    })
+
+    it('reports a complete empty read as complete instead of as a failed read', async () => {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+      latestGarmin().client.client.request.mockResolvedValue({
+        data: { data: { workoutScheduleSummariesScalar: [] } },
+      })
+
+      const snapshot = await client.getCalendarRange(range)
+
+      expect(snapshot.entries).toEqual([])
+      expect(snapshot.complete).toBe(true)
+      expect(snapshot.missingRanges).toEqual([])
+      expect(snapshot.warnings).toEqual([
+        expect.stringContaining('[BOUNDARY_PADDING_APPLIED]'),
+        // The requested label is echoed, never used to shift a date, and the
+        // verified query carries no timezone parameter.
+        expect.stringContaining('[TIMEZONE_NOT_IN_VERIFIED_PROTOCOL]'),
+      ])
+    })
+
+    it('never reports a failed calendar read as an empty range', async () => {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+      latestGarmin().client.client.request.mockRejectedValue(
+        Object.assign(new Error('upstream exploded'), { status: 500 }),
+      )
+
+      const snapshot = await client.getCalendarRange(range)
+
+      expect(snapshot.entries).toEqual([])
+      expect(snapshot.complete).toBe(false)
+      expect(snapshot.missingRanges).toEqual([{
+        startDate: '2026-09-14',
+        endDate: '2026-09-16',
+      }])
+      expect(snapshot.warnings.some(
+        warning => warning.includes('[CHUNK_READ_FAILED]'),
+      )).toBe(true)
+      // A non-idempotent-looking read is still not retried: one request per slice.
+      expect(latestGarmin().client.client.request).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not send upstream error text back through the read path', async () => {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+      latestGarmin().client.client.request.mockRejectedValue(
+        new Error('Request failed with cookie session=super-secret-token'),
+      )
+
+      const snapshot = await client.getCalendarRange(range)
+
+      const warnings = snapshot.warnings.join('\n')
+      expect(warnings).not.toContain('super-secret-token')
+      expect(warnings).toContain(
+        'Garmin Calendar query failed; the range is unread and no write is implied',
+      )
+    })
+
+    it('refuses a calendar read for a region with no first-hand evidence, without sending', async () => {
+      const client = new GarminClient(
+        { ...baseConfig, region: 'cn' },
+        { logger: createContext().logger },
+      )
+
+      await expect(client.getCalendarRange(range)).rejects.toMatchObject({
+        name: 'GarminWriteError',
+        code: 'CALENDAR_QUERY_UNSUPPORTED',
+        outcome: 'not_applied',
+      })
+      // The transport refuses on its own too, so a caller that builds its own
+      // adapter cannot route around the gate.
+      await expect(client.calendarTransport().query({ query: 'query{ping}' }))
+        .rejects.toMatchObject({
+          code: 'CALENDAR_QUERY_UNSUPPORTED',
+          outcome: 'not_applied',
+        })
+      expect(latestGarmin().client.client.request).not.toHaveBeenCalled()
+    })
+
+    it('refuses to guess a pagination cursor for the calendar range query', async () => {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+
+      await expect(client.calendarTransport().query({
+        query: 'query{workoutScheduleSummariesScalar(startDate:"2026-09-14", endDate:"2026-09-14")}',
+        cursor: 'page-2',
+      })).rejects.toMatchObject({
+        code: 'CALENDAR_QUERY_UNSUPPORTED',
+        outcome: 'not_applied',
+      })
+      expect(latestGarmin().client.client.request).not.toHaveBeenCalled()
+    })
+
+    it('rejects an empty calendar query before any request', async () => {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+
+      await expect(client.calendarTransport().query({ query: '   ' })).rejects.toThrow(
+        'Invalid Garmin Calendar GraphQL query',
+      )
+      expect(latestGarmin().client.client.request).not.toHaveBeenCalled()
+    })
+
+    it('rejects an over-long calendar range before any request', async () => {
+      const client = new GarminClient(baseConfig, { logger: createContext().logger })
+
+      await expect(client.getCalendarRange({
+        startDate: '2025-01-01',
+        endDate: '2026-09-16',
+        timezone: 'Asia/Shanghai',
+      })).rejects.toMatchObject({ name: 'CalendarRangeError', code: 'CALENDAR_RANGE_TOO_LONG' })
+      expect(latestGarmin().client.client.request).not.toHaveBeenCalled()
+    })
+
+    it('surfaces an unauthorized calendar read as an authentication error without retrying', async () => {
+      const client = new GarminClient({
+        ...baseConfig,
+        sessionToken: JSON.stringify({ oauth1: {}, oauth2: {} }),
+      }, { logger: createContext().logger })
+      latestGarmin().client.client.request.mockRejectedValue(
+        Object.assign(new Error('unauthorized'), { status: 401 }),
+      )
+
+      await expect(client.getCalendarRange(range)).resolves.toMatchObject({ complete: false })
+      await expect(client.calendarTransport().query({ query: 'query{ping}' })).rejects.toThrow(
+        'garmin-connect-auth serve',
+      )
+      expect(latestGarmin().client.client.request).toHaveBeenCalledTimes(2)
+    })
+  })
 })

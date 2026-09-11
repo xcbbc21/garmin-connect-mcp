@@ -23,8 +23,17 @@ import {
 import { MemoryCache } from './utils/cache'
 import { parseLocalDate } from './utils/date'
 import {
+  CALENDAR_SUPPORTED_REGIONS,
+  createCalendarAdapter,
+  type CalendarAdapterOptions,
+  type CalendarGraphqlRequest,
+  type CalendarGraphqlTransport,
+} from './calendar/adapter'
+import type { CalendarRange, CalendarSnapshot } from './calendar/types'
+import {
   GarminWriteIdentityChangedError,
   GarminWriteTransportError,
+  notAppliedWriteError,
   WRITE_ERROR_CODES,
 } from './write-operations/errors'
 import {
@@ -881,6 +890,112 @@ export class GarminClient {
         )
       }
       throw toWriteTransportError(error)
+    }
+  }
+
+  /**
+   * Read the Garmin Calendar for an inclusive date range.
+   *
+   * This is the production entry point for `src/calendar/adapter.ts`. The
+   * adapter itself is transport-agnostic (that is what lets its protocol
+   * handling be tested against a fake), so the region gate and the wire are
+   * bound here:
+   *
+   * - a region without a first-hand verified calendar read never reaches the
+   *   wire — the adapter refuses first and this method refuses again, so
+   *   neither a caller that skips the adapter nor one that wraps it can send an
+   *   unverified read;
+   * - nothing about the read is cached in or written to local state, and no
+   *   write is ever issued from this path;
+   * - a failed read is an *error*, never an empty range. The adapter turns it
+   *   into `complete: false` plus `missingRanges`, which supports "not
+   *   observed" and never "the entry is absent".
+   */
+  async getCalendarRange(
+    range: CalendarRange,
+    options: Omit<CalendarAdapterOptions, 'region' | 'transport'> = {},
+  ): Promise<CalendarSnapshot> {
+    const adapter = createCalendarAdapter({
+      ...options,
+      region: this.config.region,
+      transport: this.calendarTransport(),
+    })
+    return adapter.getCalendarRange(range)
+  }
+
+  /**
+   * The read-only transport the calendar adapter sends through.
+   *
+   * Kept separate from `getCalendarRange` so a caller that owns its own adapter
+   * instance (bounds, clock) can still be forced through the same gate.
+   */
+  calendarTransport(): CalendarGraphqlTransport {
+    return { query: request => this.queryCalendarGateway(request) }
+  }
+
+  private async queryCalendarGateway(request: CalendarGraphqlRequest): Promise<unknown> {
+    const query = typeof request?.query === 'string' ? request.query.trim() : ''
+    if (!query) {
+      throw new PublicToolError('Invalid Garmin Calendar GraphQL query')
+    }
+    const region = this.config.region
+    if (!(CALENDAR_SUPPORTED_REGIONS as readonly string[]).includes(region)) {
+      throw notAppliedWriteError(
+        WRITE_ERROR_CODES.CALENDAR_QUERY_UNSUPPORTED,
+        `Garmin Calendar range queries are not supported for region '${region}': ` +
+          'no first-hand evidence covers a calendar read there ' +
+          '(docs/calendar-api-verification.md); no request was built or sent',
+      )
+    }
+    if (request.cursor !== undefined) {
+      // No source documents a pagination parameter for this query. Sending one
+      // under a guessed name is worse than not sending it: a provider that
+      // ignored the guess could hand back the first page again, and a page
+      // without a repeat cursor would then look like a finished slice.
+      throw notAppliedWriteError(
+        WRITE_ERROR_CODES.CALENDAR_QUERY_UNSUPPORTED,
+        'No verified pagination parameter exists for the Garmin Calendar range query, ' +
+          'so the next page is not requested; the slice is reported incomplete instead ' +
+          'of being assembled from a guessed cursor',
+      )
+    }
+
+    await this.ensureConnected()
+    const attemptEpoch = this.authEpoch
+    const host = region === 'cn' ? 'connectapi.garmin.cn' : 'connectapi.garmin.com'
+    const url = `https://${host}/graphql-gateway/graphql`
+    try {
+      const response = await this.withRequestTimeout(
+        () => this.gc.client.client.request({ method: 'POST', url, data: { query } }),
+        'Garmin Calendar query timed out; the range is unread and no write is implied',
+      )
+      if (attemptEpoch !== this.authEpoch) {
+        throw new PublicToolError(
+          'Garmin authentication changed during the calendar query; retry the read',
+        )
+      }
+      this.log('debug', '[garmin] Calendar range query completed.')
+      return (response as any)?.data ?? null
+    } catch (error) {
+      const status = getHttpStatus(error)
+      if (status === 401 || status === 403) {
+        if (this.hasConfiguredSession() && !this.sessionTokenRejected) {
+          this.rejectConfiguredSessionToken()
+        } else {
+          this.connected = false
+          this.authenticatedAccount = undefined
+        }
+        throw new PublicToolError(
+          'Garmin authentication is not authorized for a calendar query; ' +
+          `run ${GARMIN_BROWSER_AUTH_COMMAND}`,
+        )
+      }
+      if (error instanceof PublicToolError) throw error
+      // A read failure must not be re-exposed verbatim: the adapter reports it
+      // as an incomplete slice, and nothing here is retried automatically.
+      throw new PublicToolError(
+        'Garmin Calendar query failed; the range is unread and no write is implied',
+      )
     }
   }
 

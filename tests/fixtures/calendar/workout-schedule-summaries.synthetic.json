@@ -1,0 +1,85 @@
+{
+  "data": {
+    "workoutScheduleSummariesScalar": [
+      {
+        "scheduleDate": "2026-09-10",
+        "scheduledWorkoutId": 9001,
+        "workoutId": 1234567,
+        "workoutUuid": null,
+        "workoutName": "Easy Run",
+        "workoutType": "running",
+        "workoutPhrase": "AEROBIC_LOW_BASE",
+        "tpType": null,
+        "tpPlanName": null,
+        "trainingPlanId": null,
+        "fbtAdaptivePlanId": null,
+        "isRestDay": false,
+        "race": false,
+        "estimatedDurationInSecs": 1800,
+        "estimatedDistanceInMeters": 5000,
+        "associatedActivityId": null,
+        "unknownBlock": 7
+      },
+      {
+        "scheduleDate": "2026-09-11",
+        "scheduledWorkoutId": null,
+        "workoutId": null,
+        "workoutUuid": "3f1c9e6a-1d2b-4c3d-8e4f-5a6b7c8d9e0f",
+        "workoutName": "Base Run",
+        "workoutType": "running",
+        "workoutPhrase": "LONG_WORKOUT",
+        "tpType": "ADAPTIVE",
+        "tpPlanName": "5K Training Plan",
+        "trainingPlanId": 3001,
+        "fbtAdaptivePlanId": 3001,
+        "isRestDay": false,
+        "race": false,
+        "estimatedDurationInSecs": 2400,
+        "estimatedDistanceInMeters": null,
+        "associatedActivityId": null
+      },
+      {
+        "scheduleDate": "2026-09-12",
+        "scheduledWorkoutId": null,
+        "workoutId": "9007199254740993",
+        "workoutUuid": null,
+        "workoutName": "Leg Day",
+        "workoutType": "strength_training",
+        "tpType": "STP",
+        "tpPlanName": "Push, Pull, Legs",
+        "trainingPlanId": 67890,
+        "fbtAdaptivePlanId": null,
+        "isRestDay": false,
+        "race": false,
+        "associatedActivityId": null
+      },
+      {
+        "scheduleDate": "2026-09-13",
+        "scheduledWorkoutId": null,
+        "workoutId": null,
+        "workoutUuid": null,
+        "workoutName": null,
+        "workoutType": null,
+        "tpType": null,
+        "tpPlanName": null,
+        "isRestDay": true,
+        "race": false,
+        "associatedActivityId": null
+      },
+      {
+        "scheduleDate": "2026-09-14",
+        "scheduledWorkoutId": 9005,
+        "workoutId": 4242,
+        "workoutUuid": null,
+        "workoutName": "City Half Marathon",
+        "workoutType": "running",
+        "tpType": null,
+        "tpPlanName": null,
+        "isRestDay": false,
+        "race": true,
+        "estimatedDurationInSecs": 6300,
+        "associatedActivityId": 555000
+      }
+    ]
+  }
+}
