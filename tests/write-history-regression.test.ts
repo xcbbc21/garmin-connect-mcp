@@ -309,4 +309,40 @@ describe('history aggregation must hide nothing', () => {
     expect(preview.steps[0].operationId).toBe('new')
     expect(writer.schedule).not.toHaveBeenCalled()
   })
+
+  it('keeps the unknown verdict when it is seeded before the permissive record', async () => {
+    // The exact insertion order that a *last*-match scan gets wrong: here the
+    // `unknown` record is the FIRST hit for the business key and the
+    // `not_attempted` record is the LAST one, so an implementation that lets
+    // the final matching record win would authorise a fresh POST against a key
+    // whose attempt is still unresolved. Paired with the first case above
+    // (permissive first, unknown last) this pins the verdict down for BOTH
+    // orders, which is what "regardless of insertion order" has to mean for an
+    // `unknown` step -- that is the combination the reversed case below only
+    // exercised with succeeded / not_attempted.
+    const store = new InMemoryStore(ACCOUNT)
+    const businessKey = scheduleBusinessKey(ACCOUNT, 'w6', '2026-09-28')
+    store.seed(makeOp('new', [step({
+      stepId: 's-new',
+      businessKey,
+      status: 'unknown',
+      errorCode: 'WRITE_OUTCOME_UNKNOWN',
+    })]))
+    store.seed(makeOp('old', [step({ stepId: 's-old', businessKey, status: 'not_attempted' })]))
+    const writer = { schedule: jest.fn() }
+    const coordinator = makeCoordinator(store, writer)
+
+    const preview = await coordinator.previewSchedule({
+      kind: 'schedule',
+      timezone: TIMEZONE,
+      request: { workoutId: 'w6', date: '2026-09-28', timezone: TIMEZONE },
+      steps: [{ workoutId: 'w6', date: '2026-09-28' }],
+    })
+
+    expect(preview.requiresConfirmation).toBe(false)
+    expect(preview.steps[0].action).toBe('blocked')
+    expect(preview.steps[0].status).toBe('unknown')
+    expect(preview.steps[0].operationId).toBe('new')
+    expect(writer.schedule).not.toHaveBeenCalled()
+  })
 })
