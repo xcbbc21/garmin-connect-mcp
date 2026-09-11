@@ -627,7 +627,7 @@
     },
     {
       "name": "create_and_schedule_garmin_workout",
-      "description": "Preview then create one structured Garmin workout and schedule it on a local calendar date in one confirmed operation. If creation succeeds but scheduling fails, the result reports the partial outcome and must not be blindly retried.",
+      "description": "Preview then create one structured Garmin workout and schedule it on a local calendar date in one confirmed operation. If creation succeeds but scheduling fails, the result reports the partial outcome and must not be blindly retried. Both phases are journaled: a repeated request with the same idempotencyKey returns the stored operation instead of creating another template or another calendar entry.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -780,6 +780,13 @@
             "maxLength": 256,
             "pattern": "^[^\\s:]+:\\d{1,9}$",
             "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Optional stable request label for this account. Reuse the same value to retrieve the durable operation instead of writing again; a different value never bypasses an in-flight or unknown write. Not a permission token."
           }
         },
         "required": [
@@ -801,7 +808,7 @@
     },
     {
       "name": "unschedule_garmin_workout",
-      "description": "Preview then remove one Garmin Calendar entry by the workoutScheduleId returned from a prior schedule operation. This removes the calendar entry, not the reusable workout-library template.",
+      "description": "Preview then remove one Garmin Calendar entry by the workoutScheduleId returned from a prior schedule operation. This removes the calendar entry, not the reusable workout-library template. Removal is journaled: a repeated request with the same idempotencyKey returns the stored operation instead of deleting again.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -820,6 +827,13 @@
             "maxLength": 256,
             "pattern": "^[^\\s:]+:\\d{1,9}$",
             "description": "One-time handle returned by the matching preview call, as <operationId>:<previewRevision>."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "description": "Optional stable request label for this account. Reuse the same value to retrieve the durable operation instead of writing again; a different value never bypasses an in-flight or unknown write. Not a permission token."
           }
         },
         "required": [

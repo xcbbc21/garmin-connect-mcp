@@ -439,7 +439,9 @@ export function createMcpServer(
   register(
     'create_and_schedule_garmin_workout',
     'Preview then create one structured Garmin workout and schedule it on a local calendar date in one confirmed operation. ' +
-      'If creation succeeds but scheduling fails, the result reports the partial outcome and must not be blindly retried.',
+      'If creation succeeds but scheduling fails, the result reports the partial outcome and must not be blindly retried. ' +
+      'Both phases are journaled: a repeated request with the same idempotencyKey returns the stored operation ' +
+      'instead of creating another template or another calendar entry.',
     {
       workout: z.object({
         name: z.string().min(1).max(80),
@@ -450,6 +452,7 @@ export function createMcpServer(
       date: calendarDateSchema,
       timezone: timezoneSchema,
       ...confirmationSchema,
+      idempotencyKey: idempotencyKeySchema,
     },
     (args: CreateAndScheduleWorkoutArgs) => invokeTool(() => service.createAndScheduleWorkout(args)),
     WRITE_ANNOTATIONS,
@@ -459,12 +462,14 @@ export function createMcpServer(
   register(
     'unschedule_garmin_workout',
     'Preview then remove one Garmin Calendar entry by the workoutScheduleId returned from a prior schedule operation. ' +
-      'This removes the calendar entry, not the reusable workout-library template.',
+      'This removes the calendar entry, not the reusable workout-library template. Removal is journaled: a repeated ' +
+      'request with the same idempotencyKey returns the stored operation instead of deleting again.',
     {
       workoutScheduleId: z.string().min(1).max(128).describe(
         'Garmin Calendar entry ID returned as workoutScheduleId by a schedule operation.',
       ),
       ...confirmationSchema,
+      idempotencyKey: idempotencyKeySchema,
     },
     (args: UnscheduleWorkoutArgs) => invokeTool(() => service.unscheduleWorkout(args)),
     WRITE_ANNOTATIONS,

@@ -322,6 +322,125 @@ describe('MCP adapter', () => {
     }
   })
 
+  /**
+   * The plan requires all five write tools to accept an optional
+   * `idempotencyKey` *through the real MCP parameter layer*, not merely in the
+   * service signature. A service-only capability the schema does not expose is
+   * unreachable for every MCP client, so this asserts the value survives schema
+   * validation and reaches the service.
+   */
+  it('accepts an optional idempotencyKey on all five write tools through the MCP parameter layer', async () => {
+    const service = serviceStub()
+    const server = createMcpServer(service as any)
+    const client = new Client({ name: 'test-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    const step = { type: 'warmup', endCondition: 'time', endValue: 600 } as const
+    const calls: Array<{ name: string; args: Record<string, unknown>; spy: jest.Mock }> = [
+      {
+        name: 'create_garmin_workout',
+        args: { name: 'Easy Run', steps: [step], idempotencyKey: 'create-key-1' },
+        spy: service.createWorkout,
+      },
+      {
+        name: 'schedule_garmin_workout',
+        args: { workoutId: 'w-1', date: '2026-09-15', idempotencyKey: 'schedule-key-1' },
+        spy: service.scheduleWorkout,
+      },
+      {
+        name: 'batch_schedule_garmin_workouts',
+        args: {
+          schedules: [{ workoutId: 'w-1', date: '2026-09-15' }],
+          idempotencyKey: 'batch-key-1',
+        },
+        spy: service.batchScheduleWorkouts,
+      },
+      {
+        name: 'create_and_schedule_garmin_workout',
+        args: {
+          workout: { name: 'Easy Run', steps: [step] },
+          date: '2026-09-15',
+          idempotencyKey: 'combo-key-1',
+        },
+        spy: service.createAndScheduleWorkout,
+      },
+      {
+        name: 'unschedule_garmin_workout',
+        args: { workoutScheduleId: 's-1', idempotencyKey: 'unschedule-key-1' },
+        spy: service.unscheduleWorkout,
+      },
+    ]
+
+    try {
+      for (const call of calls) {
+        const result = await client.callTool({ name: call.name, arguments: call.args })
+        expect(result.isError).not.toBe(true)
+        expect(call.spy).toHaveBeenCalledWith(
+          expect.objectContaining({ idempotencyKey: call.args.idempotencyKey }),
+        )
+      }
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  it('rejects an out-of-contract idempotencyKey before any write tool reaches the service', async () => {
+    const service = serviceStub()
+    const server = createMcpServer(service as any)
+    const client = new Client({ name: 'test-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    const step = { type: 'warmup', endCondition: 'time', endValue: 600 } as const
+    const calls: Array<{ name: string; args: Record<string, unknown>; spy: jest.Mock }> = [
+      {
+        name: 'create_garmin_workout',
+        args: { name: 'Easy Run', steps: [step], idempotencyKey: 'bad key' },
+        spy: service.createWorkout,
+      },
+      {
+        name: 'schedule_garmin_workout',
+        args: { workoutId: 'w-1', date: '2026-09-15', idempotencyKey: 'bad key' },
+        spy: service.scheduleWorkout,
+      },
+      {
+        name: 'batch_schedule_garmin_workouts',
+        args: {
+          schedules: [{ workoutId: 'w-1', date: '2026-09-15' }],
+          idempotencyKey: 'bad key',
+        },
+        spy: service.batchScheduleWorkouts,
+      },
+      {
+        name: 'create_and_schedule_garmin_workout',
+        args: {
+          workout: { name: 'Easy Run', steps: [step] },
+          date: '2026-09-15',
+          idempotencyKey: 'bad key',
+        },
+        spy: service.createAndScheduleWorkout,
+      },
+      {
+        name: 'unschedule_garmin_workout',
+        args: { workoutScheduleId: 's-1', idempotencyKey: 'bad key' },
+        spy: service.unscheduleWorkout,
+      },
+    ]
+
+    try {
+      for (const call of calls) {
+        const result = await client.callTool({ name: call.name, arguments: call.args })
+        expect(result.isError).toBe(true)
+        expect(call.spy).not.toHaveBeenCalled()
+      }
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('accepts the revision-bound confirmation handle the service issues', async () => {
     const service = serviceStub()
     service.scheduleWorkout.mockResolvedValue({ success: true, workoutScheduleId: '1' })
