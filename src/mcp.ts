@@ -566,11 +566,15 @@ async function main(): Promise<void> {
   ]
   const account = standaloneAccountAlias()
   const client = new GarminClient(config, { allowUnconfigured: true })
+  // Aborted by the shutdown hooks. A batch that is between entries sees it and
+  // stops dispatching instead of sending more writes behind a closing server.
+  const pendingWrites = new AbortController()
   const service = new GarminToolService(client, {
     activityDetail: config.activityDetail,
     fitDownloadDir: config.fitDownloadDir,
     accountUsername: config.username,
     accountRegion: config.region,
+    shutdownSignal: pendingWrites.signal,
   })
   const server = createMcpServer(service, {
     createAuthentication: mcpServer => new McpGarminAuthCoordinator({
@@ -583,7 +587,7 @@ async function main(): Promise<void> {
     }),
   })
   await server.connect(new StdioServerTransport())
-  const shutdown = installMcpShutdownHooks(server)
+  const shutdown = installMcpShutdownHooks(server, { pendingWrites })
   if (process.stdin.readableEnded || process.stdin.destroyed) {
     void shutdown.shutdown(0)
   }

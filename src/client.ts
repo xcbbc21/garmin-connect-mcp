@@ -22,7 +22,11 @@ import {
 } from './session-store'
 import { MemoryCache } from './utils/cache'
 import { parseLocalDate } from './utils/date'
-import { GarminWriteTransportError, WRITE_ERROR_CODES } from './write-operations/errors'
+import {
+  GarminWriteIdentityChangedError,
+  GarminWriteTransportError,
+  WRITE_ERROR_CODES,
+} from './write-operations/errors'
 import {
   GARMIN_BROWSER_AUTH_COMMAND,
   GarminAuthenticationRequiredError,
@@ -792,7 +796,7 @@ export class GarminClient {
           'outcome is unknown; check the Garmin workout library before retrying',
       )
       if (attemptEpoch !== this.authEpoch) {
-        throw new PublicToolError(
+        throw new GarminWriteIdentityChangedError(
           'Garmin authentication changed during workout creation; outcome is unknown; ' +
           'check the Garmin workout library before retrying',
         )
@@ -818,7 +822,7 @@ export class GarminClient {
         }
         throw new GarminWriteTransportError(
           'unknown',
-          WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN,
+          WRITE_ERROR_CODES.WRITE_AUTH_EXPIRED,
           'Garmin authentication expired before workout creation; ' +
           'request a new preview and confirmation before trying again',
         )
@@ -853,7 +857,7 @@ export class GarminClient {
           'outcome is unknown; check Garmin Calendar before retrying',
       )
       if (attemptEpoch !== this.authEpoch) {
-        throw new PublicToolError(
+        throw new GarminWriteIdentityChangedError(
           'Garmin authentication changed during calendar update; outcome is unknown; ' +
             'check Garmin Calendar before retrying',
         )
@@ -871,7 +875,7 @@ export class GarminClient {
         }
         throw new GarminWriteTransportError(
           'unknown',
-          WRITE_ERROR_CODES.WRITE_OUTCOME_UNKNOWN,
+          WRITE_ERROR_CODES.WRITE_AUTH_EXPIRED,
           'Garmin authentication expired before calendar update; request a new preview ' +
             'and confirmation before trying again',
         )

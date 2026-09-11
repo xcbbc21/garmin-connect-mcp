@@ -46,17 +46,28 @@ describe('createAndScheduleWorkout routes through the coordinator', () => {
     const first = await service.createAndScheduleWorkout(payload as never) as { requiresConfirmation: boolean; confirmationId: string }
     expect(first.requiresConfirmation).toBe(true)
     await service.createAndScheduleWorkout({ ...payload, confirmed: true, confirmationId: first.confirmationId } as never)
-    const firstDispatchCount = (data.addWorkout as jest.Mock).mock.calls.length
+    const firstCreateCount = (data.addWorkout as jest.Mock).mock.calls.length
     const firstScheduleCount = (writer as jest.Mock).mock.calls.length
+    expect(firstCreateCount).toBe(1)
+    expect(firstScheduleCount).toBe(1)
 
-    // Second call with the same payload must not re-dispatch the schedule
-    // half. The create half may re-fire because it is a separate network
-    // call; the plan's crash-recovery contract is on the schedule step.
-    const second = await service.createAndScheduleWorkout(payload as never) as { requiresConfirmation: boolean; confirmationId: string; status?: string }
-    expect(second.requiresConfirmation).toBe(true)
-    await service.createAndScheduleWorkout({ ...payload, confirmed: true, confirmationId: second.confirmationId } as never)
+    // Both phases are already satisfied in the journal, so the second call is
+    // a no-op that reports the durable receipts instead of minting a
+    // confirmation that would write nothing.
+    const second = await service.createAndScheduleWorkout(payload as never) as {
+      requiresConfirmation: boolean
+      alreadyCreated?: boolean
+      alreadyScheduled?: boolean
+      workoutId?: string
+    }
+    expect(second).toMatchObject({
+      requiresConfirmation: false,
+      alreadyCreated: true,
+      alreadyScheduled: true,
+      workoutId: 'w-A',
+    })
+    expect((data.addWorkout as jest.Mock).mock.calls.length).toBe(firstCreateCount)
     expect((writer as jest.Mock).mock.calls.length).toBe(firstScheduleCount)
-    void firstDispatchCount
   })
 
   it('createAndSchedule records the schedule operation in the journal', async () => {

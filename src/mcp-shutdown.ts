@@ -12,6 +12,17 @@ export interface McpShutdownHooksOptions {
   signals?: NodeJS.Process
   exit?: (code: number) => void
   closeTimeoutMs?: number
+  /**
+   * Aborted the moment a shutdown is requested, before any draining starts.
+   *
+   * An in-progress write batch watches this signal between entries, so closing
+   * the server stops it from dispatching further non-idempotent writes instead
+   * of queueing them behind a transport that is about to disappear. Already
+   * dispatched entries are never abandoned: their real outcome is still
+   * recorded, because an abort is a local decision and says nothing about what
+   * Garmin did with a request that was already sent.
+   */
+  pendingWrites?: AbortController
 }
 
 export interface McpShutdownHooks {
@@ -66,6 +77,9 @@ export function installMcpShutdownHooks(
     } catch {
       // Continue cleanup even if an injected or already-broken stream fails.
     }
+    // Announce the shutdown before draining: a running batch must stop sending
+    // new entries now, not after `close()` has already been attempted.
+    options.pendingWrites?.abort()
     shutdownOperation = closeWithin(target, closeTimeoutMs)
       .finally(() => {
         dispose()
