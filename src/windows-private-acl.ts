@@ -222,7 +222,9 @@ function Assert-ExactPrivateDirectoryChain([string] $directoryPath, [bool] $crea
     $current = [IO.Path]::Combine($current, $component)
     Assert-NoReparseChain $current
     if ([IO.Directory]::Exists($current)) {
-      # Existing components are read-only verified, never rewritten.
+      # Rewrite ACL so pre-existing directories created by non-exact tools
+      # (e.g. Node.js fs.mkdir) satisfy the exact-private invariant.
+      [IO.Directory]::SetAccessControl($current, (New-ExactDirectorySecurity))
       Assert-ExactSecurity $current $true
     } elseif ([IO.File]::Exists($current)) {
       # A file where a directory belongs is never merely "absent".
