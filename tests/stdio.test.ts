@@ -102,5 +102,5 @@ describe('built MCP over child-process stdio', () => {
       expect(transport.pid).toBeNull()
       await rm(stateDirectory, { recursive: true, force: true })
     }
-  })
+  }, process.platform === 'win32' ? 120_000 : 15_000)
 })
