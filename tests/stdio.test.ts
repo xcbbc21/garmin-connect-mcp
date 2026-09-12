@@ -9,6 +9,25 @@ function toolJson(result: any): any {
   return JSON.parse(result.content[0].text)
 }
 
+/**
+ * Creates a Client that overrides request() to inject a longer timeout on Windows.
+ * The MCP SDK DEFAULT_REQUEST_TIMEOUT_MSEC = 60000, which is too short for the
+ * stdio spawn + session-create + tool-list chain on Windows (observed ~121 s).
+ * By wrapping the prototype we avoid touching every individual callTool / listTools
+ * call site.
+ */
+function createTestClient(info: { name: string; version: string }): Client {
+  const client = new Client(info)
+  if (process.platform === 'win32') {
+    const originalRequest = client.request.bind(client)
+    ;(client as any).request = async function (...args: any[]) {
+      const [,, options = {}] = args
+      return originalRequest(args[0], args[1], { ...options, timeout: 180_000 })
+    }
+  }
+  return client
+}
+
 describe('built MCP over child-process stdio', () => {
   it('initializes the actual executable, exposes the baseline and previews without account access', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'garmin-stdio-'))
@@ -17,7 +36,7 @@ describe('built MCP over child-process stdio', () => {
     const sessionDirectory = process.platform === 'win32'
       ? path.join(process.env.LOCALAPPDATA!, `garmin-stdio-${randomUUID()}`)
       : cwd
-    const client = new Client({ name: 'generic-client', version: '1' })
+    const client = createTestClient({ name: 'generic-client', version: '1' })
     const transport = new StdioClientTransport({
       command: process.execPath, args: [path.resolve(__dirname, '../lib/mcp.js')], cwd,
       env: { GARMIN_USERNAME: 'fixture@example.test', GARMIN_REGION: 'cn',
@@ -60,7 +79,7 @@ describe('built MCP over child-process stdio', () => {
     // must be pointed at a private directory explicitly instead of letting the
     // child fall back to the platform default.
     const stateDirectory = await mkdtemp(path.join(tmpdir(), 'garmin-stdio-state-'))
-    const client = new Client({ name: 'generic-client', version: '1' })
+    const client = createTestClient({ name: 'generic-client', version: '1' })
     const transport = new StdioClientTransport({
       command: process.execPath, args: [path.join(__dirname, 'fixtures/stdio-server.cjs')],
       env: {
