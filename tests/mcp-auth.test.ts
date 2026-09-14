@@ -114,7 +114,7 @@ describe('MCP Garmin browser authentication coordinator', () => {
 
     await expect(operation).rejects.toBeInstanceOf(PublicToolError)
     await expect(operation).rejects.toThrow(
-      'garmin-connect-auth serve --account default --region cn --open',
+      'garmin-connect-auth serve --account default --open',
     )
     await expect(operation).rejects.toThrow('GARMIN_SESSION_TOKEN_FILE')
     await expect(operation).rejects.toThrow('--output')

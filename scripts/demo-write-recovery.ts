@@ -152,7 +152,6 @@ async function open(stateDirectory: string, peer: Peer, env: Record<string, stri
       FAKE_GARMIN_URL: peer.url,
       GARMIN_STATE_DIR: stateDirectory,
       GARMIN_USERNAME: ACCOUNT,
-      GARMIN_REGION: REGION,
       GARMIN_SESSION_TOKEN_FILE: sessionFile,
       FAKE_GARMIN_LOCK_WAIT_MS: '400',
       ...env,

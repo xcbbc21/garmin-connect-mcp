@@ -44,7 +44,7 @@ try {
   client = new Client({ name: 'package-consumer', version: '1' })
   const transport = new StdioClientTransport({
     command: process.execPath, args: [path.join(packageRoot, 'lib/mcp.js')], cwd: consumer,
-    env: { GARMIN_USERNAME: 'fixture@example.test', GARMIN_REGION: 'cn',
+    env: { GARMIN_USERNAME: 'fixture@example.test',
       GARMIN_SESSION_TOKEN_FILE: path.join(directory, 'missing.session.json') },
     stderr: 'pipe',
   })

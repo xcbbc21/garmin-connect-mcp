@@ -150,7 +150,7 @@ describe('session token file store', () => {
 
     await expect(readSessionTokenFile(path)).rejects.toThrow(
       'Garmin DI session format is obsolete; run ' +
-        'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
+        'garmin-connect-auth serve --account <alias> --open',
     )
   })
 

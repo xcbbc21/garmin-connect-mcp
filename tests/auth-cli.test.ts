@@ -135,11 +135,12 @@ describe('Garmin interactive auth CLI', () => {
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('garmin-connect-auth login [options]')
     expect(result.stdout).toContain(
-      'garmin-connect-auth serve --account <alias> --region <global|cn> --open [options]',
+      'garmin-connect-auth serve --account <alias> --open [options]',
     )
-    expect(result.stdout).toContain('garmin-connect-auth canary --region <global|cn>')
+    expect(result.stdout).toContain('garmin-connect-auth canary')
     expect(result.stdout).toContain('--account <alias>')
-    expect(result.stdout).toContain('--region <global|cn>')
+    expect(result.stdout).toContain('Garmin Connect China is used automatically')
+    expect(result.stdout).not.toContain('--region')
     expect(result.stdout).toContain('--output <path>')
     expect(result.stdout).toContain('password blank to use Garmin\'s browser page')
     expect(result.stderr).toBe('')
@@ -168,7 +169,7 @@ describe('Garmin interactive auth CLI', () => {
 
     expect(result.status).toBe(0)
     expect(result.stdout).toContain(
-      'garmin-connect-auth login --browser --region <global|cn> [options]',
+      'garmin-connect-auth login --browser [options]',
     )
     expect(result.stdout).toContain(
       '--browser               Legacy Playwright diagnostic',
@@ -187,14 +188,14 @@ describe('Garmin interactive auth CLI', () => {
       ['--import', require.resolve('tsx'), entrypoint, 'login', '--browser'],
       {
         encoding: 'utf8',
-        env: { ...process.env, GARMIN_REGION: 'cn', GARMIN_PASSWORD: 'PASSWORD_MARKER' },
+        env: { ...process.env, GARMIN_PASSWORD: 'PASSWORD_MARKER' },
         timeout: 15_000,
       },
     )
 
     expect(result.status).toBe(1)
     expect(result.stdout).toBe('')
-    expect(result.stderr).toBe('Browser login region is required; use global or cn\n')
+    expect(result.stderr).toBe('Interactive authentication requires a local terminal (TTY)\n')
     expect(result.stderr).not.toContain('PASSWORD_MARKER')
   })
 
@@ -267,7 +268,7 @@ describe('Garmin interactive auth CLI', () => {
     )
 
     expect(help.status).toBe(0)
-    expect(help.stdout).toContain('garmin-connect-auth canary --region <global|cn>')
+    expect(help.stdout).toContain('garmin-connect-auth canary')
     expect(help.stderr).toBe('')
     expect(version.status).toBe(0)
     expect(version.stdout).toBe(`${manifest.version}\n`)
@@ -293,7 +294,7 @@ describe('Garmin interactive auth CLI', () => {
 
     expect(help.status).toBe(0)
     expect(help.stdout).toContain(
-      'garmin-connect-auth serve --account <alias> --region <global|cn> --open [options]',
+      'garmin-connect-auth serve --account <alias> --open [options]',
     )
     expect(help.stdout).toContain('--open')
     expect(help.stderr).toBe('')
@@ -461,7 +462,7 @@ describe('Garmin interactive auth CLI', () => {
     const browserAuthenticate = jest.fn().mockResolvedValue({
       success: true,
       account: 'default',
-      region: 'global',
+      region: 'cn',
       sessionTokenFile: '/safe/default.json',
     })
 
@@ -489,7 +490,7 @@ describe('Garmin interactive auth CLI', () => {
     const browserAuthenticate = jest.fn().mockResolvedValue({
       success: true,
       account: 'default',
-      region: 'global',
+      region: 'cn',
       sessionTokenFile: '/safe/default.json',
     })
     const signal = new AbortController().signal
@@ -503,7 +504,7 @@ describe('Garmin interactive auth CLI', () => {
       browserDependencies: serveDependencies(browserAuthenticate),
     })).resolves.toEqual({
       account: 'default',
-      region: 'global',
+      region: 'cn',
       sessionTokenFile: path.resolve('/safe/default.json'),
       authenticationMode: 'browser',
       browserTrigger: 'blank_password',
@@ -659,7 +660,7 @@ describe('Garmin interactive auth CLI', () => {
         '--account',
         'personal',
         '--region',
-        'global',
+        'cn',
       ],
       env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
@@ -676,11 +677,11 @@ describe('Garmin interactive auth CLI', () => {
     const io: AuthCliIO = { prompt, write: jest.fn() }
     const authenticate = jest.fn().mockResolvedValue({
       success: true,
-      region: 'global',
+      region: 'cn',
     })
 
     await expect(runAuthServe({
-      argv: ['serve', '--open', '--account', 'work', '--region', 'global'],
+      argv: ['serve', '--open', '--account', 'work'],
       env: {
         XDG_CONFIG_HOME: '/private/config',
         GARMIN_PASSWORD: 'PASSWORD_MARKER',
@@ -689,7 +690,7 @@ describe('Garmin interactive auth CLI', () => {
       dependencies: serveDependencies(authenticate),
     })).resolves.toEqual({
       account: 'work',
-      region: 'global',
+      region: 'cn',
       sessionTokenFile:
         '/private/config/garmin-connect-mcp/accounts/work.session.json',
     })
@@ -714,7 +715,7 @@ describe('Garmin interactive auth CLI', () => {
     ))
     const authenticate = jest.fn()
     const operation = runAuthServe({
-      argv: ['serve', '--open', '--account', 'work', '--region', 'global'],
+      argv: ['serve', '--open', '--account', 'work'],
       env: { XDG_CONFIG_HOME: '/private/config' },
       io: { prompt, write: jest.fn() },
       signal: controller.signal,
@@ -728,7 +729,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(authenticate).not.toHaveBeenCalled()
   })
 
-  it('requires an explicit serve account, region, and system-browser opening', async () => {
+  it('requires an explicit serve account and system-browser opening', async () => {
     const io: AuthCliIO = { prompt: jest.fn(), write: jest.fn() }
     const authenticate = jest.fn()
 
@@ -736,18 +737,11 @@ describe('Garmin interactive auth CLI', () => {
       argv: ['serve', '--open'],
       env: {
         GARMIN_ACCOUNT: 'must-not-be-inferred',
-        GARMIN_REGION: 'cn',
         GARMIN_USERNAME: 'runner@example.test',
       },
       io,
       dependencies: serveDependencies(authenticate),
     })).rejects.toThrow('Serve account is required; use --account <alias>')
-    await expect(runAuthServe({
-      argv: ['serve', '--open', '--account', 'personal-cn'],
-      env: { GARMIN_REGION: 'cn', GARMIN_USERNAME: 'runner@example.test' },
-      io,
-      dependencies: serveDependencies(authenticate),
-    })).rejects.toThrow('Serve region is required; use global or cn')
     await expect(runAuthServe({
       argv: ['serve', '--account', 'personal-cn', '--region', 'cn'],
       env: { GARMIN_USERNAME: 'runner@example.test' },
@@ -881,23 +875,24 @@ describe('Garmin interactive auth CLI', () => {
     expect(write.mock.calls.flat().join('')).not.toContain('session_persisted=yes')
   })
 
-  it('does not infer browser-login region from GARMIN_REGION', async () => {
+  it('uses China for browser login without a region environment setting', async () => {
     const prompt = jest.fn()
     const io: AuthCliIO = { prompt, write: jest.fn() }
-    const setup = jest.fn()
+    const setup = jest.fn().mockResolvedValue({
+      ok: true,
+      region: 'cn',
+      persisted: true,
+    })
 
     await expect(runBrowserAuthSetup({
       argv: ['login', '--browser'],
-      env: {
-        GARMIN_REGION: 'cn',
-        GARMIN_USERNAME: 'runner@example.test',
-      },
+      env: { GARMIN_USERNAME: 'runner@example.test' },
       io,
       dependencies: browserDependencies(setup),
-    })).rejects.toThrow('Browser login region is required; use global or cn')
+    })).resolves.toMatchObject({ region: 'cn' })
 
     expect(prompt).not.toHaveBeenCalled()
-    expect(setup).not.toHaveBeenCalled()
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({ region: 'cn' }))
   })
 
   it('prompts visibly only for a missing username and keeps password/MFA in the browser', async () => {
@@ -906,12 +901,12 @@ describe('Garmin interactive auth CLI', () => {
     const io: AuthCliIO = { prompt, write }
     const setup = jest.fn().mockResolvedValue({
       ok: true,
-      region: 'global',
+      region: 'cn',
       persisted: true,
     })
 
     await expect(runBrowserAuthSetup({
-      argv: ['login', '--browser', '--region', 'global', '--account', 'work'],
+      argv: ['login', '--browser', '--account', 'work'],
       env: {
         XDG_CONFIG_HOME: '/private/config',
         GARMIN_PASSWORD: 'PASSWORD_MARKER',
@@ -920,7 +915,7 @@ describe('Garmin interactive auth CLI', () => {
       dependencies: browserDependencies(setup),
     })).resolves.toEqual({
       account: 'work',
-      region: 'global',
+      region: 'cn',
       sessionTokenFile:
         '/private/config/garmin-connect-mcp/accounts/work.session.json',
     })
@@ -929,7 +924,7 @@ describe('Garmin interactive auth CLI', () => {
     expect(prompt).toHaveBeenCalledWith('Garmin email: ', false)
     expect(setup).toHaveBeenCalledWith({
       username: 'runner@example.test',
-      region: 'global',
+      region: 'cn',
       sessionTokenFile:
         '/private/config/garmin-connect-mcp/accounts/work.session.json',
       signal: undefined,
@@ -1097,18 +1092,13 @@ describe('Garmin interactive auth CLI', () => {
     expect(output).not.toContain('canary_stage=ticket=')
   })
 
-  it('requires an explicit canary region and rejects login-only options', async () => {
+  it('defaults canary to China and rejects login-only options', async () => {
     const io: AuthCliIO = { prompt: jest.fn(), write: jest.fn() }
     const canary = jest.fn()
     const dependencies: AuthCanaryCliDependencies = { canary }
 
     await expect(runAuthCanary({
-      argv: ['canary'],
-      io,
-      dependencies,
-    })).rejects.toThrow('Canary region is required')
-    await expect(runAuthCanary({
-      argv: ['canary', '--region', 'cn', '--account', 'personal'],
+      argv: ['canary', '--account', 'personal'],
       io,
       dependencies,
     })).rejects.toThrow('Unknown canary option')
@@ -1152,8 +1142,6 @@ describe('Garmin interactive auth CLI', () => {
       'login',
       '--account',
       'signal-test',
-      '--region',
-      'global',
       '--output',
       path.join(directory, 'session.json'),
     ], {

@@ -24,7 +24,7 @@ import {
   createAxiosCanaryHttpAdapter,
   createPlaywrightBrowserAdapter,
 } from './browser-auth-canary-runtime'
-import type { GarminRegion } from './config'
+import { DEFAULT_GARMIN_REGION, type GarminRegion } from './config'
 import type { EmbeddedAuthRuntimeConfig } from './embedded-auth-runtime'
 import {
   LocalAuthBroker,
@@ -179,24 +179,22 @@ const AUTH_CLI_HELP = `Garmin Connect authentication
 
 Usage:
   garmin-connect-auth login [options]
-  garmin-connect-auth login --browser --region <global|cn> [options]
-  garmin-connect-auth serve --account <alias> --region <global|cn> --open [options]
-  garmin-connect-auth canary --region <global|cn>
+  garmin-connect-auth login --browser [options]
+  garmin-connect-auth serve --account <alias> --open [options]
+  garmin-connect-auth canary
 
 Login options:
   --browser               Legacy Playwright diagnostic for Garmin's sign-in page
   --account <alias>       Account alias (default: default)
-  --region <global|cn>    Region (default: global; required with --browser)
   --output <path>         OAuth session file path
 
 Serve options:
   --open                  Open the loopback sign-in page in the system browser
   --account <alias>       Required; never inferred from environment
-  --region <global|cn>    Required; never inferred from environment
   --output <path>         OAuth session file path
 
 Canary options:
-  --region <global|cn>    Required; never inferred from environment
+  Garmin Connect China is used automatically; no region option is required.
 
 General options:
   -h, --help              Show this help
@@ -221,11 +219,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
   const account = parsed.account ?? input.env.GARMIN_ACCOUNT?.trim() ?? 'default'
   assertAccountAlias(account)
 
-  const regionValue = parsed.region ?? input.env.GARMIN_REGION?.trim() ?? 'global'
-  if (regionValue !== 'global' && regionValue !== 'cn') {
-    throw new PublicToolError('Invalid region; expected global or cn')
-  }
-  const region: GarminRegion = regionValue
+  const region: GarminRegion = DEFAULT_GARMIN_REGION
 
   const configuredPath = parsed.output ?? input.env.GARMIN_SESSION_TOKEN_FILE?.trim()
   const sessionTokenFile = configuredPath
@@ -283,7 +277,7 @@ export async function runAuthSetup(input: AuthSetupInput): Promise<AuthSetupResu
       `Session saved securely to: ${sessionPathForTerminal(sessionTokenFile)}\n`,
     )
     input.io.write(
-      'Configure GARMIN_USERNAME, GARMIN_REGION, and GARMIN_SESSION_TOKEN_FILE; ' +
+      'Configure GARMIN_USERNAME and GARMIN_SESSION_TOKEN_FILE; ' +
       'the runtime no longer needs GARMIN_PASSWORD.\n',
     )
 
@@ -328,7 +322,6 @@ async function continueAuthSetupInBrowser(
       'serve',
       '--open',
       '--account', details.account,
-      '--region', details.region,
       '--output', details.sessionTokenFile,
     ],
     env: {
@@ -358,14 +351,7 @@ export async function runBrowserAuthSetup(
   const account = parsed.account ?? input.env.GARMIN_ACCOUNT?.trim() ?? 'default'
   assertAccountAlias(account)
 
-  if (parsed.region !== 'global' && parsed.region !== 'cn') {
-    throw new PublicToolError(
-      parsed.region === undefined
-        ? 'Browser login region is required; use global or cn'
-        : 'Invalid browser login region; expected global or cn',
-    )
-  }
-  const region: GarminRegion = parsed.region
+  const region: GarminRegion = DEFAULT_GARMIN_REGION
   const configuredPath = parsed.output ?? input.env.GARMIN_SESSION_TOKEN_FILE?.trim()
   const sessionTokenFile = configuredPath
     ? path.resolve(expandHome(configuredPath))
@@ -428,14 +414,7 @@ export async function runAuthServe(
   if (!parsed.open) {
     throw new PublicToolError('Serve authentication requires --open')
   }
-  if (parsed.region !== 'global' && parsed.region !== 'cn') {
-    throw new PublicToolError(
-      parsed.region === undefined
-        ? 'Serve region is required; use global or cn'
-        : 'Invalid serve region; expected global or cn',
-    )
-  }
-  const region: GarminRegion = parsed.region
+  const region: GarminRegion = DEFAULT_GARMIN_REGION
   const configuredPath = parsed.output ?? input.env.GARMIN_SESSION_TOKEN_FILE?.trim()
   const sessionTokenFile = configuredPath
     ? path.resolve(expandHome(configuredPath))
@@ -509,7 +488,6 @@ export { defaultAccountSessionPath } from './account-session'
 
 interface ParsedArgs {
   account?: string
-  region?: string
   output?: string
 }
 
@@ -570,13 +548,25 @@ function parseAuthenticationOptions(
       booleanEnabled = true
       continue
     }
-    if (flag === '--account' || flag === '--region' || flag === '--output') {
+    if (flag === '--region') {
+      const value = args.shift()
+      if (!value || value.startsWith('--')) {
+        throw new PublicToolError('Missing value for --region')
+      }
+      if (value !== DEFAULT_GARMIN_REGION) {
+        throw new PublicToolError('Only Garmin Connect China (cn) is supported; region selection is unavailable')
+      }
+      // Accept the old explicit `--region cn` spelling as a no-op for scripts
+      // during migration. It is intentionally absent from help and cannot
+      // select another Garmin host.
+      continue
+    }
+    if (flag === '--account' || flag === '--output') {
       const value = args.shift()
       if (!value || value.startsWith('--')) {
         throw new PublicToolError(`Missing value for ${flag}`)
       }
       if (flag === '--account') options.account = value
-      else if (flag === '--region') options.region = value
       else options.output = value
       continue
     }
@@ -588,23 +578,20 @@ function parseAuthenticationOptions(
 function parseCanaryRegion(argv: string[]): GarminRegion {
   const args = [...argv]
   if (args[0] === 'canary') args.shift()
-  let region: string | undefined
   while (args.length > 0) {
     const flag = args.shift()
-    if (flag !== '--region' || region !== undefined) {
-      throw new PublicToolError('Unknown canary option')
+    if (flag !== '--region') {
+      throw new PublicToolError(`Unknown canary option: ${flag}`)
     }
     const value = args.shift()
     if (!value || value.startsWith('--')) {
       throw new PublicToolError('Missing value for --region')
     }
-    region = value
+    if (value !== DEFAULT_GARMIN_REGION) {
+      throw new PublicToolError('Only Garmin Connect China (cn) is supported; region selection is unavailable')
+    }
   }
-  if (!region) throw new PublicToolError('Canary region is required; use global or cn')
-  if (region !== 'global' && region !== 'cn') {
-    throw new PublicToolError('Invalid canary region; expected global or cn')
-  }
-  return region
+  return DEFAULT_GARMIN_REGION
 }
 
 function rejectSensitiveArgs(argv: readonly string[]): void {

@@ -124,16 +124,10 @@ $env:GARMIN_USERNAME = '你的Garmin邮箱'
 
 ### 5.2 选择 Garmin 区域
 
-中国区使用 `cn`：
+本分支固定使用 Garmin 中国区：
 
 ```bash
-node lib/auth-cli.js serve --account personal-codex --region cn --open
-```
-
-国际区使用 `global`：
-
-```bash
-node lib/auth-cli.js serve --account personal-codex --region global --open
+node lib/auth-cli.js serve --account personal-codex --open
 ```
 
 参数说明：
@@ -142,7 +136,6 @@ node lib/auth-cli.js serve --account personal-codex --region global --open
 | --- | --- |
 | `serve` | 启动本地浏览器认证服务 |
 | `--account personal-codex` | 本地账号别名，只用于区分会话文件 |
-| `--region cn/global` | Garmin 区域 |
 | `--open` | 自动打开系统浏览器 |
 
 ### 5.3 在浏览器中登录
@@ -170,7 +163,6 @@ Windows 和 Linux 的根目录会根据系统配置目录规则变化。可以�
 ```bash
 node lib/auth-cli.js serve \
   --account personal-codex \
-  --region cn \
   --output /Users/你的用户名/.config/garmin-connect-mcp/accounts/personal-codex.session.json \
   --open
 ```
@@ -182,8 +174,8 @@ node lib/auth-cli.js serve \
 如果同时使用 Codex 和 Claude Desktop，建议分别建立会话：
 
 ```bash
-node lib/auth-cli.js serve --account personal-codex --region cn --open
-node lib/auth-cli.js serve --account personal-claude --region cn --open
+node lib/auth-cli.js serve --account personal-codex --open
+node lib/auth-cli.js serve --account personal-claude --open
 ```
 
 两个客户端的配置分别使用：
@@ -203,7 +195,6 @@ personal-claude.session.json
 | --- | --- | --- |
 | `GARMIN_USERNAME` | 是 | Garmin 登录邮箱 |
 | `GARMIN_ACCOUNT` | 否 | 会话别名，默认 `default` |
-| `GARMIN_REGION` | 是 | `cn` 或 `global` |
 | `GARMIN_SESSION_TOKEN_FILE` | 否 | 自定义会话文件绝对路径 |
 | `GARMIN_PASSWORD` | 否 | 兼容旧式登录，不推荐日常使用 |
 | `GARMIN_SESSION_TOKEN` | 否 | 兼容预认证会话，不推荐直接写入配置 |
@@ -251,7 +242,6 @@ args = ["/Users/你的用户名/garmin-connect-mcp/lib/mcp.js"]
 
 [mcp_servers.garmin-connect-mcp.env]
 GARMIN_USERNAME = "your@email.com"
-GARMIN_REGION = "cn"
 GARMIN_ACCOUNT = "personal-codex"
 GARMIN_SESSION_TOKEN_FILE = "/Users/你的用户名/.config/garmin-connect-mcp/accounts/personal-codex.session.json"
 ```
@@ -276,7 +266,6 @@ macOS 配置文件：
       "args": ["/Users/你的用户名/garmin-connect-mcp/lib/mcp.js"],
       "env": {
         "GARMIN_USERNAME": "your@email.com",
-        "GARMIN_REGION": "cn",
         "GARMIN_ACCOUNT": "personal-claude",
         "GARMIN_SESSION_TOKEN_FILE": "/Users/你的用户名/.config/garmin-connect-mcp/accounts/personal-claude.session.json"
       }
@@ -982,7 +971,7 @@ Europe/London
 先在项目目录执行：
 
 ```bash
-node lib/auth-cli.js serve --account personal-codex --region cn --open
+node lib/auth-cli.js serve --account personal-codex --open
 ```
 
 登录完成后重启或重新连接 MCP 客户端。
@@ -1008,7 +997,7 @@ node lib/auth-cli.js canary
 2. `command` 是否是 Node 的绝对路径。
 3. `args` 是否是 `lib/mcp.js` 的绝对路径。
 4. 客户端是否完全重启。
-5. `GARMIN_USERNAME`、`GARMIN_REGION` 和会话文件是否写在正确的 `env` 中。
+5. `GARMIN_USERNAME`、`GARMIN_ACCOUNT` 和会话文件是否写在正确的 `env` 中；区域由服务固定为中国区。
 
 ### 缺少 `GARMIN_USERNAME`
 

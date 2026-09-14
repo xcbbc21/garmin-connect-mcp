@@ -177,7 +177,6 @@ async function makePeer(env: NodeJS.ProcessEnv = {}): Promise<RawStdioPeer> {
   const peer = new RawStdioPeer(directory, {
     GARMIN_USERNAME: USERNAME,
     GARMIN_PASSWORD: PASSWORD,
-    GARMIN_REGION: 'cn',
     GARMIN_SESSION_TOKEN_FILE: path.join(directory, 'session.json'),
     GARMIN_STATE_DIR: path.join(directory, 'state'),
     ...env,
@@ -205,7 +204,7 @@ describe('stdlib stdio protocol and secrets boundary', () => {
 
     const frames = peer.frames()
     expect(frames.map(frame => frame.id)).toEqual([1, 2, 3])
-    expect(frames[1]?.result?.tools).toHaveLength(18)
+    expect(frames[1]?.result?.tools).toHaveLength(39)
     // A configured account that cannot sign in fails as a sign-in, and the
     // failure text is a fixed message rather than whatever the SDK raised.
     // tests/stdio.test.ts covers the other branch: with no configured account
@@ -305,7 +304,7 @@ describe('stdlib stdio protocol and secrets boundary', () => {
       self => self.frames().some(frame => frame.id === 10 && frame.result !== undefined),
       'a fresh tools/list response after the cancellation',
     )
-    expect(peer.frames().find(frame => frame.id === 10)?.result?.tools).toHaveLength(18)
+    expect(peer.frames().find(frame => frame.id === 10)?.result?.tools).toHaveLength(39)
 
     peer.endInput()
     await expect(peer.waitForExit()).resolves.toEqual({ code: 0, signal: null })

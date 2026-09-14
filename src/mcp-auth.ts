@@ -216,7 +216,7 @@ export class McpGarminAuthCoordinator {
     return new PublicToolError(
       'Garmin authentication is required. Run ' +
       `garmin-connect-auth serve --account ${this.account} ` +
-      `--region ${this.region} --open in a trusted local terminal. ` +
+      '--open in a trusted local terminal. ' +
       'If this MCP server sets GARMIN_SESSION_TOKEN_FILE, use the same ' +
       'destination with --output; then retry. An account-matching file may ' +
       'replace an explicitly rejected GARMIN_SESSION_TOKEN.',

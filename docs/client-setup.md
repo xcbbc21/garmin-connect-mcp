@@ -10,11 +10,11 @@ For each simultaneously running client, initialize its own session:
 
 ```bash
 export GARMIN_USERNAME='your@email.com'
-node lib/auth-cli.js serve --account personal-codex --region cn --open
-node lib/auth-cli.js serve --account personal-claude --region cn --open
+node lib/auth-cli.js serve --account personal-codex --open
+node lib/auth-cli.js serve --account personal-claude --open
 ```
 
-Use `global` for an international account. Each command is an interactive login. Use the matching session destination; custom configuration-root variables can change the paths shown below.
+Garmin Connect China is selected automatically. Each command is an interactive login. Use the matching session destination; custom configuration-root variables can change the paths shown below.
 
 ## Codex
 
@@ -27,7 +27,6 @@ args = ["/Users/YOUR_USER/garmin-connect-mcp/lib/mcp.js"]
 
 [mcp_servers.garmin-connect-mcp.env]
 GARMIN_USERNAME = "your@email.com"
-GARMIN_REGION = "cn"
 GARMIN_ACCOUNT = "personal-codex"
 GARMIN_SESSION_TOKEN_FILE = "/Users/YOUR_USER/.config/garmin-connect-mcp/accounts/personal-codex.session.json"
 ```
@@ -46,7 +45,6 @@ Merge into `~/Library/Application Support/Claude/claude_desktop_config.json` on 
       "args": ["/Users/YOUR_USER/garmin-connect-mcp/lib/mcp.js"],
       "env": {
         "GARMIN_USERNAME": "your@email.com",
-        "GARMIN_REGION": "cn",
         "GARMIN_ACCOUNT": "personal-claude",
         "GARMIN_SESSION_TOKEN_FILE": "/Users/YOUR_USER/.config/garmin-connect-mcp/accounts/personal-claude.session.json"
       }
@@ -85,4 +83,4 @@ After connecting, try “Show my last five runs” or “Preview a workout; wait
 
 ## Optional skill
 
-Clients with skill support may load `skills/garmin-connect-mcp` through their own skill mechanism. Ordinary MCP clients can discover and call all 18 tools without it. Installing a skill does not register or start an MCP server.
+Clients with skill support may load `skills/garmin-connect-mcp` through their own skill mechanism. Ordinary MCP clients can discover and call the MCP tools without it. Installing a skill does not register or start an MCP server.

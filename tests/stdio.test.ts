@@ -39,7 +39,7 @@ describe('built MCP over child-process stdio', () => {
     const client = createTestClient({ name: 'generic-client', version: '1' })
     const transport = new StdioClientTransport({
       command: process.execPath, args: [path.resolve(__dirname, '../lib/mcp.js')], cwd,
-      env: { GARMIN_USERNAME: 'fixture@example.test', GARMIN_REGION: 'cn',
+      env: { GARMIN_USERNAME: 'fixture@example.test',
         GARMIN_ACCOUNT: 'test', GARMIN_SESSION_TOKEN_FILE: path.join(sessionDirectory, 'missing.session.json'),
         PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '',
         GARMIN_STATE_DIR: path.join(sessionDirectory, 'state') },

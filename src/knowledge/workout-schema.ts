@@ -56,6 +56,8 @@ export interface SimpleStepDef {
   hrFrom?: number
   /** Upper heart rate bound in bpm */
   hrTo?: number
+  /** Garmin heart-rate zone number when importing an existing DTO */
+  hrZone?: number
 }
 
 export interface RepeatStepDef {
@@ -118,6 +120,7 @@ const SIMPLE_STEP_FIELDS = new Set([
   'paceTo',
   'hrFrom',
   'hrTo',
+  'hrZone',
 ])
 const REPEAT_STEP_FIELDS = new Set(['type', 'iterations', 'steps'])
 
@@ -199,7 +202,7 @@ function buildExecutableStep(step: SimpleStepDef, order: number, childStepId: nu
     targetValueOne,
     targetValueTwo,
     targetValueUnit: null,
-    zoneNumber: null,
+    zoneNumber: step.hrZone ?? null,
     secondaryTargetType: null,
     secondaryTargetValueOne: null,
     secondaryTargetValueTwo: null,
@@ -446,18 +449,26 @@ function validateSimpleStep(value: unknown, prefix: string): string | null {
     return `${prefix}: paceFrom and paceTo are only allowed for pace targets`
   }
   if (step.target === 'heartRate') {
-    if (step.hrFrom == null || step.hrTo == null) {
-      return `${prefix}: hrFrom and hrTo are required for heartRate target`
-    }
-    for (const [field, value] of [['hrFrom', step.hrFrom], ['hrTo', step.hrTo]] as const) {
-      if (!Number.isInteger(value) || value < 30 || value > 250) {
-        return `${prefix}: ${field} must be an integer between 30 and 250 bpm`
+    if (step.hrZone !== undefined) {
+      if (!Number.isInteger(step.hrZone) || step.hrZone < 1 || step.hrZone > 5) {
+        return `${prefix}: hrZone must be an integer between 1 and 5`
+      }
+    } else {
+      const hrFrom = step.hrFrom
+      const hrTo = step.hrTo
+      if (hrFrom == null || hrTo == null) {
+        return `${prefix}: hrFrom and hrTo are required for heartRate target`
+      }
+      for (const [field, value] of [['hrFrom', hrFrom], ['hrTo', hrTo]] as const) {
+        if (!Number.isInteger(value) || value < 30 || value > 250) {
+          return `${prefix}: ${field} must be an integer between 30 and 250 bpm`
+        }
+      }
+      if (hrFrom > hrTo) {
+        return `${prefix}: hrFrom must be less than or equal to hrTo`
       }
     }
-    if (step.hrFrom > step.hrTo) {
-      return `${prefix}: hrFrom must be less than or equal to hrTo`
-    }
-  } else if (step.hrFrom !== undefined || step.hrTo !== undefined) {
+  } else if (step.hrFrom !== undefined || step.hrTo !== undefined || step.hrZone !== undefined) {
     return `${prefix}: hrFrom and hrTo are only allowed for heartRate targets`
   }
   return null

@@ -24,7 +24,7 @@ export class GarminAuthenticationCancelledError extends PublicToolError {
 }
 
 export const GARMIN_BROWSER_AUTH_COMMAND =
-  'garmin-connect-auth serve --account <alias> --region <global|cn> --open'
+  'garmin-connect-auth serve --account <alias> --open'
 
 /**
  * A credential state that may be recovered through an explicit Garmin

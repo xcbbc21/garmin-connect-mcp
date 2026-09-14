@@ -2,9 +2,9 @@
 
 ## Existing MCP users
 
-The server name `garmin-connect-mcp`, entry file `lib/mcp.js`, authentication command `garmin-connect-auth`, the 14 baseline tools and their complete input schemas remain compatible with baseline `52b67cd`. Four tools have since been added — `get_garmin_calendar`, `get_garmin_write_operation`, `reconcile_garmin_write_operation` and `resume_garmin_write_operation` — for 18 in total; no baseline tool was renamed or removed.
+The server name `garmin-connect-mcp`, entry file `lib/mcp.js`, authentication command `garmin-connect-auth`, and the original 18 tools remain available. This migration adds read-only activity, wellness, recovery and fitness families plus `create_garmin_workout_legacy`, for 39 tools in total; the original tools were not renamed or removed.
 
-Update this checkout and run `npm ci`, then restart the client. Use the same GARMIN_* configuration, alias and session destination. Session formats and default paths have not changed in this refactor; no copying, deletion or re-login is required solely because of this upgrade. Pending confirmations are process-local and expire on restart.
+Update this checkout and run `npm ci`, then restart the client. Keep the same account alias and session destination. The public region selector has been removed: runtime is fixed to Garmin Connect China, and `GARMIN_REGION` is no longer accepted. The new session-token/OAuth restoration and account verification remain authoritative; no old Cookie/CSRF capture flow is introduced.
 
 ## Calendar write safety changes (0.2.0 -> current)
 

@@ -22,14 +22,14 @@ npm ci
 
 ## 首次登录
 
-进入源码目录，在终端设置邮箱并选择佳明区域：
+进入源码目录，在终端设置邮箱。本分支固定使用 Garmin 中国区：
 
 ```bash
 export GARMIN_USERNAME='你的佳明邮箱'
-node lib/auth-cli.js serve --account personal-codex --region cn --open
+node lib/auth-cli.js serve --account personal-codex --open
 ```
 
-国际区改用 `--region global`。登录命令要求明确提供账号别名和区域；MCP 配置使用同一别名、邮箱和区域。
+登录命令只要求明确提供账号别名，不再需要选择区域；MCP 也会自动使用中国区。
 
 系统浏览器会打开短时有效的本地登录页。只在其中的 Garmin 登录表单输入密码和验证码，随后确认返回的账号身份。外层页面属于本地服务，嵌入 Garmin 表单；地址栏显示回环地址，不能仅凭外层地址栏判断内嵌页面来源。表单未出现时不要输入凭据。
 
@@ -47,7 +47,7 @@ macOS 没有设置配置根目录覆盖时，默认会话位置是：
 
 - 命令：Node 可执行文件的绝对路径，可用 `command -v node` 查询。
 - 参数：本项目 `lib/mcp.js` 的绝对路径。
-- 环境：邮箱、区域、账号别名，以及会话文件路径。
+- 环境：邮箱、账号别名，以及会话文件路径；区域自动固定为中国区。
 
 [客户端配置](docs/client-setup.md) 提供 Codex、Claude Desktop、Claude Code、Cursor、Windsurf、WorkBuddy 和 ZCode 示例。这些是配置示例，协议测试通过不等于每个桌面客户端都完成了实测。
 
@@ -57,20 +57,22 @@ macOS 没有设置配置根目录覆盖时，默认会话位置是：
 
 | 能力 | MCP 工具 |
 | --- | --- |
-| 运动和健康数据 | `get_garmin_activities`、`get_garmin_sleep`、`get_garmin_steps`、`get_garmin_heart_rate`、`get_garmin_weight` |
-| 账号和训练库 | `get_garmin_profile`、`get_garmin_workouts` |
+| 运动和健康数据 | `get_garmin_activities`、`get_garmin_activity_splits`、`get_garmin_activity_hr_zones`、`get_garmin_activity_polyline`、`get_garmin_activity_weather`、`get_garmin_sleep`、`get_garmin_steps`、`get_garmin_heart_rate`、`get_garmin_weight` |
+| 日常健康 | `get_garmin_daily_summary_chart`、`get_garmin_daily_intensity_minutes`、`get_garmin_daily_movement`、`get_garmin_daily_respiration` |
+| 恢复与睡眠 | `get_garmin_body_battery`、`get_garmin_hrv`、`get_garmin_sleep_stats` |
+| 健身与档案 | `get_garmin_profile`、`get_garmin_personal_records`、`get_garmin_goals`、`get_garmin_badges`、`get_garmin_hydration`、`get_garmin_vo2max`、`get_garmin_fitness_stats`、`get_garmin_hr_zones_config`、`get_garmin_power_zones`、`get_garmin_training_readiness`、`get_garmin_workouts` |
 | 跑步训练知识 | `get_running_skill_advice` |
-| 创建训练模板 | `create_garmin_workout` |
+| 创建训练模板 | `create_garmin_workout`、`create_garmin_workout_legacy` |
 | 训练日历 | `schedule_garmin_workout`、`batch_schedule_garmin_workouts`、`create_and_schedule_garmin_workout`、`unschedule_garmin_workout` |
 | 导出活动文件 | `download_garmin_activity_fit` |
 | 读取训练日历 | `get_garmin_calendar` |
 | 写入巡检与恢复 | `get_garmin_write_operation`、`reconcile_garmin_write_operation`、`resume_garmin_write_operation` |
 
-共 18 个工具。训练库记录“练什么”，训练日历记录“哪天练”。知识工具提供训练方法说明和个性化训练前的信息收集，不会自行生成并执行完整计划。
+共 39 个工具。训练库记录“练什么”，训练日历记录“哪天练”。知识工具提供训练方法说明和个性化训练前的信息收集，不会自行生成并执行完整计划。
 
 创建训练和日历写入均采用两次调用：第一次返回预览，用户确认后，用完全相同的请求，加上 `confirmed: true` 和返回的 `confirmationId` 再次调用。确认 ID 十分钟内有效、只能使用一次；其形式为 `<operationId>:<预览版本号>`，版本号与截止时间随操作一起持久化，因此未过期的确认句柄在重启后仍可解析，而重新预览会让此前所有句柄失效。**写入日志是持久的**：日历结果记录在本地磁盘上，重启后仍然有效。详见[写入安全与恢复](docs/calendar-write-recovery.md)。
 
-五个写工具——`create_garmin_workout`、`schedule_garmin_workout`、`batch_schedule_garmin_workouts`、`create_and_schedule_garmin_workout`、`unschedule_garmin_workout`——都接受可选 `idempotencyKey`（1–128 个字符，只允许 `A-Z a-z 0-9 . _ : -`）。它是请求标签，不是权限凭证：同键同请求会直接返回已有回执而不再写入，换一个键也不能绕过进行中或结果不确定的写入。`confirmationId` 与 `idempotencyKey` 不能互相替代。
+六个写工具——`create_garmin_workout`、`create_garmin_workout_legacy`、`schedule_garmin_workout`、`batch_schedule_garmin_workouts`、`create_and_schedule_garmin_workout`、`unschedule_garmin_workout`——都接受可选 `idempotencyKey`（1–128 个字符，只允许 `A-Z a-z 0-9 . _ : -`）。它是请求标签，不是权限凭证：同键同请求会直接返回已有回执而不再写入，换一个键也不能绕过进行中或结果不确定的写入。`confirmationId` 与 `idempotencyKey` 不能互相替代。
 
 日历写入记录在账号级本地目录 `GARMIN_STATE_DIR`（绝对、本地、私有路径；默认 `<平台配置根>/garmin-connect-mcp/state`）。它与登录别名解耦：同一账号的不同别名共用一个恢复记录，而会话文件仍然互相隔离。请备份该目录；删除它会丢掉防止重复排期的记录。
 

@@ -12,14 +12,14 @@ describe('runtime configuration', () => {
     expect(resolveConfig({}, { ...env, XDG_CONFIG_HOME: '/private/config' })).toMatchObject({
       username: env.GARMIN_USERNAME, password: undefined, sessionToken: undefined,
       sessionTokenFile: '/private/config/garmin-connect-mcp/accounts/default.session.json',
-      region: 'global', cacheTtl: 300, requestTimeoutMs: 15000,
+      region: 'cn', cacheTtl: 300, requestTimeoutMs: 15000,
       logLevel: 'info', activityDetail: 'compact', fitDownloadDir: '',
       stateDirectory: '/private/config/garmin-connect-mcp/state',
     })
   })
-  it.each(['', 'cn ', 'CN', 'mars'])('rejects an explicitly invalid region: %s', region => {
+  it.each(['global', 'cn ', 'CN', 'mars'])('rejects the removed region environment setting: %s', region => {
     expect(() => resolveConfig({}, { ...env, GARMIN_REGION: region }))
-      .toThrow('GARMIN_REGION must be exactly global or cn')
+      .toThrow('GARMIN_REGION is no longer supported')
   })
   it('requires a username and rejects escaping account aliases', () => {
     expect(() => resolveConfig({}, {})).toThrow('GARMIN_USERNAME is required')

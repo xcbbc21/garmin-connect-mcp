@@ -157,7 +157,6 @@ async function openMcp(options: {
       FAKE_GARMIN_URL: options.peer.url,
       GARMIN_STATE_DIR: options.stateDirectory,
       GARMIN_USERNAME: ACCOUNT_NAME,
-      GARMIN_REGION: REGION,
       GARMIN_SESSION_TOKEN_FILE: options.sessionFile,
       // Only the wait budget is shortened; the lock itself is unchanged.
       FAKE_GARMIN_LOCK_WAIT_MS: '400',

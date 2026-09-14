@@ -125,11 +125,12 @@ const calendarReader = {
 
 async function main() {
   const stateDirectory = process.env.GARMIN_STATE_DIR
+  const accountRegion = process.env.GARMIN_REGION || 'cn'
   const accountLock = lockWaitMs === undefined
     ? undefined
     : new FileAccountLock(
       stateDirectory,
-      accountKey(process.env.GARMIN_USERNAME, process.env.GARMIN_REGION),
+      accountKey(process.env.GARMIN_USERNAME, accountRegion),
       undefined,
       { waitTimeoutMs: lockWaitMs },
     )
@@ -137,7 +138,7 @@ async function main() {
     activityDetail: 'compact',
     fitDownloadDir: '',
     accountUsername: process.env.GARMIN_USERNAME,
-    accountRegion: process.env.GARMIN_REGION,
+    accountRegion,
     stateDirectory,
     calendarReader,
     ...(accountLock ? { accountLock } : {}),

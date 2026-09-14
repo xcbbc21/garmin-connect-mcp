@@ -23,6 +23,9 @@ jest.mock('garmin-connect', () => ({
     }
     return {
     client: {
+      url: {
+        GC_API: 'https://connectapi.garmin.cn',
+      },
       client: {
         defaults: {},
         interceptors: {
@@ -49,6 +52,9 @@ jest.mock('garmin-connect', () => ({
 
 type MockGarmin = {
   client: {
+    url: {
+      GC_API: string
+    }
     client: {
       defaults: { timeout?: number; maxContentLength?: number }
       interceptors: {
@@ -172,6 +178,23 @@ describe('GarminClient', () => {
     }))
   })
 
+  it('resolves legacy read paths against the SDK API origin', async () => {
+    const client = new GarminClient({ ...baseConfig, region: 'cn' }, { logger: createContext().logger })
+    latestGarmin().client.client.request.mockResolvedValue({
+      data: { ok: true },
+    })
+
+    await expect(client.getLegacy('wellness-service/wellness/dailyMovement', {
+      calendarDate: '2026-09-13',
+    })).resolves.toEqual({ ok: true })
+
+    expect(latestGarmin().client.client.request).toHaveBeenCalledWith({
+      method: 'GET',
+      url: 'https://connectapi.garmin.cn/wellness-service/wellness/dailyMovement',
+      params: { calendarDate: '2026-09-13' },
+    })
+  })
+
   it('loads without a username so the local auth UI can report configuration', async () => {
     const client = new GarminClient({
       ...baseConfig,
@@ -195,7 +218,7 @@ describe('GarminClient', () => {
       reason: 'missing',
     })
     await expect(operation).rejects.toThrow(
-      'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
+      'garmin-connect-auth serve --account <alias> --open',
     )
     expect(client.getAuthenticationRequirement()).toEqual({
       reason: 'missing',
@@ -787,7 +810,7 @@ describe('GarminClient', () => {
 
     await expect(client.getActivities()).rejects.toThrow(
       'Garmin DI session was rejected; run ' +
-        'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
+        'garmin-connect-auth serve --account <alias> --open',
     )
     expect(client.getAuthenticatedAccount()).toBeUndefined()
     expect(latestGarmin().login).not.toHaveBeenCalled()
@@ -813,7 +836,7 @@ describe('GarminClient', () => {
     )
     await expect(operation).rejects.toThrow(
       'Garmin DI session format is obsolete; run ' +
-        'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
+        'garmin-connect-auth serve --account <alias> --open',
     )
     expect(latestGarmin().login).not.toHaveBeenCalled()
     expect(latestGarmin().loadToken).not.toHaveBeenCalled()
@@ -1238,7 +1261,7 @@ describe('GarminClient', () => {
       reason: 'rejected',
     })
     await expect(operation).rejects.toThrow(
-      'garmin-connect-auth serve --account <alias> --region <global|cn> --open',
+      'garmin-connect-auth serve --account <alias> --open',
     )
     expect(latestGarmin().getSleepData).toHaveBeenCalledTimes(1)
     expect(latestGarmin().login).not.toHaveBeenCalled()

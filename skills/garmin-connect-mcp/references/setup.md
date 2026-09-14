@@ -6,11 +6,11 @@ do not download or run it as a substitute.
 
 1. Verify Node and the checkout. Build with npm ci in the checkout when installation is requested.
 2. Configure a local stdio server with an absolute Node path and the absolute lib/mcp.js path.
-3. Set GARMIN_USERNAME, GARMIN_REGION (cn/global), GARMIN_ACCOUNT, and the selected session-file path.
-4. Initialize browser login with node lib/auth-cli.js serve --account <alias> --region <region> --open.
+3. Set GARMIN_USERNAME, GARMIN_ACCOUNT, and the selected session-file path. Garmin Connect China is selected automatically.
+4. Initialize browser login with node lib/auth-cli.js serve --account <alias> --open; Garmin Connect China is selected automatically.
 5. Reload the MCP client and verify tool discovery. A skill alone does not register tools.
 
-Use the same alias, region and destination for login and MCP. Every concurrent client process needs an independently initialized session file. Login has local side effects: browser opening and private session persistence. Follow the user's authorization and the client's approval policy; never ask for passwords, tokens or MFA codes in chat.
+Use the same alias and destination for login and MCP. Every concurrent client process needs an independently initialized session file. Login has local side effects: browser opening and private session persistence. Follow the user's authorization and the client's approval policy; never ask for passwords, tokens or MFA codes in chat.
 
 The main project provides client configuration examples in docs/client-setup.md. If this skill was copied outside the checkout, find the user's checkout to read that document; do not guess its location.
 

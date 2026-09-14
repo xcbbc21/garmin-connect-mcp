@@ -30,14 +30,35 @@ describe('MCP adapter', () => {
       expect(result).toEqual(require('./fixtures/mcp-tools-baseline.json'))
       expect(result.tools.map(tool => tool.name)).toEqual([
         'get_garmin_activities',
+        'get_garmin_activity_splits',
+        'get_garmin_activity_hr_zones',
+        'get_garmin_activity_polyline',
+        'get_garmin_activity_weather',
+        'get_garmin_daily_summary_chart',
+        'get_garmin_daily_intensity_minutes',
+        'get_garmin_daily_movement',
+        'get_garmin_daily_respiration',
         'get_garmin_sleep',
         'get_garmin_steps',
         'get_garmin_heart_rate',
         'get_garmin_weight',
         'get_garmin_workouts',
         'get_garmin_profile',
+        'get_garmin_body_battery',
+        'get_garmin_hrv',
+        'get_garmin_sleep_stats',
+        'get_garmin_personal_records',
+        'get_garmin_goals',
+        'get_garmin_badges',
+        'get_garmin_hydration',
+        'get_garmin_vo2max',
+        'get_garmin_fitness_stats',
+        'get_garmin_hr_zones_config',
+        'get_garmin_power_zones',
+        'get_garmin_training_readiness',
         'get_running_skill_advice',
         'create_garmin_workout',
+        'create_garmin_workout_legacy',
         'schedule_garmin_workout',
         'batch_schedule_garmin_workouts',
         'create_and_schedule_garmin_workout',
@@ -58,6 +79,27 @@ describe('MCP adapter', () => {
         readOnlyHint: false,
         idempotentHint: false,
       })
+      for (const name of [
+        'get_garmin_activity_splits',
+        'get_garmin_activity_hr_zones',
+        'get_garmin_activity_polyline',
+        'get_garmin_activity_weather',
+      ]) {
+        const detailTool = result.tools.find(tool => tool.name === name)!
+        expect(detailTool.description).toContain('read-only')
+        expect(detailTool.inputSchema).toMatchObject({
+          type: 'object',
+          required: ['activityId'],
+          additionalProperties: false,
+          properties: { activityId: expect.any(Object) },
+        })
+        expect(detailTool.annotations).toMatchObject({
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        })
+      }
       const batchSchedule = result.tools.find(tool => tool.name === 'batch_schedule_garmin_workouts')!
       expect(batchSchedule.inputSchema).toMatchObject({
         required: ['schedules'],
@@ -241,6 +283,7 @@ describe('MCP adapter', () => {
         'batch_schedule_garmin_workouts',
         'create_and_schedule_garmin_workout',
         'create_garmin_workout',
+        'create_garmin_workout_legacy',
         'download_garmin_activity_fit',
         'reconcile_garmin_write_operation',
         'resume_garmin_write_operation',
@@ -284,6 +327,51 @@ describe('MCP adapter', () => {
       expect(result.content).toEqual(expect.arrayContaining([
         expect.objectContaining({ type: 'text' }),
       ]))
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  it('routes the legacy workout DTO through the compatibility writer', async () => {
+    const service = serviceStub()
+    const server = createMcpServer(service as any)
+    const client = new Client({ name: 'test-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    try {
+      const result = await client.callTool({
+        name: 'create_garmin_workout_legacy',
+        arguments: {
+          workout: { workoutName: 'Legacy run', workoutSegments: [{ workoutSteps: [] }] },
+        },
+      })
+      expect(result.isError).not.toBe(true)
+      expect(service.createLegacyWorkout).toHaveBeenCalledWith({
+        workout: { workoutName: 'Legacy run', workoutSegments: [{ workoutSteps: [] }] },
+      })
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  it('routes activity detail reads through the shared service', async () => {
+    const service = serviceStub()
+    service.getActivitySplits.mockResolvedValue({ data: [{ lap: 1 }] })
+    const server = createMcpServer(service as any)
+    const client = new Client({ name: 'test-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    try {
+      const result = await client.callTool({
+        name: 'get_garmin_activity_splits',
+        arguments: { activityId: 'activity-42' },
+      })
+      expect(result.isError).not.toBe(true)
+      expect(service.getActivitySplits).toHaveBeenCalledWith({ activityId: 'activity-42' })
     } finally {
       await client.close()
       await server.close()
@@ -1127,14 +1215,14 @@ describe('standalone MCP config', () => {
     expect(() => standaloneConfig()).toThrow('Invalid account alias')
   })
 
-  it.each(['CN', 'cn ', 'mars', ''])(
-    'rejects an explicitly invalid GARMIN_REGION value (%j)',
+  it.each(['CN', 'cn ', 'mars'])(
+    'rejects the removed GARMIN_REGION setting (%j)',
     region => {
       process.env.GARMIN_USERNAME = 'fixture@example.test'
       process.env.GARMIN_REGION = region
 
       expect(() => standaloneConfig()).toThrow(
-        'GARMIN_REGION must be exactly global or cn',
+        'GARMIN_REGION is no longer supported',
       )
     },
   )
@@ -1143,6 +1231,10 @@ describe('standalone MCP config', () => {
 function serviceStub() {
   return {
     getActivities: jest.fn().mockResolvedValue([]),
+    getActivitySplits: jest.fn().mockResolvedValue({}),
+    getActivityHrZones: jest.fn().mockResolvedValue({}),
+    getActivityPolyline: jest.fn().mockResolvedValue({}),
+    getActivityWeather: jest.fn().mockResolvedValue({}),
     getSleep: jest.fn().mockResolvedValue({}),
     getSteps: jest.fn().mockResolvedValue({}),
     getHeartRate: jest.fn().mockResolvedValue({}),
@@ -1151,6 +1243,7 @@ function serviceStub() {
     getProfile: jest.fn().mockResolvedValue({}),
     getRunningAdvice: jest.fn().mockResolvedValue({}),
     createWorkout: jest.fn().mockResolvedValue({}),
+    createLegacyWorkout: jest.fn().mockResolvedValue({}),
     scheduleWorkout: jest.fn().mockResolvedValue({}),
     batchScheduleWorkouts: jest.fn().mockResolvedValue({}),
     createAndScheduleWorkout: jest.fn().mockResolvedValue({}),

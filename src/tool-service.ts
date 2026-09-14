@@ -23,6 +23,7 @@ import {
   validateWorkoutDef,
 } from './knowledge/workout-schema'
 import type { WorkoutDef } from './knowledge/workout-schema'
+import { normalizeLegacyWorkout } from './knowledge/workout-compatibility'
 import { PublicToolError } from './utils/errors'
 import { parseLocalDate } from './utils/date'
 import { resolveStateDirectory } from './config'
@@ -73,6 +74,12 @@ import {
   formatWeight,
   formatWorkout,
 } from './utils/format'
+import { LegacyGarminReadAdapter } from './read-adapters/legacy-garmin'
+import type { LegacyReadEnvelope } from './read-adapters/types'
+import { dailySeriesEnvelope, isNoData } from './read-models/wellness'
+import type { DailySeriesEnvelope } from './read-models/wellness'
+import type { RecoveryReadEnvelope } from './read-models/recovery'
+import type { FitnessReadEnvelope } from './read-models/fitness'
 
 export interface GarminDataClient {
   getActivities(start?: number, limit?: number): Promise<unknown[]>
@@ -87,6 +94,7 @@ export interface GarminDataClient {
   scheduleWorkout(workoutId: string, date: string): Promise<Record<string, unknown>>
   unscheduleWorkout(workoutScheduleId: string): Promise<void>
   getUserProfile(): Promise<unknown>
+  getLegacy?<T>(path: string, query?: Record<string, string | number>): Promise<T>
   /**
    * Fresh Garmin Calendar read. Optional on the type on purpose: a client
    * without a verified read capability is expressible, and its absence blocks
@@ -162,6 +170,19 @@ export interface ActivityArgs {
   limit?: number
   offset?: number
   detail?: ActivityDetail
+}
+
+export interface ActivityDetailArgs {
+  activityId?: string
+}
+
+export interface GoalArgs {
+  status?: 'active' | 'future' | 'past'
+}
+
+export interface FitnessStatsArgs extends DateRangeArgs {
+  aggregation?: 'daily' | 'weekly' | 'monthly'
+  metric?: 'duration' | 'distance' | 'calories'
 }
 
 export interface PaginationArgs {
@@ -267,6 +288,13 @@ export interface DownloadActivityFitResult {
 }
 
 export type CreateWorkoutArgs = WorkoutDef & {
+  confirmed?: boolean
+  confirmationId?: string
+  idempotencyKey?: string
+}
+
+export interface LegacyWorkoutArgs {
+  workout: unknown
   confirmed?: boolean
   confirmationId?: string
   idempotencyKey?: string
@@ -440,13 +468,20 @@ export interface UnscheduleWorkoutArgs {
  */
 export class GarminToolService {
   private readonly dateRequestLimiter = new AsyncSemaphore(4)
+  private readonly legacyAdapter?: LegacyGarminReadAdapter
   private coordinator?: WriteCoordinator
   private journalMigration?: Promise<string[]>
 
   constructor(
     private readonly client: GarminDataClient,
     private readonly options: GarminToolServiceOptions,
-  ) {}
+  ) {
+    if (client.getLegacy) {
+      this.legacyAdapter = new LegacyGarminReadAdapter({
+        get: client.getLegacy.bind(client),
+      })
+    }
+  }
 
   /**
    * Local-only read access to the account write journal. No network calls;
@@ -712,6 +747,162 @@ export class GarminToolService {
       .map(activity => formatActivity(activity, detail))
   }
 
+  async getActivitySplits(args: ActivityDetailArgs = {}): Promise<LegacyReadEnvelope<unknown>> {
+    return this.readLegacyActivity(
+      args.activityId,
+      activityId => this.legacyAdapter!.getActivitySplits(activityId),
+    )
+  }
+
+  async getActivityHrZones(args: ActivityDetailArgs = {}): Promise<LegacyReadEnvelope<unknown>> {
+    return this.readLegacyActivity(
+      args.activityId,
+      activityId => this.legacyAdapter!.getActivityHrZones(activityId),
+    )
+  }
+
+  async getActivityPolyline(args: ActivityDetailArgs = {}): Promise<LegacyReadEnvelope<unknown>> {
+    return this.readLegacyActivity(
+      args.activityId,
+      activityId => this.legacyAdapter!.getActivityPolyline(activityId),
+    )
+  }
+
+  async getActivityWeather(args: ActivityDetailArgs = {}): Promise<LegacyReadEnvelope<unknown>> {
+    return this.readLegacyActivity(
+      args.activityId,
+      activityId => this.legacyAdapter!.getActivityWeather(activityId),
+    )
+  }
+
+  async getDailySummaryChart(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getDailySummaryChart(date))
+  }
+
+  async getDailyIntensityMinutes(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getDailyIntensityMinutes(date))
+  }
+
+  async getDailyMovement(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getDailyMovement(date))
+  }
+
+  async getDailyRespiration(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getDailyRespiration(date))
+  }
+
+  async getBodyBattery(): Promise<RecoveryReadEnvelope<unknown>> {
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getBodyBattery())
+  }
+
+  async getHrv(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getHrv(date))
+  }
+
+  async getSleepStats(args: DateRangeArgs = {}): Promise<RecoveryReadEnvelope<unknown>> {
+    const { startDate, endDate } = this.requireDateRange(args)
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getSleepStats(startDate, endDate))
+  }
+
+  async getPersonalRecords(): Promise<FitnessReadEnvelope<unknown>> {
+    if (!this.legacyAdapter) throw new PublicToolError('Legacy Garmin read capability is unavailable')
+    const profile = await this.client.getUserProfile() as Record<string, unknown>
+    const userData = profile.userData as Record<string, unknown> | undefined
+    const displayName = typeof profile.displayName === 'string'
+      ? profile.displayName
+      : typeof userData?.displayName === 'string' ? userData.displayName : undefined
+    if (!displayName?.trim()) throw new PublicToolError('Unable to resolve Garmin display name for personal records')
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getPersonalRecords(displayName))
+  }
+
+  async getGoals(args: GoalArgs = {}): Promise<FitnessReadEnvelope<unknown>> {
+    const status = args.status ?? 'active'
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getGoals(status))
+  }
+
+  async getBadges(): Promise<FitnessReadEnvelope<unknown>> {
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getBadges())
+  }
+
+  async getHydration(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getHydration(date))
+  }
+
+  async getVo2max(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getVo2max(date))
+  }
+
+  async getFitnessStats(args: FitnessStatsArgs): Promise<FitnessReadEnvelope<unknown>> {
+    const { startDate, endDate } = this.requireDateRange(args)
+    const aggregation = args.aggregation ?? 'daily'
+    const metric = args.metric ?? 'duration'
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getFitnessStats(
+      startDate, endDate, aggregation, metric,
+    ))
+  }
+
+  async getHrZonesConfig(): Promise<FitnessReadEnvelope<unknown>> {
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getHrZonesConfig())
+  }
+
+  async getPowerZones(): Promise<FitnessReadEnvelope<unknown>> {
+    return this.readLegacyEnvelope(() => this.legacyAdapter!.getPowerZones())
+  }
+
+  async getTrainingReadiness(args: DateRangeArgs = {}): Promise<DailySeriesEnvelope<unknown>> {
+    return this.readLegacyDailySeries(args, date => this.legacyAdapter!.getTrainingReadiness(date))
+  }
+
+  private async readLegacyEnvelope<T>(read: () => Promise<T>): Promise<LegacyReadEnvelope<T>> {
+    if (!this.legacyAdapter) throw new PublicToolError('Legacy Garmin read capability is unavailable')
+    return {
+      data: await read(),
+      source: 'garmin',
+      region: this.options.accountRegion,
+      retrievedAt: new Date().toISOString(),
+      partial: false,
+    }
+  }
+
+  private async readLegacyDailySeries<T>(
+    args: DateRangeArgs,
+    read: (date: string) => Promise<T>,
+  ): Promise<DailySeriesEnvelope<T>> {
+    if (!this.legacyAdapter) throw new PublicToolError('Legacy Garmin read capability is unavailable')
+    const { startDate, endDate } = this.requireDateRange(args)
+    const points = await mapConcurrent(getDatesInRange(startDate, endDate), 4, async date => {
+      const raw = await this.dateRequestLimiter.run(() => read(date))
+      return { date, data: isNoData(raw) ? null : raw }
+    })
+    return dailySeriesEnvelope(points, this.options.accountRegion)
+  }
+
+  private requireDateRange(args: DateRangeArgs): { startDate: string; endDate: string } {
+    const startDate = validateDate('startDate', args.startDate ?? todayLocal())
+    const endDate = validateDate('endDate', args.endDate ?? startDate)
+    if (endDate < startDate) {
+      throw new PublicToolError(`Invalid date range: endDate must be on or after startDate`)
+    }
+    return { startDate, endDate }
+  }
+
+  private async readLegacyActivity(
+    activityId: string | undefined,
+    read: (activityId: string) => Promise<unknown>,
+  ): Promise<LegacyReadEnvelope<unknown>> {
+    if (!activityId?.trim()) throw new PublicToolError('Invalid activityId')
+    if (!this.legacyAdapter) {
+      throw new PublicToolError('Legacy Garmin read capability is unavailable')
+    }
+    return {
+      data: await read(activityId),
+      source: 'garmin',
+      region: this.options.accountRegion,
+      retrievedAt: new Date().toISOString(),
+      partial: false,
+    }
+  }
+
   async downloadActivityFit(
     args: DownloadActivityFitArgs,
   ): Promise<DownloadActivityFitResult> {
@@ -765,6 +956,16 @@ export class GarminToolService {
           .catch(() => undefined)
       }
     }
+  }
+
+  async createLegacyWorkout(args: LegacyWorkoutArgs): Promise<Record<string, unknown>> {
+    const definition = normalizeLegacyWorkout(args.workout)
+    return this.createWorkout({
+      ...definition,
+      confirmed: args.confirmed,
+      confirmationId: args.confirmationId,
+      idempotencyKey: args.idempotencyKey,
+    })
   }
 
   async getSleep(args: DateRangeArgs = {}): Promise<unknown> {

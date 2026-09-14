@@ -22,12 +22,16 @@ import {
 } from './tool-service'
 import type {
   ActivityArgs,
+  ActivityDetailArgs,
   BatchScheduleWorkoutArgs,
   CalendarRangeArgs,
   CreateAndScheduleWorkoutArgs,
   CreateWorkoutArgs,
   DateRangeArgs,
   DownloadActivityFitArgs,
+  FitnessStatsArgs,
+  GoalArgs,
+  LegacyWorkoutArgs,
   PaginationArgs,
   ReconcileWriteOperationArgs,
   ResumeWriteOperationArgs,
@@ -46,6 +50,26 @@ import { isGarminWriteError, WRITE_ERROR_CODES } from './write-operations/errors
 type ToolService = Pick<
   GarminToolService,
   | 'getActivities'
+  | 'getActivitySplits'
+  | 'getActivityHrZones'
+  | 'getActivityPolyline'
+  | 'getActivityWeather'
+  | 'getDailySummaryChart'
+  | 'getDailyIntensityMinutes'
+  | 'getDailyMovement'
+  | 'getDailyRespiration'
+  | 'getBodyBattery'
+  | 'getHrv'
+  | 'getSleepStats'
+  | 'getPersonalRecords'
+  | 'getGoals'
+  | 'getBadges'
+  | 'getHydration'
+  | 'getVo2max'
+  | 'getFitnessStats'
+  | 'getHrZonesConfig'
+  | 'getPowerZones'
+  | 'getTrainingReadiness'
   | 'getSleep'
   | 'getSteps'
   | 'getHeartRate'
@@ -54,6 +78,7 @@ type ToolService = Pick<
   | 'getProfile'
   | 'getRunningAdvice'
   | 'createWorkout'
+  | 'createLegacyWorkout'
   | 'scheduleWorkout'
   | 'batchScheduleWorkouts'
   | 'createAndScheduleWorkout'
@@ -85,6 +110,7 @@ const simpleWorkoutStepSchema = z.object({
   paceTo: z.string().regex(/^\d+:[0-5]\d$/).optional(),
   hrFrom: z.number().int().min(30).max(250).optional(),
   hrTo: z.number().int().min(30).max(250).optional(),
+  hrZone: z.number().int().min(1).max(5).optional(),
 }).strict()
 
 const repeatWorkoutStepSchema = z.object({
@@ -274,6 +300,76 @@ export function createMcpServer(
     (args: ActivityArgs) => invokeTool(() => service.getActivities(args)),
   )
 
+  const activityDetailSchema = {
+    activityId: z.string().min(1).max(128).describe(
+      'Garmin activity ID returned by get_garmin_activities.',
+    ),
+  }
+
+  register(
+    'get_garmin_activity_splits',
+    'Read activity split/lap details from Garmin; read-only and never changes the activity.',
+    activityDetailSchema,
+    (args: ActivityDetailArgs) => invokeTool(() => service.getActivitySplits(args)),
+    READ_ONLY_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'get_garmin_activity_hr_zones',
+    'Read activity heart-rate zone details from Garmin; read-only and never changes the activity.',
+    activityDetailSchema,
+    (args: ActivityDetailArgs) => invokeTool(() => service.getActivityHrZones(args)),
+    READ_ONLY_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'get_garmin_activity_polyline',
+    'Read the activity route polyline from Garmin; read-only and never changes the activity.',
+    activityDetailSchema,
+    (args: ActivityDetailArgs) => invokeTool(() => service.getActivityPolyline(args)),
+    READ_ONLY_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'get_garmin_activity_weather',
+    'Read activity weather details from Garmin; read-only and never changes the activity.',
+    activityDetailSchema,
+    (args: ActivityDetailArgs) => invokeTool(() => service.getActivityWeather(args)),
+    READ_ONLY_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'get_garmin_daily_summary_chart',
+    'Read daily wellness summary chart data for a local date range; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getDailySummaryChart(args)),
+  )
+
+  register(
+    'get_garmin_daily_intensity_minutes',
+    'Read daily intensity-minute data for a local date range; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getDailyIntensityMinutes(args)),
+  )
+
+  register(
+    'get_garmin_daily_movement',
+    'Read daily movement data for a local date range; missing days remain explicit; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getDailyMovement(args)),
+  )
+
+  register(
+    'get_garmin_daily_respiration',
+    'Read daily respiration data for a local date range; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getDailyRespiration(args)),
+  )
+
   register(
     'get_garmin_sleep',
     'Get sleep data for one date or an inclusive date range.',
@@ -317,6 +413,101 @@ export function createMcpServer(
     'Get an allow-listed Garmin profile summary.',
     {},
     () => invokeTool(() => service.getProfile()),
+  )
+
+  register(
+    'get_garmin_body_battery',
+    'Read the current Garmin Body Battery summary; read-only.',
+    {},
+    () => invokeTool(() => service.getBodyBattery()),
+  )
+
+  register(
+    'get_garmin_hrv',
+    'Read daily HRV data for a local date range; unavailable records remain explicit; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getHrv(args)),
+  )
+
+  register(
+    'get_garmin_sleep_stats',
+    'Read aggregate sleep statistics for an inclusive local date range; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getSleepStats(args)),
+  )
+
+  register(
+    'get_garmin_personal_records',
+    'Read Garmin personal records and history; read-only.',
+    {},
+    () => invokeTool(() => service.getPersonalRecords()),
+  )
+
+  register(
+    'get_garmin_goals',
+    'Read Garmin fitness goals by status; read-only.',
+    {
+      status: z.enum(['active', 'future', 'past']).optional().describe(
+        'Goal status; defaults to active.',
+      ),
+    },
+    (args: GoalArgs) => invokeTool(() => service.getGoals(args)),
+  )
+
+  register(
+    'get_garmin_badges',
+    'Read earned Garmin badges and achievements; read-only.',
+    {},
+    () => invokeTool(() => service.getBadges()),
+  )
+
+  register(
+    'get_garmin_hydration',
+    'Read daily Garmin hydration data for a local date range; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getHydration(args)),
+  )
+
+  register(
+    'get_garmin_vo2max',
+    'Read Garmin VO2 max estimates for a local date range; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getVo2max(args)),
+  )
+
+  register(
+    'get_garmin_fitness_stats',
+    'Read aggregated fitness statistics for an inclusive local date range; read-only.',
+    {
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      aggregation: z.enum(['daily', 'weekly', 'monthly']).optional(),
+      metric: z.enum(['duration', 'distance', 'calories']).optional(),
+    },
+    (args: FitnessStatsArgs) => invokeTool(() => service.getFitnessStats(args)),
+    READ_ONLY_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'get_garmin_hr_zones_config',
+    'Read the configured Garmin heart-rate zone boundaries; read-only.',
+    {},
+    () => invokeTool(() => service.getHrZonesConfig()),
+  )
+
+  register(
+    'get_garmin_power_zones',
+    'Read Garmin power-zone configuration for all sports; read-only.',
+    {},
+    () => invokeTool(() => service.getPowerZones()),
+  )
+
+  register(
+    'get_garmin_training_readiness',
+    'Read Garmin training-readiness data for a local date range; read-only.',
+    dateRangeSchema,
+    (args: DateRangeArgs) => invokeTool(() => service.getTrainingReadiness(args)),
   )
 
   register(
@@ -390,6 +581,22 @@ export function createMcpServer(
       idempotencyKey: idempotencyKeySchema,
     },
     (args: CreateWorkoutArgs) => invokeTool(() => service.createWorkout(args)),
+    WRITE_ANNOTATIONS,
+    false,
+  )
+
+  register(
+    'create_garmin_workout_legacy',
+    'Preview and, after explicit confirmation, create a workout from the old Garmin DTO shape. ' +
+      'The DTO is normalized into the new workout schema and uses the same journaled writer; ' +
+      'this tool never sends the old raw payload directly.',
+    {
+      workout: z.record(z.string(), z.unknown()).describe('Subset of the old Garmin workout DTO.'),
+      confirmed: z.boolean().optional().describe('Set true only after the returned preview is approved.'),
+      confirmationId: confirmationIdSchema.optional(),
+      idempotencyKey: idempotencyKeySchema,
+    },
+    (args: LegacyWorkoutArgs) => invokeTool(() => service.createLegacyWorkout(args)),
     WRITE_ANNOTATIONS,
     false,
   )

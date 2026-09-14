@@ -9,6 +9,9 @@ export { resolveFitDownloadDir } from './utils/path'
 
 export type GarminRegion = 'global' | 'cn'
 
+/** This distribution is intentionally bound to Garmin Connect China. */
+export const DEFAULT_GARMIN_REGION: GarminRegion = 'cn'
+
 export interface Config {
   /** Garmin account email address */
   username: string
@@ -18,7 +21,7 @@ export interface Config {
   sessionToken?: string
   /** Path to a JSON file containing a pre-authenticated session token */
   sessionTokenFile?: string
-  /** Garmin server region */
+  /** Internal server identity; the public runtime is fixed to China. */
   region: GarminRegion
   /** In-memory cache TTL in seconds (0 = disabled) */
   cacheTtl: number
@@ -28,7 +31,7 @@ export interface Config {
   logLevel: 'debug' | 'info' | 'warn' | 'error'
   /** Default activity detail: compact, or expanded full data with private fields filtered */
   activityDetail: 'compact' | 'full'
-  /** User-selected FIT parent; output is separated by Garmin region and account */
+  /** FIT parent; output is separated by the fixed Garmin region and account */
   fitDownloadDir: string
   /**
    * Absolute local directory holding the account-scoped write journal and
@@ -71,10 +74,15 @@ export function resolveConfig(
   const account = resolveAccountAlias(env)
   const username = preferNonEmpty(input.username, env.GARMIN_USERNAME).trim()
   if (!username) throw new PublicToolError('GARMIN_USERNAME is required')
-  const region = input.region ?? env.GARMIN_REGION ?? 'global'
-  if (region !== 'global' && region !== 'cn') {
-    throw new PublicToolError('GARMIN_REGION must be exactly global or cn')
+  if (env.GARMIN_REGION?.trim()) {
+    throw new PublicToolError(
+      'GARMIN_REGION is no longer supported; Garmin MCP is fixed to China (cn)',
+    )
   }
+  if (input.region !== undefined && input.region !== DEFAULT_GARMIN_REGION) {
+    throw new PublicToolError('region selection is no longer supported; Garmin MCP is fixed to China (cn)')
+  }
+  const region = DEFAULT_GARMIN_REGION
   const result = configSchema.safeParse({
     username,
     password: input.password?.trim() ? input.password : env.GARMIN_PASSWORD,

@@ -764,6 +764,32 @@ export class GarminClient {
     return this.getCachedForCurrentAuth(key, () => this.gc.getWorkouts(start, limit))
   }
 
+  /**
+   * Read one endpoint not yet exposed by garmin-connect 1.6.x.
+   *
+   * This is deliberately a GET-only escape hatch for read adapters. Paths
+   * must be relative Garmin API paths; writes remain behind their dedicated
+   * state machine and never use this method.
+   */
+  async getLegacy<T>(
+    path: string,
+    query?: Record<string, string | number>,
+  ): Promise<T> {
+    const normalizedPath = path.trim().replace(/^\/+/, '')
+    if (!normalizedPath || normalizedPath.includes('..') || /^https?:\/\//i.test(normalizedPath)) {
+      throw new PublicToolError('Invalid Garmin read endpoint')
+    }
+    const queryKey = query ? JSON.stringify(query) : ''
+    return this.getCachedForCurrentAuth(`legacy:${normalizedPath}:${queryKey}`, async () => {
+      const response = await this.gc.client.client.request({
+        method: 'GET',
+        url: `${this.gc.client.url.GC_API}/${normalizedPath}`,
+        ...(query ? { params: query } : {}),
+      })
+      return (response as { data: T }).data
+    })
+  }
+
   /** Read one workout before a calendar write so invalid library IDs fail safely. */
   async getWorkoutDetail(workoutId: string): Promise<unknown> {
     if (!workoutId.trim()) throw new PublicToolError('Invalid workoutId')

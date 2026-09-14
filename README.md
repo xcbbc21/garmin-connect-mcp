@@ -22,14 +22,14 @@ The install builds `lib/`. After a source update, run `npm ci` again. `npm run b
 
 ## First login
 
-In the source directory, set your account email and choose your Garmin region:
+In the source directory, set your account email. This distribution uses Garmin Connect China:
 
 ```bash
 export GARMIN_USERNAME='your@email.com'
-node lib/auth-cli.js serve --account personal-codex --region global --open
+node lib/auth-cli.js serve --account personal-codex --open
 ```
 
-Use `--region cn` for China. The command requires an explicit account alias and region. The same account alias, email and region must be used in the MCP configuration.
+The command requires an explicit account alias; no region option is needed. The same account alias and email must be used in the MCP configuration.
 
 Your system browser opens a short-lived local login page. Enter credentials only in the Garmin sign-in form, then confirm the returned account identity. The local page embeds Garmin's sign-in page; its outer address is a loopback URL, not a Garmin URL. If the form is absent, do not enter credentials.
 
@@ -47,7 +47,7 @@ Every client runs the same program:
 
 - command: the absolute path to your Node executable (`command -v node` on macOS/Linux);
 - argument: the absolute path to this checkout's `lib/mcp.js`;
-- environment: `GARMIN_USERNAME`, `GARMIN_REGION`, `GARMIN_ACCOUNT` and your session-file path.
+- environment: `GARMIN_USERNAME`, `GARMIN_ACCOUNT` and your session-file path. Garmin Connect China is selected automatically.
 
 See [client setup](docs/client-setup.md) for Codex, Claude Desktop, Claude Code, Cursor, Windsurf, WorkBuddy and ZCode examples. These are configuration examples; protocol tests do not establish end-to-end validation of every desktop application.
 
@@ -57,20 +57,22 @@ If a client supports MCP URL elicitation, missing/expired sessions can prompt th
 
 | Capability | MCP tools |
 | --- | --- |
-| Activities and wellness | `get_garmin_activities`, `get_garmin_sleep`, `get_garmin_steps`, `get_garmin_heart_rate`, `get_garmin_weight` |
-| Account and templates | `get_garmin_profile`, `get_garmin_workouts` |
+| Activities and wellness | `get_garmin_activities`, `get_garmin_activity_splits`, `get_garmin_activity_hr_zones`, `get_garmin_activity_polyline`, `get_garmin_activity_weather`, `get_garmin_sleep`, `get_garmin_steps`, `get_garmin_heart_rate`, `get_garmin_weight` |
+| Daily wellness | `get_garmin_daily_summary_chart`, `get_garmin_daily_intensity_minutes`, `get_garmin_daily_movement`, `get_garmin_daily_respiration` |
+| Recovery and sleep | `get_garmin_body_battery`, `get_garmin_hrv`, `get_garmin_sleep_stats` |
+| Fitness and profile | `get_garmin_profile`, `get_garmin_personal_records`, `get_garmin_goals`, `get_garmin_badges`, `get_garmin_hydration`, `get_garmin_vo2max`, `get_garmin_fitness_stats`, `get_garmin_hr_zones_config`, `get_garmin_power_zones`, `get_garmin_training_readiness`, `get_garmin_workouts` |
 | Running guidance | `get_running_skill_advice` |
-| Create a template | `create_garmin_workout` |
+| Create a template | `create_garmin_workout`, `create_garmin_workout_legacy` |
 | Calendar scheduling | `schedule_garmin_workout`, `batch_schedule_garmin_workouts`, `create_and_schedule_garmin_workout`, `unschedule_garmin_workout` |
 | Activity export | `download_garmin_activity_fit` |
 | Calendar read | `get_garmin_calendar` |
 | Write inspection and recovery | `get_garmin_write_operation`, `reconcile_garmin_write_operation`, `resume_garmin_write_operation` |
 
-There are 18 tools. Workout-library templates describe **what to do**; Calendar entries describe **when to do it**. The guidance tool offers training-method knowledge and athlete-intake checks; it does not independently generate and execute a complete training plan.
+There are 39 tools. Workout-library templates describe **what to do**; Calendar entries describe **when to do it**. The guidance tool offers training-method knowledge and athlete-intake checks; it does not independently generate and execute a complete training plan.
 
 Workout creation and Calendar writes use two calls: first preview, then repeat the identical request with `confirmed: true` and the returned `confirmationId` after the user approves. IDs expire after ten minutes and cannot be reused. A `confirmationId` is `<operationId>:<previewRevision>`: because the revision and its deadline are stored with the operation, an unexpired handle still resolves after a restart, and re-previewing invalidates every earlier handle. The **write journal is durable** — Calendar results are recorded on disk and survive a restart. See [write safety and recovery](docs/calendar-write-recovery.md).
 
-All five write tools — `create_garmin_workout`, `schedule_garmin_workout`, `batch_schedule_garmin_workouts`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout` — also accept an optional `idempotencyKey` (1–128 characters from `A-Z a-z 0-9 . _ : -`). It is a request label, not a permission token: reusing the same key with the same request returns the recorded receipt instead of writing again, and a different key never bypasses an in-flight or unknown write. `confirmationId` and `idempotencyKey` are never interchangeable.
+All six write tools — `create_garmin_workout`, `create_garmin_workout_legacy`, `schedule_garmin_workout`, `batch_schedule_garmin_workouts`, `create_and_schedule_garmin_workout` and `unschedule_garmin_workout` — also accept an optional `idempotencyKey` (1–128 characters from `A-Z a-z 0-9 . _ : -`). It is a request label, not a permission token: reusing the same key with the same request returns the recorded receipt instead of writing again, and a different key never bypasses an in-flight or unknown write. `confirmationId` and `idempotencyKey` are never interchangeable.
 
 Calendar writes are recorded under an account-scoped local directory, `GARMIN_STATE_DIR` (absolute, local, private; default `<platform config root>/garmin-connect-mcp/state`). It is independent of your login alias, so two aliases for the same account share one recovery record while session files stay separate. Back it up; deleting it destroys the records that prevent duplicate scheduling.
 
